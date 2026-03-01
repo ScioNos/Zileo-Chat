@@ -18,7 +18,7 @@
 Copyright 2025 Zileo-Chat-3 Contributors
 SPDX-License-Identifier: Apache-2.0
 
-WorkflowSidebar Component - Phase C Component Extraction
+WorkflowSidebar Component
 Left sidebar for workflow management with search and CRUD operations.
 -->
 
@@ -36,11 +36,17 @@ Left sidebar for workflow management with search and CRUD operations.
 		workflows: Workflow[];
 		selectedWorkflowId: string | null;
 		searchFilter?: string;
+		/** Error message from loadWorkflows failure */
+		error?: string | null;
+		/** Whether workflows are currently loading */
+		loading?: boolean;
 		onsearchchange?: (value: string) => void;
 		onselect: (workflow: Workflow) => void;
 		oncreate: () => void;
 		ondelete: (workflow: Workflow) => void;
 		onrename?: (workflow: Workflow, newName: string) => void;
+		/** Retry handler for failed loads */
+		onretry?: () => void;
 		/** Set of workflow IDs currently running in the background */
 		runningWorkflowIds?: Set<string>;
 		/** Set of workflow IDs that recently completed */
@@ -54,11 +60,14 @@ Left sidebar for workflow management with search and CRUD operations.
 		workflows,
 		selectedWorkflowId,
 		searchFilter = $bindable(''),
+		error = null,
+		loading = false,
 		onsearchchange,
 		onselect,
 		oncreate,
 		ondelete,
 		onrename,
+		onretry,
 		runningWorkflowIds = new Set<string>(),
 		recentlyCompletedIds = new Set<string>(),
 		questionPendingIds = new Set<string>()
@@ -74,12 +83,6 @@ Left sidebar for workflow management with search and CRUD operations.
 		onsearchchange?.(value);
 	}, 300);
 
-	// Filter workflows locally for display
-	const filteredWorkflows = $derived.by(() => {
-		if (!searchFilter.trim()) return workflows;
-		const filter = searchFilter.toLowerCase();
-		return workflows.filter((w) => w.name.toLowerCase().includes(filter));
-	});
 </script>
 
 <Sidebar bind:collapsed={collapsed}>
@@ -127,12 +130,15 @@ Left sidebar for workflow management with search and CRUD operations.
 
 	{#snippet nav(isCollapsed)}
 		<WorkflowList
-			workflows={filteredWorkflows}
+			{workflows}
 			selectedId={selectedWorkflowId ?? undefined}
 			collapsed={isCollapsed}
+			{error}
+			{loading}
 			{onselect}
 			{ondelete}
 			{onrename}
+			{onretry}
 			{runningWorkflowIds}
 			{recentlyCompletedIds}
 			{questionPendingIds}

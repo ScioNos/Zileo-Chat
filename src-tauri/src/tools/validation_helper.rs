@@ -12,25 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Validation helper for sub-agent operations.
+//! Validation helper for human-in-the-loop approval.
 //!
-//! Provides human-in-the-loop validation for sub-agent tools:
-//! - SpawnAgentTool
-//! - DelegateTaskTool
-//! - ParallelTasksTool
+//! Provides validation for all operation types:
+//! - Sub-agent: SpawnAgentTool, DelegateTaskTool, ParallelTasksTool
+//! - Tool: Local tool execution (MemoryTool, TodoTool, etc.)
+//! - MCP: MCP server tool calls
 //!
 //! # Flow
 //!
-//! 1. Tool calls `request_validation()` before executing operation
-//! 2. Helper creates a `ValidationRequest` in the database
-//! 3. Helper emits `validation_required` Tauri event
-//! 4. Helper waits for approval/rejection (polling with timeout)
-//! 5. Helper returns result to tool
+//! 1. Caller invokes the appropriate `request_*_validation()` method
+//! 2. Helper checks `ValidationSettings` to determine if validation is needed
+//! 3. If needed, creates a `ValidationRequest` in the database
+//! 4. Emits `validation_required` Tauri event to frontend
+//! 5. Waits for approval/rejection (polling with timeout)
+//! 6. Returns result to caller
 //!
-//! # Events
-//!
-//! - `validation_required`: Emitted when validation is needed
-//! - `validation_response`: Listened for approval/rejection from frontend
+//! All validation types share a single flow via `create_and_wait_validation()`.
 
 use crate::db::DBClient;
 use crate::models::streaming::{events, SubAgentOperationType, ValidationRequiredEvent};
@@ -47,39 +45,118 @@ use tauri::{AppHandle, Emitter};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// Safely truncates a string to a maximum number of characters.
+use super::utils::safe_truncate;
+
+/// Validates a trimmed name with configurable field name and max length.
 ///
-/// This function handles multi-byte UTF-8 characters correctly by working
-/// with char boundaries instead of byte positions.
+/// Centralized validation extracted from agent.rs and mcp.rs.
+/// Trims whitespace, checks emptiness, length, and control characters.
 ///
 /// # Arguments
-/// * `s` - The string to truncate
-/// * `max_chars` - Maximum number of characters to keep
-/// * `ellipsis` - Whether to append "..." if truncated
+/// * `value` - The raw name string to validate
+/// * `field_name` - Human-readable field name for error messages (e.g. "Agent name")
+/// * `max_len` - Maximum allowed length in bytes
 ///
 /// # Returns
-/// The truncated string
-pub fn safe_truncate(s: &str, max_chars: usize, ellipsis: bool) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        if ellipsis {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        }
+/// The trimmed name or an error message
+pub fn validate_trimmed_name(
+    value: &str,
+    field_name: &str,
+    max_len: usize,
+) -> Result<String, String> {
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        return Err(format!("{} cannot be empty", field_name));
     }
+
+    if trimmed.len() > max_len {
+        return Err(format!(
+            "{} exceeds maximum length of {} characters",
+            field_name, max_len
+        ));
+    }
+
+    if trimmed.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(format!("{} cannot contain control characters", field_name));
+    }
+
+    Ok(trimmed.to_string())
 }
 
-/// Validation helper for sub-agent operations.
+/// Checks if validation is required based on settings for any operation type.
 ///
-/// Handles the full validation flow:
-/// 1. Creates validation request in database
-/// 2. Emits Tauri event to frontend
-/// 3. Waits for approval/rejection
-/// 4. Returns result
+/// Pure logic function (no I/O) that evaluates the validation mode, operation type,
+/// and risk level to determine if human approval is needed.
+///
+/// # Arguments
+/// * `settings` - Current validation settings
+/// * `validation_type` - Type of operation (SubAgent, Tool, Mcp, etc.)
+/// * `risk_level` - Risk level of the operation
+///
+/// # Returns
+/// `true` if validation is required, `false` if the operation can proceed automatically.
+fn should_require_validation(
+    settings: &ValidationSettings,
+    validation_type: &ValidationType,
+    risk_level: &RiskLevel,
+) -> bool {
+    // Check mode first
+    match settings.mode {
+        ValidationMode::Auto => {
+            // In auto mode, only validate if always_confirm_high is set AND risk is high
+            if settings.risk_thresholds.always_confirm_high
+                && (*risk_level == RiskLevel::High || *risk_level == RiskLevel::Critical)
+            {
+                info!("Auto mode but high/critical risk requires confirmation");
+                return true;
+            }
+            info!("Auto mode: skipping validation");
+            return false;
+        }
+        ValidationMode::Manual => {
+            // Manual mode: always validate unless auto_approve_low is set AND risk is low
+            if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
+                info!("Manual mode but auto-approving low risk operation");
+                return false;
+            }
+            return true;
+        }
+        ValidationMode::Selective => {
+            // Selective mode: check operation type below
+        }
+    }
+
+    // Selective mode: check if operation type requires validation
+    let type_requires_validation = match validation_type {
+        ValidationType::SubAgent => settings.selective_config.sub_agents,
+        ValidationType::Tool => settings.selective_config.tools,
+        ValidationType::Mcp => settings.selective_config.mcp,
+        ValidationType::FileOp => settings.selective_config.file_ops,
+        ValidationType::DbOp => settings.selective_config.db_ops,
+    };
+
+    if !type_requires_validation {
+        info!(
+            validation_type = %validation_type,
+            "Selective mode: operation type does not require validation"
+        );
+        return false;
+    }
+
+    // Check risk thresholds
+    if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
+        info!("Auto-approving low risk operation");
+        return false;
+    }
+
+    true
+}
+
+/// Validation helper for human-in-the-loop approval.
+///
+/// Handles the full validation flow for sub-agent, tool, and MCP operations.
+/// All validation types share a single code path via `create_and_wait_validation()`.
 pub struct ValidationHelper {
     /// Database client for persistence
     db: Arc<DBClient>,
@@ -124,88 +201,9 @@ impl ValidationHelper {
         ValidationSettings::default()
     }
 
-    /// Checks if validation is required based on settings for sub-agent operations.
-    fn needs_validation(
-        &self,
-        settings: &ValidationSettings,
-        operation_type: &SubAgentOperationType,
-        risk_level: &RiskLevel,
-    ) -> bool {
-        // Delegate to generic method
-        let validation_type = match operation_type {
-            SubAgentOperationType::Spawn => ValidationType::SubAgent,
-            SubAgentOperationType::Delegate => ValidationType::SubAgent,
-            SubAgentOperationType::ParallelBatch => ValidationType::SubAgent,
-        };
-        self.needs_validation_for_type(settings, &validation_type, risk_level)
-    }
-
-    /// Checks if validation is required based on settings for any operation type.
-    ///
-    /// This is the generic validation check that supports all operation types:
-    /// - SubAgent: Spawn, Delegate, ParallelBatch operations
-    /// - Tool: Local tool execution (MemoryTool, TodoTool, etc.)
-    /// - Mcp: MCP server tool calls
-    fn needs_validation_for_type(
-        &self,
-        settings: &ValidationSettings,
-        validation_type: &ValidationType,
-        risk_level: &RiskLevel,
-    ) -> bool {
-        // Check mode first
-        match settings.mode {
-            ValidationMode::Auto => {
-                // In auto mode, only validate if always_confirm_high is set AND risk is high
-                if settings.risk_thresholds.always_confirm_high && *risk_level == RiskLevel::High {
-                    info!("Auto mode but high risk requires confirmation");
-                    return true;
-                }
-                info!("Auto mode: skipping validation");
-                return false;
-            }
-            ValidationMode::Manual => {
-                // Manual mode: always validate unless auto_approve_low is set AND risk is low
-                if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
-                    info!("Manual mode but auto-approving low risk operation");
-                    return false;
-                }
-                return true;
-            }
-            ValidationMode::Selective => {
-                // Selective mode: check operation type below
-            }
-        }
-
-        // Selective mode: check if operation type requires validation
-        let type_requires_validation = match validation_type {
-            ValidationType::SubAgent => settings.selective_config.sub_agents,
-            ValidationType::Tool => settings.selective_config.tools,
-            ValidationType::Mcp => settings.selective_config.mcp,
-            ValidationType::FileOp => settings.selective_config.file_ops,
-            ValidationType::DbOp => settings.selective_config.db_ops,
-        };
-
-        if !type_requires_validation {
-            info!(
-                validation_type = %validation_type,
-                "Selective mode: operation type does not require validation"
-            );
-            return false;
-        }
-
-        // Check risk thresholds
-        if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
-            info!("Auto-approving low risk operation");
-            return false;
-        }
-
-        true
-    }
-
     /// Requests validation for a sub-agent operation.
     ///
-    /// First checks ValidationSettings to determine if validation is needed.
-    /// Creates a validation request, emits event to frontend, and waits for response.
+    /// Checks ValidationSettings, then delegates to `create_and_wait_validation()`.
     ///
     /// # Arguments
     /// * `workflow_id` - Associated workflow ID
@@ -227,10 +225,9 @@ impl ValidationHelper {
         details: Value,
         risk_level: RiskLevel,
     ) -> Result<(), ToolError> {
-        // 0. Load validation settings and check if validation is needed
         let settings = self.load_validation_settings().await;
 
-        if !self.needs_validation(&settings, &operation_type, &risk_level) {
+        if !should_require_validation(&settings, &ValidationType::SubAgent, &risk_level) {
             info!(
                 workflow_id = %workflow_id,
                 operation_type = %operation_type,
@@ -240,7 +237,6 @@ impl ValidationHelper {
             return Ok(());
         }
 
-        // 1. Generate validation request ID
         let validation_id = Uuid::new_v4().to_string();
 
         info!(
@@ -250,65 +246,15 @@ impl ValidationHelper {
             "Creating validation request for sub-agent operation"
         );
 
-        // 2. Create validation request in database
-        let validation_create = ValidationRequestCreate::new(
-            workflow_id.to_string(),
+        self.create_and_wait_validation(
+            &validation_id,
+            workflow_id,
             ValidationType::SubAgent,
-            operation_description.to_string(),
-            details.clone(),
-            risk_level.clone(),
-            ValidationStatus::Pending,
-        );
-
-        // Use db.create() which properly handles serialization for SurrealDB
-        self.db
-            .create("validation_request", &validation_id, validation_create)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to create validation request in database");
-                ToolError::DatabaseError(format!("Failed to create validation request: {}", e))
-            })?;
-
-        // 3. Emit validation_required event to frontend
-        if let Some(ref app_handle) = self.app_handle {
-            let event = ValidationRequiredEvent {
-                validation_id: validation_id.clone(),
-                workflow_id: workflow_id.to_string(),
-                operation_type: operation_type.clone(),
-                operation: operation_description.to_string(),
-                risk_level: risk_level.to_string(),
-                details,
-            };
-
-            if let Err(e) = app_handle.emit(events::VALIDATION_REQUIRED, &event) {
-                warn!(error = %e, "Failed to emit validation_required event");
-            } else {
-                debug!(validation_id = %validation_id, "Emitted validation_required event");
-            }
-        } else {
-            warn!("No app handle available, skipping event emission");
-        }
-
-        // 4. Wait for validation response (polling with timeout)
-        let result = self
-            .wait_for_validation(&validation_id, Duration::from_secs(VALIDATION_TIMEOUT_SECS))
-            .await;
-
-        // 5. Return result
-        match result {
-            Ok(true) => {
-                info!(validation_id = %validation_id, "Validation approved");
-                Ok(())
-            }
-            Ok(false) => {
-                info!(validation_id = %validation_id, "Validation rejected");
-                Err(ToolError::PermissionDenied(format!(
-                    "Sub-agent operation was rejected by user. Operation: {}",
-                    operation_description
-                )))
-            }
-            Err(e) => Err(e),
-        }
+            operation_description,
+            details,
+            risk_level,
+        )
+        .await
     }
 
     /// Waits for validation response by polling the database.
@@ -467,7 +413,7 @@ impl ValidationHelper {
         let settings = self.load_validation_settings().await;
         let risk_level = RiskLevel::Low; // Local tools are generally low risk
 
-        if !self.needs_validation_for_type(&settings, &ValidationType::Tool, &risk_level) {
+        if !should_require_validation(&settings, &ValidationType::Tool, &risk_level) {
             info!(
                 workflow_id = %workflow_id,
                 tool_name = %tool_name,
@@ -533,7 +479,7 @@ impl ValidationHelper {
         let settings = self.load_validation_settings().await;
         let risk_level = RiskLevel::Medium; // MCP calls are medium risk (external system)
 
-        if !self.needs_validation_for_type(&settings, &ValidationType::Mcp, &risk_level) {
+        if !should_require_validation(&settings, &ValidationType::Mcp, &risk_level) {
             info!(
                 workflow_id = %workflow_id,
                 server_name = %server_name,
@@ -611,15 +557,14 @@ impl ValidationHelper {
 
         // Emit validation_required event to frontend
         if let Some(ref app_handle) = self.app_handle {
-            // Create a generic validation event
-            let event = serde_json::json!({
-                "validation_id": validation_id,
-                "workflow_id": workflow_id,
-                "validation_type": validation_type.to_string(),
-                "operation": description,
-                "risk_level": risk_level.to_string(),
-                "details": details
-            });
+            let event = ValidationRequiredEvent {
+                validation_id: validation_id.to_string(),
+                workflow_id: workflow_id.to_string(),
+                validation_type: validation_type.to_string(),
+                operation: description.to_string(),
+                risk_level: risk_level.to_string(),
+                details: details.clone(),
+            };
 
             if let Err(e) = app_handle.emit(events::VALIDATION_REQUIRED, &event) {
                 warn!(error = %e, "Failed to emit validation_required event");
@@ -655,6 +600,184 @@ impl ValidationHelper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{RiskThresholdConfig, SelectiveValidationConfig};
+
+    // =========================================================================
+    // should_require_validation tests (SA-012 F8 refactoring coverage)
+    // =========================================================================
+
+    /// Helper to create ValidationSettings with custom mode, thresholds, and selective config.
+    fn make_settings(
+        mode: ValidationMode,
+        always_confirm_high: bool,
+        auto_approve_low: bool,
+        selective_config: SelectiveValidationConfig,
+    ) -> ValidationSettings {
+        ValidationSettings {
+            mode,
+            risk_thresholds: RiskThresholdConfig {
+                always_confirm_high,
+                auto_approve_low,
+            },
+            selective_config,
+            ..Default::default()
+        }
+    }
+
+    /// Auto mode skips validation for low/medium risk
+    #[test]
+    fn test_should_require_validation_auto_mode_skips() {
+        let settings = make_settings(
+            ValidationMode::Auto,
+            false,
+            false,
+            SelectiveValidationConfig::default(),
+        );
+
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::SubAgent,
+            &RiskLevel::Low
+        ));
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Medium
+        ));
+    }
+
+    /// Auto mode with always_confirm_high validates high and critical risk
+    #[test]
+    fn test_should_require_validation_auto_mode_confirms_high() {
+        let settings = make_settings(
+            ValidationMode::Auto,
+            true,
+            false,
+            SelectiveValidationConfig::default(),
+        );
+
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::SubAgent,
+            &RiskLevel::High
+        ));
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::Mcp,
+            &RiskLevel::Critical
+        ));
+        // Medium risk is still skipped in auto mode
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Medium
+        ));
+    }
+
+    /// Manual mode validates everything except auto-approved low risk
+    #[test]
+    fn test_should_require_validation_manual_mode() {
+        let settings = make_settings(
+            ValidationMode::Manual,
+            false,
+            true,
+            SelectiveValidationConfig::default(),
+        );
+
+        // Low risk is auto-approved
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Low
+        ));
+        // Medium and high require validation
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::SubAgent,
+            &RiskLevel::Medium
+        ));
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::Mcp,
+            &RiskLevel::High
+        ));
+    }
+
+    /// Selective mode respects per-type configuration
+    #[test]
+    fn test_should_require_validation_selective_mode() {
+        let settings = make_settings(
+            ValidationMode::Selective,
+            false,
+            false,
+            SelectiveValidationConfig {
+                sub_agents: true,
+                tools: false,
+                mcp: true,
+                file_ops: false,
+                db_ops: false,
+            },
+        );
+
+        // sub_agents enabled -> validates
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::SubAgent,
+            &RiskLevel::Medium
+        ));
+        // tools disabled -> skips
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Medium
+        ));
+        // mcp enabled -> validates
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::Mcp,
+            &RiskLevel::Medium
+        ));
+        // file_ops disabled -> skips
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::FileOp,
+            &RiskLevel::High
+        ));
+    }
+
+    /// Selective mode with auto_approve_low skips low risk even for enabled types
+    #[test]
+    fn test_should_require_validation_selective_auto_approve_low() {
+        let settings = make_settings(
+            ValidationMode::Selective,
+            false,
+            true,
+            SelectiveValidationConfig {
+                sub_agents: true,
+                tools: true,
+                mcp: true,
+                file_ops: true,
+                db_ops: true,
+            },
+        );
+
+        // Low risk auto-approved even though type is enabled
+        assert!(!should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Low
+        ));
+        // Medium risk still validates
+        assert!(should_require_validation(
+            &settings,
+            &ValidationType::Tool,
+            &RiskLevel::Medium
+        ));
+    }
+
+    // =========================================================================
+    // Existing tests
+    // =========================================================================
 
     #[test]
     fn test_determine_risk_level() {
@@ -728,32 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_truncate_utf8_multibyte() {
-        // Test with French accented characters
-        let text = "Ceci est un texte en francais avec des accents: e, a, o, i, u";
-        let truncated = safe_truncate(text, 50, true);
-        assert!(truncated.ends_with("..."));
-        assert!(!truncated.contains("\\u")); // No escaped unicode
-
-        // Test with text where byte 100 is inside a multi-byte char
-        // This is the exact scenario that caused the panic
-        let mission_text = "# MISSION\nRechercher sources fiables sur ACTUALITE pour: Mistral AI nouveautes 2025 actualites recentes lancements produits";
-        let truncated = safe_truncate(mission_text, 100, true);
-        assert!(truncated.ends_with("..."));
-
-        // Test with emojis (4-byte UTF-8)
-        let emoji_text =
-            "Test avec emojis X et Y et beaucoup de texte apres pour depasser la limite";
-        let truncated = safe_truncate(emoji_text, 30, true);
-        assert!(truncated.ends_with("..."));
-
-        // Test short text (no truncation needed)
-        let short_text = "Court";
-        let not_truncated = safe_truncate(short_text, 100, false);
-        assert_eq!(not_truncated, "Court");
-    }
-
-    #[test]
     fn test_parallel_details_utf8_prompt() {
         // Regression test for panic at line 420
         let tasks = vec![
@@ -765,6 +862,71 @@ mod tests {
         let task = &details["tasks"].as_array().unwrap()[0];
         let preview = task["prompt_preview"].as_str().unwrap();
         assert!(preview.ends_with("..."));
+    }
+
+    // Tests for validate_trimmed_name
+
+    #[test]
+    fn test_validate_trimmed_name_valid() {
+        let result = validate_trimmed_name("My Agent", "agent name", 64);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "My Agent");
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_trims_whitespace() {
+        let result = validate_trimmed_name("  My Agent  ", "agent name", 64);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "My Agent");
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_empty() {
+        let result = validate_trimmed_name("", "agent name", 64);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_whitespace_only() {
+        let result = validate_trimmed_name("   ", "agent name", 64);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_too_long() {
+        let long = "a".repeat(65);
+        let result = validate_trimmed_name(&long, "agent name", 64);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum length"));
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_exact_max() {
+        let exact = "a".repeat(64);
+        let result = validate_trimmed_name(&exact, "agent name", 64);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_control_chars() {
+        let result = validate_trimmed_name("agent\x00name", "agent name", 64);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("control characters"));
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_allows_newline() {
+        let result = validate_trimmed_name("agent\nname", "agent name", 64);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_trimmed_name_utf8() {
+        let result = validate_trimmed_name("Mon Agent Francais", "agent name", 64);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Mon Agent Francais");
     }
 
     #[test]

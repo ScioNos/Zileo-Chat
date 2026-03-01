@@ -24,6 +24,7 @@ Displays memories with filtering, search, and action buttons.
 
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
+	import { save } from '@tauri-apps/plugin-dialog';
 	import { Button, Card, Input, Select, Badge, StatusIndicator, Modal } from '$lib/components/ui';
 	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type { Memory, MemoryType, MemorySearchResult } from '$types/memory';
@@ -31,7 +32,8 @@ Displays memories with filtering, search, and action buttons.
 	import MemoryForm from './MemoryForm.svelte';
 	import { Trash2, Edit, Eye, Download, Upload, RefreshCw } from '@lucide/svelte';
 	import { i18n, t } from '$lib/i18n';
-	// OPT-SCROLL-7: Virtual scrolling for large memory lists
+	import { getErrorMessage } from '$lib/utils/error';
+	// Virtual scrolling for large memory lists
 	import SvelteVirtualList from '@humanspeak/svelte-virtual-list';
 
 	/** Props */
@@ -125,7 +127,7 @@ Displays memories with filtering, search, and action buttons.
 			// Pass workflowId as null to get ALL memories (both workflow-scoped and general)
 			memories = await invoke<Memory[]>('list_memories', { typeFilter: filter, workflowId: null });
 		} catch (err) {
-			message = { type: 'error', text: t('memory_failed_load').replace('{error}', String(err)) };
+			message = { type: 'error', text: t('memory_failed_load').replace('{error}', getErrorMessage(err)) };
 		} finally {
 			loading = false;
 		}
@@ -153,7 +155,7 @@ Displays memories with filtering, search, and action buttons.
 			});
 			memories = results.map((r) => r.memory);
 		} catch (err) {
-			message = { type: 'error', text: t('memory_search_failed').replace('{error}', String(err)) };
+			message = { type: 'error', text: t('memory_search_failed').replace('{error}', getErrorMessage(err)) };
 		} finally {
 			searching = false;
 		}
@@ -225,14 +227,14 @@ Displays memories with filtering, search, and action buttons.
 			message = { type: 'success', text: t('memory_deleted') };
 			onchange?.();
 		} catch (err) {
-			message = { type: 'error', text: t('memory_failed_delete_memory').replace('{error}', String(err)) };
+			message = { type: 'error', text: t('memory_failed_delete_memory').replace('{error}', getErrorMessage(err)) };
 		} finally {
 			actionLoading = false;
 		}
 	}
 
 	/**
-	 * Exports memories
+	 * Exports memories using native Tauri save dialog
 	 */
 	async function handleExport(format: 'json' | 'csv'): Promise<void> {
 		actionLoading = true;
@@ -243,20 +245,25 @@ Displays memories with filtering, search, and action buttons.
 				typeFilter: typeFilter || undefined
 			});
 
-			// Create download link
-			const blob = new Blob([data], { type: format === 'json' ? 'application/json' : 'text/csv' });
-			const url = URL.createObjectURL(blob);
-			const a = document.createElement('a');
-			a.href = url;
-			a.download = `memories-${new Date().toISOString().slice(0, 10)}.${format}`;
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
-			URL.revokeObjectURL(url);
+			const defaultFilename = `memories-${new Date().toISOString().slice(0, 10)}.${format}`;
+			const filterName = format === 'json' ? 'JSON' : 'CSV';
+
+			const filePath = await save({
+				defaultPath: defaultFilename,
+				filters: [{ name: filterName, extensions: [format] }],
+				title: t('memory_export_title')
+			});
+
+			if (!filePath) {
+				actionLoading = false;
+				return;
+			}
+
+			await invoke('save_export_to_file', { path: filePath, content: data });
 
 			message = { type: 'success', text: t('memory_exported').replace('{count}', String(memories.length)) };
 		} catch (err) {
-			message = { type: 'error', text: t('memory_export_failed').replace('{error}', String(err)) };
+			message = { type: 'error', text: t('memory_export_failed').replace('{error}', getErrorMessage(err)) };
 		} finally {
 			actionLoading = false;
 		}
@@ -292,7 +299,7 @@ Displays memories with filtering, search, and action buttons.
 					};
 				}
 			} catch (err) {
-				message = { type: 'error', text: t('memory_import_failed_generic').replace('{error}', String(err)) };
+				message = { type: 'error', text: t('memory_import_failed_generic').replace('{error}', getErrorMessage(err)) };
 			} finally {
 				actionLoading = false;
 			}
@@ -323,7 +330,7 @@ Displays memories with filtering, search, and action buttons.
 			};
 			onchange?.();
 		} catch (err) {
-			message = { type: 'error', text: t('memory_regenerate_failed').replace('{error}', String(err)) };
+			message = { type: 'error', text: t('memory_regenerate_failed').replace('{error}', getErrorMessage(err)) };
 		} finally {
 			actionLoading = false;
 		}
@@ -431,7 +438,7 @@ Displays memories with filtering, search, and action buttons.
 			{/snippet}
 		</Card>
 	{:else}
-		<!-- OPT-SCROLL-7: Virtual scrolling for large memory lists -->
+		<!-- Virtual scrolling for large memory lists -->
 		<div class="virtual-table-container">
 			<!-- Sticky header row (outside virtual list) -->
 			<div class="virtual-table-header">
@@ -633,7 +640,7 @@ Displays memories with filtering, search, and action buttons.
 		margin: 0;
 	}
 
-	/* Note: Old table styles removed (OPT-SCROLL-7) - replaced by virtual table */
+	/* Note: Old table styles removed - replaced by virtual table */
 
 	.scope-badge {
 		display: inline-block;
@@ -650,7 +657,7 @@ Displays memories with filtering, search, and action buttons.
 		color: var(--color-accent);
 	}
 
-	/* Note: .actions-cell removed (OPT-SCROLL-7) - replaced by .cell-actions */
+	/* Note: .actions-cell removed - replaced by .cell-actions */
 
 	.action-btn {
 		display: flex;
@@ -703,7 +710,7 @@ Displays memories with filtering, search, and action buttons.
 	}
 
 	/* ============================================
-	   OPT-SCROLL-7: Virtual Table Styles
+	   Virtual Table Styles
 	   Uses CSS Grid to simulate table layout with virtual scrolling
 	   ============================================ */
 
@@ -742,6 +749,7 @@ Displays memories with filtering, search, and action buttons.
 	.virtual-table-body {
 		height: 400px;
 		overflow: hidden;
+		contain: layout style; /* SA-017/PERF-4: Isolate virtual list layout */
 	}
 
 	/* Virtual list wrapper styles - replicate library's positioning logic */
@@ -800,7 +808,7 @@ Displays memories with filtering, search, and action buttons.
 		gap: 0;
 		border-bottom: 1px solid var(--color-border-light);
 		font-size: var(--font-size-sm);
-		transition: background-color 0.15s ease;
+		/* SA-017/PERF-4: Removed transition - instant hover is more responsive during scroll */
 	}
 
 	.virtual-row:hover {
@@ -860,7 +868,7 @@ Displays memories with filtering, search, and action buttons.
 			justify-content: center;
 		}
 
-		/* OPT-SCROLL-7: Responsive virtual table */
+		/* Responsive virtual table */
 		.virtual-table-header,
 		.virtual-row {
 			grid-template-columns: 80px 80px 1fr 100px 80px;

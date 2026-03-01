@@ -37,24 +37,25 @@ use crate::mcp::{
     MCPResourceDefinition, MCPResourcesListResult, MCPResult, MCPToolCallParams,
     MCPToolCallResponse, MCPToolDefinition, MCPToolsListResult,
 };
+use crate::models::custom_provider::check_http_warning;
 use crate::models::mcp::{MCPResource, MCPServerConfig, MCPServerStatus, MCPTool};
-use once_cell::sync::Lazy;
 use reqwest::Client;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Default timeout for HTTP operations (30 seconds)
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30000;
 
-/// Shared HTTP client for connection pooling (OPT-8: migrated from lazy_static to once_cell)
+/// Shared HTTP client for connection pooling
 ///
 /// Reuses TCP/TLS connections across all MCPHttpHandle instances.
 /// Configured with:
 /// - 5 idle connections per host
 /// - 90 second idle timeout
 /// - 30 second request timeout
-static SHARED_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
+static SHARED_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .pool_max_idle_per_host(5)
         .pool_idle_timeout(Duration::from_secs(90))
@@ -155,6 +156,16 @@ impl MCPHttpHandle {
                     base_url
                 ),
             });
+        }
+
+        if let Some(warning_msg) = check_http_warning(&base_url) {
+            warn!(
+                server_id = %config.id,
+                server_name = %config.name,
+                url = %base_url,
+                "{}",
+                warning_msg
+            );
         }
 
         // Build HTTP client with custom headers from env
@@ -723,5 +734,26 @@ mod tests {
 
         // Empty args should fail at connect time
         assert!(config.args.is_empty());
+    }
+
+    // SA-002 S2-H3: HTTP warning integration tests
+    #[test]
+    fn test_http_warning_for_remote_http_url() {
+        let result = check_http_warning("http://remote-api.com/mcp");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_no_http_warning_for_https_url() {
+        let result = check_http_warning("https://remote-api.com/mcp");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_no_http_warning_for_localhost() {
+        assert!(check_http_warning("http://localhost:3000/mcp").is_none());
+        assert!(check_http_warning("http://127.0.0.1:8080/mcp").is_none());
+        assert!(check_http_warning("http://[::1]:3000/mcp").is_none());
     }
 }

@@ -28,7 +28,7 @@ import type { Message, SubAgentSummary } from '$types/message';
 import type { SubAgentExecution } from '$types/sub-agent';
 import type { WorkflowMetrics } from '$types/workflow';
 import { getErrorMessage } from '$lib/utils/error';
-import { ActivityService } from '$lib/services/activity.service';
+import { SubAgentExecutionService } from '$lib/services/sub-agent-execution.service';
 
 /**
  * Parameters for creating a message via save_message command.
@@ -38,6 +38,8 @@ interface MessageCreate {
 	role: 'user' | 'assistant' | 'system';
 	content: string;
 	metrics?: WorkflowMetrics;
+	/** Pre-generated message ID for block association (SA-019 P5) */
+	messageId?: string;
 }
 
 /**
@@ -55,7 +57,10 @@ function enrichMessagesWithSubAgents(
 	messages: Message[],
 	executions: SubAgentExecution[]
 ): Message[] {
-	const terminal = executions.filter((e) => e.status === 'completed' || e.status === 'error');
+	// Include cancelled sub-agents as completed (they were intentionally stopped)
+	const terminal = executions.filter(
+		(e) => e.status === 'completed' || e.status === 'error' || e.status === 'cancelled'
+	);
 	if (terminal.length === 0) return messages;
 
 	const assistantMessages = messages.filter((m) => m.role === 'assistant');
@@ -69,8 +74,9 @@ function enrichMessagesWithSubAgents(
 		if (!target) continue;
 
 		const summary: SubAgentSummary = {
+			id: exec.id,
 			name: exec.sub_agent_name,
-			status: exec.status as 'completed' | 'error',
+			status: exec.status === 'cancelled' ? 'completed' : (exec.status as 'completed' | 'error'),
 			duration_ms: exec.duration_ms,
 			tokens_input: exec.tokens_input,
 			tokens_output: exec.tokens_output
@@ -80,7 +86,7 @@ function enrichMessagesWithSubAgents(
 			target.sub_agents = [];
 		}
 
-		const alreadyExists = target.sub_agents.some((s) => s.name === summary.name);
+		const alreadyExists = target.sub_agents.some((s) => s.id === summary.id);
 		if (!alreadyExists) {
 			target.sub_agents.push(summary);
 		}
@@ -106,7 +112,6 @@ export const MessageService = {
 			const messages = await invoke<Message[]>('load_workflow_messages', { workflowId });
 			return { messages };
 		} catch (e) {
-			console.error('Failed to load messages:', e);
 			return { messages: [], error: getErrorMessage(e) };
 		}
 	},
@@ -120,16 +125,15 @@ export const MessageService = {
 	 * @param workflowId - Workflow ID to load messages for
 	 * @returns Object containing enriched messages array and optional error message
 	 */
-	async loadWithSubAgents(workflowId: string): Promise<{ messages: Message[]; error?: string }> {
+	async loadWithSubAgents(workflowId: string): Promise<{ messages: Message[]; executions: SubAgentExecution[]; error?: string }> {
 		try {
 			const [messages, executions] = await Promise.all([
 				invoke<Message[]>('load_workflow_messages', { workflowId }),
-				ActivityService.loadSubAgentExecutions(workflowId)
+				SubAgentExecutionService.loadSubAgentExecutions(workflowId)
 			]);
-			return { messages: enrichMessagesWithSubAgents(messages, executions) };
+			return { messages: enrichMessagesWithSubAgents(messages, executions), executions };
 		} catch (e) {
-			console.error('Failed to load messages with sub-agents:', e);
-			return { messages: [], error: getErrorMessage(e) };
+			return { messages: [], executions: [], error: getErrorMessage(e) };
 		}
 	},
 
@@ -148,7 +152,8 @@ export const MessageService = {
 			tokensOutput: params.metrics?.tokens_output ?? null,
 			model: params.metrics?.model ?? null,
 			provider: params.metrics?.provider ?? null,
-			durationMs: params.metrics?.duration_ms ?? null
+			durationMs: params.metrics?.duration_ms ?? null,
+			messageId: params.messageId ?? null
 		});
 	},
 
@@ -171,8 +176,8 @@ export const MessageService = {
 	 * @param metrics - Optional workflow execution metrics
 	 * @returns ID of the saved message
 	 */
-	async saveAssistant(workflowId: string, content: string, metrics?: WorkflowMetrics): Promise<string> {
-		return this.save({ workflowId, role: 'assistant', content, metrics });
+	async saveAssistant(workflowId: string, content: string, metrics?: WorkflowMetrics, messageId?: string): Promise<string> {
+		return this.save({ workflowId, role: 'assistant', content, metrics, messageId });
 	},
 
 	/**

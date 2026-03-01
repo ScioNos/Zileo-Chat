@@ -28,7 +28,8 @@
 //! 7. Loop continues until no more tool calls or max iterations reached
 
 use crate::agents::core::agent::{
-    Agent, ReasoningStepData, Report, ReportMetrics, ReportStatus, Task, ToolExecutionData,
+    Agent, ReasoningSource, ReasoningStepData, Report, ReportMetrics, ReportStatus, Task,
+    ToolExecutionData,
 };
 use crate::db::DBClient;
 use crate::llm::adapters::{MistralToolAdapter, OllamaToolAdapter, OpenAiToolAdapter};
@@ -47,12 +48,49 @@ use async_trait::async_trait;
 use chrono::Local;
 use std::sync::Arc;
 use tauri::Emitter;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 /// Default maximum number of tool execution iterations to prevent infinite loops
 /// Can be overridden per-agent via AgentConfig.max_tool_iterations
 #[allow(dead_code)]
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 50;
+
+/// Prompt sent to the LLM when a generic completion message is detected,
+/// requesting a proper markdown report of what was accomplished.
+const REPORT_ENFORCEMENT_PROMPT: &str = "You have completed your task using tools. However, you did not provide a summary of what you accomplished. Please provide a concise report in markdown format that describes:\n\n1. What actions you performed\n2. The key results or outcomes\n3. Any important details the user should know\n\nBe specific and reference the actual work done based on the tool calls you made. Respond in the same language as the original task.";
+
+/// Checks whether the given response content is a generic completion message
+/// (i.e., the LLM did not provide a meaningful report).
+///
+/// Returns `true` if the content matches known generic fallback patterns,
+/// indicating that a follow-up report request should be made.
+fn is_generic_completion_message(content: &str) -> bool {
+    let trimmed = content.trim();
+
+    // Pattern 1: "Task completed after N iteration(s). Tool executions completed successfully."
+    if trimmed.starts_with("Task completed after ")
+        && trimmed.contains("iteration")
+        && trimmed.contains("Tool executions completed successfully")
+    {
+        return true;
+    }
+
+    // Pattern 2: "Max tool iterations (N) reached, stopping execution"
+    if trimmed.starts_with("Max tool iterations")
+        && trimmed.contains("reached")
+        && trimmed.contains("stopping execution")
+    {
+        return true;
+    }
+
+    // Pattern 3: Empty or whitespace-only
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    false
+}
 
 /// Summary of an MCP server for documentation in system prompt
 ///
@@ -262,76 +300,6 @@ impl LLMAgent {
         format!("{}{}{}", history_str, task.description, context_str)
     }
 
-    /// Builds prompt with available MCP tools information
-    #[allow(dead_code)]
-    fn build_prompt_with_tools(&self, task: &Task, available_tools: &[String]) -> String {
-        let base_prompt = self.build_prompt(task);
-
-        if available_tools.is_empty() {
-            return base_prompt;
-        }
-
-        let tools_info = format!(
-            "\n\nAvailable MCP Tools:\n{}",
-            available_tools
-                .iter()
-                .map(|t| format!("- {}", t))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-
-        format!("{}{}", base_prompt, tools_info)
-    }
-
-    /// Executes an MCP tool call and returns the result
-    ///
-    /// This method is prepared for future phases where the agent will
-    /// parse LLM responses to extract tool calls and execute them.
-    #[allow(dead_code)]
-    async fn call_mcp_tool(
-        &self,
-        mcp_manager: &MCPManager,
-        server_name: &str,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String, String> {
-        debug!(
-            server_name = %server_name,
-            tool_name = %tool_name,
-            "Calling MCP tool"
-        );
-
-        match mcp_manager
-            .call_tool(server_name, tool_name, arguments)
-            .await
-        {
-            Ok(result) => {
-                if result.success {
-                    Ok(serde_json::to_string_pretty(&result.content)
-                        .unwrap_or_else(|_| result.content.to_string()))
-                } else {
-                    Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
-                }
-            }
-            Err(e) => Err(e.to_string()),
-        }
-    }
-
-    /// Collects available tools from configured MCP servers
-    #[allow(dead_code)]
-    async fn get_available_mcp_tools(&self, mcp_manager: &MCPManager) -> Vec<String> {
-        let mut all_tools = Vec::new();
-
-        for server_name in &self.config.mcp_servers {
-            let tools = mcp_manager.list_server_tools(server_name).await;
-            for tool in tools {
-                all_tools.push(format!("{}:{}", server_name, tool.name));
-            }
-        }
-
-        all_tools
-    }
-
     /// Collects MCP tool definitions with full metadata from configured servers
     async fn get_mcp_tool_definitions(&self, mcp_manager: &MCPManager) -> Vec<(String, MCPTool)> {
         let mut all_tools = Vec::new();
@@ -397,25 +365,29 @@ impl LLMAgent {
     /// # Arguments
     /// * `workflow_id` - Optional workflow ID for scoping tool operations
     /// * `is_primary_agent` - Whether this is the primary workflow agent
+    /// * `context_override` - Optional context to use instead of `self.agent_context`.
+    ///   This allows injecting a modified context (e.g., with a cancellation token)
+    ///   without mutating the agent.
     async fn create_local_tools(
         &self,
         workflow_id: Option<String>,
         is_primary_agent: bool,
+        context_override: Option<&AgentToolContext>,
     ) -> Vec<Arc<dyn Tool>> {
         let Some(ref factory) = self.tool_factory else {
             return Vec::new();
         };
 
+        // Use override if provided, otherwise fall back to self.agent_context
+        let effective_context = context_override.or(self.agent_context.as_ref());
+
         // Extract app_handle from context if available
-        let app_handle = self
-            .agent_context
-            .as_ref()
-            .and_then(|ctx| ctx.app_handle.clone());
+        let app_handle = effective_context.and_then(|ctx| ctx.app_handle.clone());
 
         // If this is the primary agent and we have context, use create_tools_with_context
         // to include sub-agent tools
         if is_primary_agent {
-            if let Some(ref context) = self.agent_context {
+            if let Some(context) = effective_context {
                 debug!(
                     agent_id = %self.config.id,
                     "Creating tools with context for primary agent (sub-agent tools available)"
@@ -436,7 +408,7 @@ impl LLMAgent {
         debug!(
             agent_id = %self.config.id,
             is_primary_agent = is_primary_agent,
-            has_context = self.agent_context.is_some(),
+            has_context = effective_context.is_some(),
             "Creating basic tools (sub-agent tools NOT available)"
         );
         factory
@@ -864,6 +836,7 @@ impl Agent for LLMAgent {
                 Some(&self.config.llm.model),
                 self.config.llm.temperature,
                 self.config.llm.max_tokens,
+                self.config.llm.is_reasoning,
             )
             .await;
 
@@ -971,7 +944,7 @@ impl Agent for LLMAgent {
     /// 7. Repeats until no tool calls or MAX_TOOL_ITERATIONS reached
     #[instrument(
         name = "llm_agent_execute_with_mcp",
-        skip(self, task, mcp_manager),
+        skip(self, task, mcp_manager, cancellation_token),
         fields(
             agent_id = %self.config.id,
             task_id = %task.id,
@@ -986,6 +959,7 @@ impl Agent for LLMAgent {
         &self,
         task: Task,
         mcp_manager: Option<Arc<MCPManager>>,
+        cancellation_token: Option<CancellationToken>,
     ) -> anyhow::Result<Report> {
         let start = std::time::Instant::now();
         let mut tools_used: Vec<String> = Vec::new();
@@ -1108,7 +1082,17 @@ impl Agent for LLMAgent {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let local_tools = self.create_local_tools(workflow_id, is_primary_agent).await;
+        // Inject cancellation token into context if both are available.
+        // This ensures sub-agent tools receive the workflow's cancellation token
+        // and can propagate it to SubAgentExecutor for graceful shutdown.
+        let effective_context = match (&self.agent_context, &cancellation_token) {
+            (Some(ctx), Some(token)) => Some(ctx.clone().with_cancellation_token(token.clone())),
+            _ => None,
+        };
+
+        let local_tools = self
+            .create_local_tools(workflow_id, is_primary_agent, effective_context.as_ref())
+            .await;
 
         // Discover MCP tools and server summaries if manager is available
         let (mcp_tools, mcp_server_summaries) = if let Some(ref mcp) = mcp_manager {
@@ -1186,6 +1170,7 @@ impl Agent for LLMAgent {
         // Tool execution loop
         let mut final_response_content = String::new();
         let mut iteration = 0;
+        let mut global_sequence: u32 = 0;
 
         // Use agent config max_tool_iterations, clamped to valid range [1, 200]
         let max_iterations = self.config.max_tool_iterations.clamp(1, 200);
@@ -1201,6 +1186,7 @@ impl Agent for LLMAgent {
                     "Max tool iterations ({}) reached, stopping execution",
                     max_iterations
                 );
+                global_sequence += 1;
                 self.emit_progress(StreamChunk::reasoning(
                     event_workflow_id.clone(),
                     reasoning_content.clone(),
@@ -1208,6 +1194,8 @@ impl Agent for LLMAgent {
                 reasoning_steps_data.push(ReasoningStepData {
                     content: reasoning_content,
                     duration_ms: start.elapsed().as_millis() as u64,
+                    sequence: global_sequence,
+                    source: ReasoningSource::AgentFlow,
                 });
                 break;
             }
@@ -1216,6 +1204,7 @@ impl Agent for LLMAgent {
             if iteration > 1 {
                 let reasoning_content =
                     format!("Tool iteration {} - Processing tool results...", iteration);
+                global_sequence += 1;
                 self.emit_progress(StreamChunk::reasoning(
                     event_workflow_id.clone(),
                     reasoning_content.clone(),
@@ -1223,6 +1212,8 @@ impl Agent for LLMAgent {
                 reasoning_steps_data.push(ReasoningStepData {
                     content: reasoning_content,
                     duration_ms: start.elapsed().as_millis() as u64,
+                    sequence: global_sequence,
+                    source: ReasoningSource::AgentFlow,
                 });
             }
 
@@ -1237,8 +1228,8 @@ impl Agent for LLMAgent {
                 .provider_manager
                 .complete_with_tools(
                     provider_type.clone(),
-                    messages.clone(),
-                    tools_json.clone(),
+                    &messages,
+                    &tools_json,
                     Some(adapter.get_tool_choice(ToolChoiceMode::Auto)),
                     &self.config.llm.model,
                     self.config.llm.temperature,
@@ -1307,6 +1298,22 @@ impl Agent for LLMAgent {
                 }
             };
 
+            if let Some(thinking) = adapter.extract_thinking(&response) {
+                if !thinking.trim().is_empty() {
+                    global_sequence += 1;
+                    self.emit_progress(StreamChunk::thinking_block(
+                        event_workflow_id.clone(),
+                        thinking.clone(),
+                    ));
+                    reasoning_steps_data.push(ReasoningStepData {
+                        content: thinking,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        sequence: global_sequence,
+                        source: ReasoningSource::ModelThinking,
+                    });
+                }
+            }
+
             // Parse tool calls from response using the adapter (JSON function calling)
             let function_calls = adapter.parse_tool_calls(&response);
 
@@ -1350,6 +1357,7 @@ impl Agent for LLMAgent {
                 function_calls.len(),
                 tool_names.join(", ")
             );
+            global_sequence += 1;
             self.emit_progress(StreamChunk::reasoning(
                 event_workflow_id.clone(),
                 reasoning_content.clone(),
@@ -1357,6 +1365,8 @@ impl Agent for LLMAgent {
             reasoning_steps_data.push(ReasoningStepData {
                 content: reasoning_content,
                 duration_ms: start.elapsed().as_millis() as u64,
+                sequence: global_sequence,
+                source: ReasoningSource::AgentFlow,
             });
 
             // Add assistant message with tool calls to messages array
@@ -1397,9 +1407,10 @@ impl Agent for LLMAgent {
                         (None, call.name.clone())
                     };
 
+                global_sequence += 1;
                 tool_executions_data.push(ToolExecutionData {
                     tool_type: tool_type.to_string(),
-                    tool_name: tool_name_for_data,
+                    tool_name: tool_name_for_data.clone(),
                     server_name,
                     input_params: call.arguments.clone(),
                     output_result: result.result.clone(),
@@ -1407,18 +1418,105 @@ impl Agent for LLMAgent {
                     error_message: result.error.clone(),
                     duration_ms: exec_duration,
                     iteration: iteration as u32,
+                    sequence: global_sequence,
                 });
 
-                // Emit tool_end event
-                self.emit_progress(StreamChunk::tool_end(
+                let input_json =
+                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string());
+                let output_json =
+                    serde_json::to_string(&result.result).unwrap_or_else(|_| "{}".to_string());
+                self.emit_progress(StreamChunk::tool_call_complete(
                     event_workflow_id.clone(),
-                    call.name.clone(),
+                    tool_name_for_data,
                     exec_duration,
+                    input_json,
+                    output_json,
+                    result.success,
                 ));
 
                 // Format and add tool result to messages using adapter
                 let tool_message = adapter.format_tool_result(&result);
                 messages.push(tool_message);
+            }
+        }
+
+        // Report enforcement: if the LLM finished without providing a meaningful report,
+        // make one additional call asking for a proper summary.
+        // Guard: iteration > 1 ensures the agent actually executed tools (iteration 1 = first LLM call,
+        // iteration 2+ = LLM was called again after tool execution, meaning tools were used).
+        if is_generic_completion_message(&final_response_content) && iteration > 1 {
+            info!(
+                original_response = %final_response_content,
+                "Generic completion detected, requesting report from LLM"
+            );
+
+            // Check cancellation before the follow-up call
+            let cancelled = cancellation_token
+                .as_ref()
+                .is_some_and(|t| t.is_cancelled());
+
+            if !cancelled {
+                // Emit reasoning step about the follow-up
+                global_sequence += 1;
+                let enforcement_reasoning =
+                    "Agent completed tools without a report. Requesting summary...".to_string();
+                self.emit_progress(StreamChunk::reasoning(
+                    event_workflow_id.clone(),
+                    enforcement_reasoning.clone(),
+                ));
+                reasoning_steps_data.push(ReasoningStepData {
+                    content: enforcement_reasoning,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    sequence: global_sequence,
+                    source: ReasoningSource::AgentFlow,
+                });
+
+                // Add the report enforcement prompt as a user message
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": REPORT_ENFORCEMENT_PROMPT
+                }));
+
+                // Use an empty tools array to prevent tool calls in the follow-up.
+                // ToolChoiceMode::None is ignored by some providers (e.g. Ollama),
+                // so sending no tools is the most reliable way to force a text response.
+                let empty_tools: Vec<serde_json::Value> = vec![];
+
+                match self
+                    .provider_manager
+                    .complete_with_tools(
+                        provider_type.clone(),
+                        &messages,
+                        &empty_tools,
+                        None,
+                        &self.config.llm.model,
+                        self.config.llm.temperature,
+                        self.config.llm.max_tokens,
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        let (input_tokens, output_tokens) = adapter.extract_usage(&response);
+                        total_tokens_input = input_tokens;
+                        total_tokens_output += output_tokens;
+
+                        if let Some(content) = adapter.extract_content(&response) {
+                            if !content.trim().is_empty() {
+                                info!(
+                                    "Report enforcement successful, received meaningful response"
+                                );
+                                final_response_content = content;
+                            } else {
+                                warn!("Report enforcement returned empty content, keeping generic message");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Report enforcement LLM call failed, keeping generic message");
+                    }
+                }
+            } else {
+                debug!("Skipping report enforcement: workflow cancelled");
             }
         }
 
@@ -1549,6 +1647,7 @@ mod tests {
                 model: "llama3.2".to_string(),
                 temperature: 0.7,
                 max_tokens: 2000,
+                is_reasoning: false,
             },
             tools: vec!["tool1".to_string()],
             mcp_servers: vec![],
@@ -1561,7 +1660,7 @@ mod tests {
     #[test]
     fn test_llm_agent_new() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config.clone(), manager);
 
         assert_eq!(agent.config().id, "test_llm_agent");
@@ -1571,7 +1670,7 @@ mod tests {
     #[test]
     fn test_llm_agent_capabilities() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let capabilities = agent.capabilities();
@@ -1583,7 +1682,7 @@ mod tests {
     #[test]
     fn test_llm_agent_lifecycle() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         assert!(matches!(agent.lifecycle(), Lifecycle::Permanent));
@@ -1592,7 +1691,7 @@ mod tests {
     #[test]
     fn test_llm_agent_get_provider_type() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let provider = agent.get_provider_type().unwrap();
@@ -1603,7 +1702,7 @@ mod tests {
     fn test_llm_agent_get_provider_type_mistral() {
         let mut config = create_test_config();
         config.llm.provider = "Mistral".to_string();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let provider = agent.get_provider_type().unwrap();
@@ -1613,7 +1712,7 @@ mod tests {
     #[test]
     fn test_llm_agent_build_prompt() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         // Test with empty context
@@ -1659,7 +1758,7 @@ mod tests {
     #[tokio::test]
     async fn test_llm_agent_execute_not_configured() {
         let config = create_test_config();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let task = Task {
@@ -1682,7 +1781,7 @@ mod tests {
         // Empty provider is the only invalid case now (others become Custom)
         let mut config = create_test_config();
         config.llm.provider = String::new();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let result = agent.get_provider_type();
@@ -1693,7 +1792,7 @@ mod tests {
     fn test_llm_agent_custom_provider() {
         let mut config = create_test_config();
         config.llm.provider = "routerlab".to_string();
-        let manager = Arc::new(ProviderManager::new());
+        let manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let agent = LLMAgent::new(config, manager);
 
         let result = agent.get_provider_type();
@@ -1709,4 +1808,65 @@ mod tests {
     // - src/llm/adapters/tests.rs (adapter parsing)
     // - src/models/function_calling.rs (type tests)
     // - Integration tests in tests/ directory
+
+    // --- Report Enforcement Tests ---
+
+    #[test]
+    fn test_is_generic_completion_message_standard_pattern() {
+        assert!(is_generic_completion_message(
+            "Task completed after 2 iteration(s). Tool executions completed successfully."
+        ));
+        assert!(is_generic_completion_message(
+            "Task completed after 1 iteration(s). Tool executions completed successfully."
+        ));
+        assert!(is_generic_completion_message(
+            "Task completed after 15 iteration(s). Tool executions completed successfully."
+        ));
+    }
+
+    #[test]
+    fn test_is_generic_completion_message_max_iterations_pattern() {
+        assert!(is_generic_completion_message(
+            "Max tool iterations (50) reached, stopping execution"
+        ));
+        assert!(is_generic_completion_message(
+            "Max tool iterations (200) reached, stopping execution"
+        ));
+    }
+
+    #[test]
+    fn test_is_generic_completion_message_empty() {
+        assert!(is_generic_completion_message(""));
+        assert!(is_generic_completion_message("   "));
+        assert!(is_generic_completion_message("\n\t  "));
+    }
+
+    #[test]
+    fn test_is_generic_completion_message_real_reports() {
+        // Real markdown reports should NOT be detected as generic
+        assert!(!is_generic_completion_message(
+            "## Summary\n\nI analyzed the data and found 3 key insights."
+        ));
+        assert!(!is_generic_completion_message(
+            "The task has been completed. Here are the results:\n- Item 1\n- Item 2"
+        ));
+        assert!(!is_generic_completion_message(
+            "I successfully created the new component with the following structure..."
+        ));
+    }
+
+    #[test]
+    fn test_is_generic_completion_message_with_whitespace() {
+        // Trimming should work
+        assert!(is_generic_completion_message(
+            "  Task completed after 3 iteration(s). Tool executions completed successfully.  "
+        ));
+    }
+
+    #[test]
+    fn test_report_enforcement_prompt_is_valid() {
+        assert!(!REPORT_ENFORCEMENT_PROMPT.is_empty());
+        assert!(REPORT_ENFORCEMENT_PROMPT.contains("markdown"));
+        assert!(REPORT_ENFORCEMENT_PROMPT.contains("report"));
+    }
 }

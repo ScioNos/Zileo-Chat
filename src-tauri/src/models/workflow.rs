@@ -64,6 +64,12 @@ pub struct Workflow {
     /// Current context size (last API call context window usage)
     #[serde(default)]
     pub current_context_tokens: u64,
+    /// Cumulative input tokens from sub-agents only
+    #[serde(default)]
+    pub sub_agent_tokens_input: u64,
+    /// Cumulative output tokens from sub-agents only
+    #[serde(default)]
+    pub sub_agent_tokens_output: u64,
 }
 
 /// Workflow creation payload - only fields needed for creation
@@ -142,6 +148,8 @@ pub struct WorkflowResult {
     pub mcp_calls: Vec<String>,
     /// Detailed tool execution data for persistence
     pub tool_executions: Vec<WorkflowToolExecution>,
+    /// Pre-generated message ID used for block persistence (SA-019 P5)
+    pub message_id: String,
 }
 
 /// Metrics collected during workflow execution
@@ -169,7 +177,7 @@ pub struct WorkflowMetrics {
 /// - Tool execution history
 /// - Thinking/reasoning steps
 ///
-/// Used by `load_workflow_full_state` command for Phase 5: Complete State Recovery.
+/// Used by `load_workflow_full_state` command for complete state recovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowFullState {
     /// The workflow entity with metadata
@@ -226,6 +234,8 @@ mod tests {
             total_cost_usd: 0.0,
             model_id: None,
             current_context_tokens: 0,
+            sub_agent_tokens_input: 0,
+            sub_agent_tokens_output: 0,
         };
 
         let json = serde_json::to_string(&workflow).unwrap();
@@ -236,6 +246,8 @@ mod tests {
         assert_eq!(deserialized.agent_id, workflow.agent_id);
         assert_eq!(deserialized.total_tokens_input, 0);
         assert_eq!(deserialized.total_tokens_output, 0);
+        assert_eq!(deserialized.sub_agent_tokens_input, 0);
+        assert_eq!(deserialized.sub_agent_tokens_output, 0);
     }
 
     #[test]
@@ -254,6 +266,7 @@ mod tests {
             tools_used: vec!["tool1".to_string(), "tool2".to_string()],
             mcp_calls: vec!["mcp_call1".to_string()],
             tool_executions: vec![],
+            message_id: "test-message-id".to_string(),
         };
 
         let json = serde_json::to_string(&result).unwrap();

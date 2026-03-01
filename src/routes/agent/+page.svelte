@@ -18,12 +18,13 @@
 Copyright 2025 Zileo-Chat-3 Contributors
 SPDX-License-Identifier: Apache-2.0
 
-Agent Page - Simplified and Refactored (Phase D)
+Agent Page - Simplified and Refactored
 Uses extracted components, services, and stores for clean architecture.
 -->
 
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { SvelteMap } from 'svelte/reactivity';
 	import type { Message } from '$types/message';
 	import type { ModalState } from '$types/services';
 	import type { ValidationRequest } from '$types/validation';
@@ -32,7 +33,6 @@ Uses extracted components, services, and stores for clean architecture.
 	import {
 		AgentHeader,
 		WorkflowSidebar,
-		ActivitySidebar,
 		ChatContainer
 	} from '$lib/components/agent';
 	import { TokenDisplay, UserQuestionModal } from '$lib/components/workflow';
@@ -41,7 +41,10 @@ Uses extracted components, services, and stores for clean architecture.
 	import { i18n } from '$lib/i18n';
 
 	// Service imports
-	import { WorkflowService, MessageService, LocalStorage, STORAGE_KEYS, WorkflowExecutorService } from '$lib/services';
+	import { invoke } from '@tauri-apps/api/core';
+	import { WorkflowService, MessageService, BlockService, LocalStorage, STORAGE_KEYS, WorkflowExecutorService } from '$lib/services';
+	import type { ChatBlock, SubAgentBlockData, TodoTaskDisplay } from '$types/chat-block';
+	import type { SubAgentExecution } from '$types/sub-agent';
 
 	// Store imports
 	import {
@@ -49,45 +52,61 @@ Uses extracted components, services, and stores for clean architecture.
 		workflows,
 		selectedWorkflow,
 		filteredWorkflows,
-		workflowSearchFilter
+		workflowSearchFilter,
+		workflowsError,
+		workflowsLoading
 	} from '$lib/stores/workflows';
-	import {
-		activityStore,
-		allActivities,
-		filteredActivities,
-		activityFilter
-	} from '$lib/stores/activity';
 	import {
 		tokenStore,
 		tokenDisplayData
 	} from '$lib/stores/tokens';
 	import { agentStore, agents, isLoading as agentsLoading } from '$lib/stores/agents';
-	import { streamingStore, isStreaming, streamContent } from '$lib/stores/streaming';
+	import { streamingStore } from '$lib/stores/streaming';
+	import {
+		executionBlocksStore,
+		executionBlocks as executionBlocks$,
+		isExecuting as isExecuting$,
+		spinnerContext as spinnerContext$,
+		executionResponse as executionResponse$,
+		executionTasks as executionTasks$,
+		executionWorkflowId as executionWorkflowId$
+	} from '$lib/stores/execution-blocks';
 	import { validationStore, pendingValidation } from '$lib/stores/validation';
 	import { validationSettingsStore } from '$lib/stores/validation-settings';
-	import { userQuestionStore } from '$lib/stores/userQuestion';
+	import { userQuestionStore } from '$lib/stores/user-question';
 	import {
 		backgroundWorkflowsStore,
 		runningWorkflowIds as runningWorkflowIds$,
 		recentlyCompletedIds as recentlyCompletedIds$,
 		questionPendingIds as questionPendingIds$
-	} from '$lib/stores/backgroundWorkflows';
+	} from '$lib/stores/background-workflows';
 	import { toastStore, navigationTarget } from '$lib/stores/toast';
 	import { fetchModelByApiName } from '$lib/stores/llm';
 	import { locale } from '$lib/stores/locale';
+	import { getErrorMessage } from '$lib/utils/error';
 	import type { ProviderType } from '$types/llm';
 
 	// ============================================================================
-	// PageState Interface (OPT-FA-9: Aggregate UI state)
+	// PageState Interface
 	// ============================================================================
 
 	/**
 	 * Aggregated page state interface for cleaner state management.
 	 * Groups 8 related UI/data variables into single reactive object.
 	 */
+	/** Task as returned by Rust list_workflow_tasks command (snake_case fields) */
+	interface PersistedTask {
+		id: string;
+		name: string;
+		description: string;
+		agent_assigned: string | null;
+		priority: number;
+		status: 'pending' | 'in_progress' | 'completed' | 'blocked';
+		duration_ms: number | null;
+	}
+
 	interface PageState {
 		leftSidebarCollapsed: boolean;
-		rightSidebarCollapsed: boolean;
 		selectedWorkflowId: string | null;
 		selectedAgentId: string | null;
 		currentMaxIterations: number;
@@ -99,7 +118,6 @@ Uses extracted components, services, and stores for clean architecture.
 	/** Initial page state with localStorage restoration */
 	const initialPageState: PageState = {
 		leftSidebarCollapsed: false,
-		rightSidebarCollapsed: LocalStorage.get(STORAGE_KEYS.RIGHT_SIDEBAR_COLLAPSED, false),
 		selectedWorkflowId: null,
 		selectedAgentId: null,
 		currentMaxIterations: 50,
@@ -115,15 +133,74 @@ Uses extracted components, services, and stores for clean architecture.
 	/** Modal state - single union type instead of 3 booleans */
 	let modalState = $state<ModalState>({ type: 'none' });
 
-	/** Aggregated page state (OPT-FA-9) */
+	/** Whether a workflow delete operation is in progress */
+	let deletingWorkflow = $state(false);
+
+	/** Aggregated page state */
 	let pageState = $state<PageState>(initialPageState);
+
+	/** Persisted blocks per message (SA-019 P3) */
+	let messageBlocks = new SvelteMap<string, ChatBlock[]>();
+
+	/** Persisted tasks for the current workflow (SA-019 P6) */
+	let persistedTasks = $state<TodoTaskDisplay[]>([]);
+
+	/** Resolved tasks: real-time store during execution of THIS workflow, persisted otherwise.
+	 *  Resolves agent UUIDs to display names via $agents store. */
+	let resolvedTasks = $derived(
+		($isExecuting$ && $executionWorkflowId$ === pageState.selectedWorkflowId
+			? $executionTasks$
+			: persistedTasks
+		).map((t) => ({
+			...t,
+			agent_name: t.agent_name
+				? ($agents.find((a) => a.id === t.agent_name)?.name ?? t.agent_name)
+				: undefined
+		}))
+	);
 
 	// ============================================================================
 	// Data Loading Functions (simplified using services)
 	// ============================================================================
 
 	/**
-	 * Load workflow data (messages and historical activities).
+	 * Append sub-agent execution blocks to messageBlocks.
+	 *
+	 * Sub-agent executions are stored in a separate table (sub_agent_execution) and
+	 * not loaded by load_message_blocks (which only covers tool_execution/thinking_step).
+	 * This function rebuilds SubAgent ChatBlocks from the enriched message.sub_agents
+	 * data and the raw execution records, then appends them to messageBlocks.
+	 */
+	function appendSubAgentBlocks(messages: Message[], executions: SubAgentExecution[]): void {
+		for (const message of messages) {
+			if (!message.sub_agents || message.sub_agents.length === 0) continue;
+
+			const existingBlocks = messageBlocks.get(message.id) ?? [];
+			const maxSequence = existingBlocks.reduce((max, b) => Math.max(max, b.sequence), 0);
+
+			const subAgentBlocks: ChatBlock[] = message.sub_agents.map((sa, i) => {
+				const execution = executions.find((e) => e.id === sa.id);
+				const data: SubAgentBlockData = {
+					agent_name: sa.name,
+					status: sa.status,
+					duration_ms: sa.duration_ms,
+					tokens_input: sa.tokens_input,
+					tokens_output: sa.tokens_output,
+					report_summary: execution?.result_summary
+				};
+				return {
+					block_type: 'sub_agent' as ChatBlock['block_type'],
+					sequence: maxSequence + 1 + i,
+					data
+				};
+			});
+
+			messageBlocks.set(message.id, [...existingBlocks, ...subAgentBlocks]);
+		}
+	}
+
+	/**
+	 * Load workflow data (messages and persisted blocks).
 	 */
 	async function loadWorkflowData(workflowId: string): Promise<void> {
 		pageState.messagesLoading = true;
@@ -133,12 +210,45 @@ Uses extracted components, services, and stores for clean architecture.
 			const result = await MessageService.loadWithSubAgents(workflowId);
 			pageState.messages = result.messages;
 			if (result.error) {
-				console.error('Error loading messages:', result.error);
-				// Optionally show UI notification here
+				toastStore.add({
+					type: 'error',
+					title: result.error,
+					message: '',
+					persistent: false,
+					duration: 5000
+				});
 			}
 
-			// Load historical activities (store handles internally)
-			await activityStore.loadHistorical(workflowId);
+			// Load persisted execution blocks for all messages (SA-019 P3)
+			messageBlocks.clear();
+			try {
+				const blocks = await BlockService.loadForMessages(result.messages);
+				for (const [id, b] of blocks) {
+					messageBlocks.set(id, b);
+				}
+			} catch {
+				// Already cleared above
+			}
+
+			// Rebuild sub-agent blocks from executions (not in tool_execution/thinking_step tables)
+			appendSubAgentBlocks(result.messages, result.executions);
+
+			// Load persisted tasks for this workflow (SA-019 P6)
+			persistedTasks = [];
+			try {
+				const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
+				persistedTasks = tasks.map((t) => ({
+					id: t.id,
+					name: t.name,
+					description: t.description,
+					status: t.status,
+					priority: t.priority,
+					agent_name: t.agent_assigned ?? undefined,
+					duration_ms: t.duration_ms ?? undefined
+				}));
+			} catch {
+				// Tasks are optional; silently continue if loading fails
+			}
 		} finally {
 			pageState.messagesLoading = false;
 		}
@@ -152,23 +262,15 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Create a new workflow.
 	 */
 	async function handleCreateWorkflow(name: string, agentId: string): Promise<void> {
-		try {
-			const id = await WorkflowService.create(name, agentId);
+		const id = await WorkflowService.create(name, agentId);
 
-			// Update selection (but don't set selectedAgentId yet - let selectWorkflow handle it)
-			pageState.selectedWorkflowId = id;
-			pageState.messages = [];
+		pageState.selectedWorkflowId = id;
+		pageState.messages = [];
 
-			// Reload workflows and select the new one
-			await workflowStore.loadWorkflows();
-			await selectWorkflow(id);
+		await workflowStore.loadWorkflows();
+		await selectWorkflow(id);
 
-			// Close modal
-			modalState = { type: 'none' };
-		} catch (err) {
-			console.error('Failed to create workflow:', err);
-			throw err; // Let modal handle the error
-		}
+		modalState = { type: 'none' };
 	}
 
 	/**
@@ -191,14 +293,16 @@ Uses extracted components, services, and stores for clean architecture.
 		if (bgExecution && bgExecution.status === 'running') {
 			// Restore streaming state from background execution
 			streamingStore.restoreFrom(bgExecution);
+			executionBlocksStore.start(workflowId);
 			tokenStore.startStreaming();
 			tokenStore.updateStreamingTokens(bgExecution.tokensReceived);
 
 			// Open user question modal if there are pending questions for this workflow
 			userQuestionStore.openForWorkflow(workflowId);
 		} else {
-			// Not running in background - reset streaming state
+			// Not running in background - reset streaming and execution state
 			streamingStore.reset();
+			executionBlocksStore.reset();
 		}
 
 		// Update token store with workflow cumulative metrics
@@ -218,6 +322,7 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Delete a workflow.
 	 */
 	async function handleDeleteWorkflow(workflowId: string): Promise<void> {
+		deletingWorkflow = true;
 		try {
 			await WorkflowService.delete(workflowId);
 			await workflowStore.loadWorkflows();
@@ -226,12 +331,19 @@ Uses extracted components, services, and stores for clean architecture.
 			if (pageState.selectedWorkflowId === workflowId) {
 				pageState.selectedWorkflowId = null;
 				pageState.messages = [];
-				activityStore.reset();
 			}
 
 			modalState = { type: 'none' };
 		} catch (err) {
-			console.error('Failed to delete workflow:', err);
+			toastStore.add({
+				type: 'error',
+				title: getErrorMessage(err),
+				message: '',
+				persistent: false,
+				duration: 5000
+			});
+		} finally {
+			deletingWorkflow = false;
 		}
 	}
 
@@ -243,8 +355,13 @@ Uses extracted components, services, and stores for clean architecture.
 			await WorkflowService.rename(workflowId, newName);
 			await workflowStore.loadWorkflows();
 		} catch (err) {
-			console.error('Failed to rename workflow:', err);
-			alert('Failed to rename workflow: ' + err);
+			toastStore.add({
+				type: 'error',
+				title: getErrorMessage(err),
+				message: '',
+				persistent: false,
+				duration: 5000
+			});
 		}
 	}
 
@@ -276,18 +393,15 @@ Uses extracted components, services, and stores for clean architecture.
 						config.llm.model,
 						config.llm.provider.toLowerCase() as ProviderType
 					);
-					// Update token store with model context window and pricing
 					tokenStore.updateFromModel(model);
 					pageState.currentContextWindow = model.context_window;
-				} catch (modelErr) {
-					console.warn('Failed to load model for token metrics, using defaults:', modelErr);
+				} catch {
 					pageState.currentContextWindow = 128000;
 				}
 			} else {
 				pageState.currentContextWindow = 128000;
 			}
-		} catch (e) {
-			console.error('Failed to load agent config:', e);
+		} catch {
 			pageState.currentMaxIterations = 50;
 			pageState.currentContextWindow = 128000;
 		}
@@ -311,7 +425,7 @@ Uses extracted components, services, and stores for clean architecture.
 	async function handleSend(message: string): Promise<void> {
 		if (!pageState.selectedWorkflowId || !pageState.selectedAgentId || !message.trim()) return;
 
-		await WorkflowExecutorService.execute(
+		const result = await WorkflowExecutorService.execute(
 			{
 				workflowId: pageState.selectedWorkflowId,
 				message,
@@ -330,6 +444,35 @@ Uses extracted components, services, and stores for clean architecture.
 				}
 			}
 		);
+
+		// Transfer execution blocks to persisted messageBlocks (SA-019 P5)
+		// Blocks snapshot is captured in execute() before the store reset.
+		// No ID patching needed: createAssistantMessage uses result.message_id directly.
+		if (result.success && result.assistantMessageId && result.blocks && result.blocks.length > 0) {
+			messageBlocks.set(result.assistantMessageId, result.blocks);
+		}
+
+		// Reload persisted tasks from DB after execution completes (SA-019 P6)
+		// executionBlocksStore.reset() clears real-time tasks, so resolvedTasks
+		// switches to persistedTasks which must be fresh from DB.
+		if (pageState.selectedWorkflowId) {
+			try {
+				const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', {
+					workflowId: pageState.selectedWorkflowId
+				});
+				persistedTasks = tasks.map((t) => ({
+					id: t.id,
+					name: t.name,
+					description: t.description,
+					status: t.status,
+					priority: t.priority,
+					agent_name: t.agent_assigned ?? undefined,
+					duration_ms: t.duration_ms ?? undefined
+				}));
+			} catch {
+				// Tasks are optional; silently continue
+			}
+		}
 	}
 
 	/**
@@ -339,6 +482,7 @@ Uses extracted components, services, and stores for clean architecture.
 		if (pageState.selectedWorkflowId) {
 			WorkflowService.cancel(pageState.selectedWorkflowId);
 			streamingStore.reset();
+			executionBlocksStore.cancel();
 			tokenStore.stopStreaming();
 		}
 	}
@@ -381,8 +525,14 @@ Uses extracted components, services, and stores for clean architecture.
 		// Initialize background workflows store (owns event listeners)
 		await backgroundWorkflowsStore.init();
 		backgroundWorkflowsStore.setForwardCallbacks(
-			(chunk) => streamingStore.processChunkDirect(chunk),
-			(complete) => streamingStore.processCompleteDirect(complete),
+			(chunk) => {
+				streamingStore.processChunkDirect(chunk);
+				executionBlocksStore.processChunk(chunk);
+			},
+			(complete) => {
+				streamingStore.processCompleteDirect(complete);
+				executionBlocksStore.complete();
+			},
 			(payload, workflowId, isViewed) => userQuestionStore.handleQuestionForWorkflow(payload, workflowId, isViewed)
 		);
 
@@ -405,13 +555,6 @@ Uses extracted components, services, and stores for clean architecture.
 		streamingStore.cleanup();
 		validationStore.cleanup();
 		userQuestionStore.cleanup();
-	});
-
-	/**
-	 * Persist right sidebar state to localStorage.
-	 */
-	$effect(() => {
-		LocalStorage.set(STORAGE_KEYS.RIGHT_SIDEBAR_COLLAPSED, pageState.rightSidebarCollapsed);
 	});
 
 	/**
@@ -445,6 +588,8 @@ Uses extracted components, services, and stores for clean architecture.
 		workflows={$filteredWorkflows}
 		selectedWorkflowId={pageState.selectedWorkflowId}
 		searchFilter={$workflowSearchFilter}
+		error={$workflowsError}
+		loading={$workflowsLoading}
 		runningWorkflowIds={$runningWorkflowIds$}
 		recentlyCompletedIds={$recentlyCompletedIds$}
 		questionPendingIds={$questionPendingIds$}
@@ -453,6 +598,7 @@ Uses extracted components, services, and stores for clean architecture.
 		oncreate={() => modalState = { type: 'new-workflow' }}
 		ondelete={(w) => modalState = { type: 'delete-workflow', workflowId: w.id }}
 		onrename={(w, name) => handleRename(w.id, name)}
+		onretry={() => workflowStore.loadWorkflows()}
 	/>
 
 	<!-- Main Content -->
@@ -474,8 +620,12 @@ Uses extracted components, services, and stores for clean architecture.
 			<ChatContainer
 				messages={pageState.messages}
 				messagesLoading={pageState.messagesLoading}
-				streamContent={$streamContent}
-				isStreaming={$isStreaming}
+				{messageBlocks}
+				executionBlocks={$executionBlocks$}
+				isExecuting={$isExecuting$}
+				spinnerContext={$spinnerContext$}
+				executionTasks={resolvedTasks}
+				executionResponse={$executionResponse$}
 				disabled={!pageState.selectedAgentId}
 				onsend={handleSend}
 				oncancel={handleCancel}
@@ -518,17 +668,7 @@ Uses extracted components, services, and stores for clean architecture.
 		{/if}
 	</main>
 
-	<!-- Right Sidebar - Activity Feed (OPT-FA-13: Memoized filtering via store) -->
-	<ActivitySidebar
-		bind:collapsed={pageState.rightSidebarCollapsed}
-		activities={$filteredActivities}
-		allActivities={$allActivities}
-		isStreaming={$isStreaming}
-		filter={$activityFilter}
-		onfilterchange={(f) => activityStore.setFilter(f)}
-	/>
-
-	<!-- Modals (lazy-loaded for bundle optimization - OPT-FA-11) -->
+	<!-- Modals (lazy-loaded for bundle optimization) -->
 	{#if modalState.type === 'new-workflow'}
 		{#await import('$lib/components/workflow/NewWorkflowModal.svelte') then { default: NewWorkflowModal }}
 			<NewWorkflowModal
@@ -542,12 +682,17 @@ Uses extracted components, services, and stores for clean architecture.
 	{:else if modalState.type === 'delete-workflow'}
 		{@const workflowId = modalState.workflowId}
 		{@const workflow = $workflows.find(w => w.id === workflowId)}
-		{#await import('$lib/components/workflow/ConfirmDeleteModal.svelte') then { default: ConfirmDeleteModal }}
-			<ConfirmDeleteModal
+		{#await import('$lib/components/ui/DeleteConfirmModal.svelte') then { default: DeleteConfirmModal }}
+			<DeleteConfirmModal
 				open={true}
-				workflowName={workflow?.name ?? ''}
-				onconfirm={() => handleDeleteWorkflow(workflowId)}
-				oncancel={() => modalState = { type: 'none' }}
+				titleKey="workflow_delete_title"
+				confirmMessageKey="workflow_delete_confirm"
+				itemName={workflow?.name ?? ''}
+				warningMessageKey="workflow_delete_warning"
+				deleting={deletingWorkflow}
+				deletingLabelKey="workflow_deleting"
+				onConfirm={() => handleDeleteWorkflow(workflowId)}
+				onCancel={() => modalState = { type: 'none' }}
 			/>
 		{/await}
 	{:else if modalState.type === 'validation'}

@@ -15,7 +15,7 @@
 -->
 
 <!--
-MCP Servers Section - Extracted from Settings page (OPT-6a)
+MCP Servers Section - Extracted from Settings page
 Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 -->
 
@@ -46,11 +46,13 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 	import { i18n } from '$lib/i18n';
 	import { createModalController } from '$lib/utils/modal.svelte';
 	import type { ModalController } from '$lib/utils/modal.svelte';
+	import { getErrorMessage } from '$lib/utils/error';
 
 	/** MCP state */
 	let mcpState = $state<MCPState>(createInitialMCPState());
 	const mcpModal: ModalController<MCPServerConfig> = createModalController<MCPServerConfig>();
 	let mcpSaving = $state(false);
+	let mcpWarning = $state<string | null>(null);
 	let testResult = $state<MCPTestResult | null>(null);
 	let testError = $state<string | null>(null);
 	let showTestModal = $state(false);
@@ -65,7 +67,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			const servers = await loadServers();
 			mcpState = setServers(mcpState, servers);
 		} catch (err) {
-			mcpState = setMCPError(mcpState, `Failed to load MCP servers: ${err}`);
+			mcpState = setMCPError(mcpState, $i18n('settings_mcp_load_failed', { error: getErrorMessage(err) }));
 		}
 	}
 
@@ -89,17 +91,20 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 	 */
 	async function handleSaveMCPServer(config: MCPServerConfig): Promise<void> {
 		mcpSaving = true;
+		mcpWarning = null;
 		try {
 			if (mcpModal.mode === 'create') {
-				const server = await createServer(config);
-				mcpState = addServer(mcpState, server);
+				const response = await createServer(config);
+				mcpState = addServer(mcpState, response.server);
+				mcpWarning = response.warning ?? null;
 			} else {
-				const server = await updateServerConfig(config.id, config);
-				mcpState = updateServer(mcpState, config.id, server);
+				const response = await updateServerConfig(config.id, config);
+				mcpState = updateServer(mcpState, config.id, response.server);
+				mcpWarning = response.warning ?? null;
 			}
 			mcpModal.close();
 		} catch (err) {
-			mcpState = setMCPError(mcpState, `Failed to save server: ${err}`);
+			mcpState = setMCPError(mcpState, $i18n('settings_mcp_save_failed', { error: getErrorMessage(err) }));
 		} finally {
 			mcpSaving = false;
 		}
@@ -109,7 +114,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 	 * Deletes an MCP server
 	 */
 	async function handleDeleteServer(server: MCPServer): Promise<void> {
-		if (!confirm(`Are you sure you want to delete "${server.name}"?`)) {
+		if (!confirm($i18n('settings_mcp_delete_confirm', { name: server.name }))) {
 			return;
 		}
 
@@ -117,7 +122,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			await deleteServer(server.id);
 			mcpState = removeServer(mcpState, server.id);
 		} catch (err) {
-			mcpState = setMCPError(mcpState, `Failed to delete server: ${err}`);
+			mcpState = setMCPError(mcpState, $i18n('settings_mcp_delete_failed', { error: getErrorMessage(err) }));
 		}
 	}
 
@@ -143,7 +148,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			const result = await testServer(testingServerConfig);
 			testResult = result;
 		} catch (err) {
-			testError = `${err}`;
+			testError = getErrorMessage(err);
 		} finally {
 			mcpState = setTestingServer(mcpState, null);
 		}
@@ -163,7 +168,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			const result = await testServer(testingServerConfig);
 			testResult = result;
 		} catch (err) {
-			testError = `${err}`;
+			testError = getErrorMessage(err);
 		} finally {
 			mcpState = setTestingServer(mcpState, null);
 		}
@@ -192,7 +197,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			}
 			mcpState = updateServer(mcpState, server.id, updatedServer);
 		} catch (err) {
-			mcpState = setMCPError(mcpState, `Failed to toggle server: ${err}`);
+			mcpState = setMCPError(mcpState, $i18n('settings_mcp_toggle_failed', { error: getErrorMessage(err) }));
 		}
 	}
 
@@ -223,6 +228,13 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 			<span>{$i18n('mcp_add_server')}</span>
 		</Button>
 	</div>
+
+	{#if mcpWarning}
+		<div class="mcp-warning" role="alert">
+			{mcpWarning}
+			<button class="dismiss-warning" onclick={() => (mcpWarning = null)} aria-label="Dismiss warning">x</button>
+		</div>
+	{/if}
 
 	{#if mcpState.error}
 		<div class="mcp-error">
@@ -291,7 +303,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 <!-- MCP Server Test Modal -->
 <Modal
 	open={showTestModal}
-	title={`Test: ${testingServerConfig?.name ?? 'Server'}`}
+	title={$i18n('settings_mcp_test_title', { name: testingServerConfig?.name ?? 'Server' })}
 	onclose={closeTestModal}
 >
 	{#snippet body()}
@@ -354,7 +366,7 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 		display: grid;
 		grid-template-columns: repeat(2, 1fr);
 		gap: var(--spacing-lg);
-		contain: layout style; /* OPT-SCROLL-5: Isolate layout recalculations */
+		contain: layout style; /* Isolate layout recalculations */
 	}
 
 	.mcp-loading {
@@ -402,6 +414,27 @@ Manages MCP server configuration: list, create, edit, delete, test, start/stop.
 		color: var(--color-error);
 		border-radius: var(--border-radius-md);
 		margin-bottom: var(--spacing-lg);
+	}
+
+	.mcp-warning {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: var(--spacing-md);
+		background: var(--color-warning-light);
+		color: var(--color-warning);
+		border-radius: var(--border-radius-md);
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.dismiss-warning {
+		background: none;
+		border: none;
+		color: var(--color-warning);
+		cursor: pointer;
+		padding: var(--spacing-xs);
+		font-size: var(--font-size-lg);
+		line-height: 1;
 	}
 
 	/* Responsive */

@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde_json::json;
 use tauri::{Emitter, State, Window};
 use tracing::{info, warn};
 
 use crate::db::DBClient;
+use crate::models::streaming::{events, StreamChunk};
 use crate::models::UserQuestion;
-use crate::security::Validator;
+use crate::security::{serialize_for_query, validate_uuid_field};
 use crate::state::AppState;
 
 /// Validate that a question exists and has status "pending"
@@ -56,8 +56,7 @@ async fn update_question_answered(
     text_response: Option<&str>,
 ) -> Result<(), String> {
     // Encode selected_options as JSON string (matching the CREATE pattern)
-    let selected_options_json = serde_json::to_string(&selected_options)
-        .map_err(|e| format!("Failed to encode selected_options: {}", e))?;
+    let selected_options_json = serialize_for_query(&selected_options, "selected_options")?;
 
     // Build params for update - use bind parameters for user-provided values
     let mut params: Vec<(String, serde_json::Value)> = vec![
@@ -68,7 +67,7 @@ async fn update_question_answered(
         ("status".to_string(), serde_json::json!("answered")),
     ];
 
-    // Validate text_response length if provided (OPT-UQ-1)
+    // Validate text_response length if provided
     if let Some(text) = text_response {
         if text.len() > crate::tools::constants::user_question::MAX_TEXT_RESPONSE_LENGTH {
             return Err(format!(
@@ -136,9 +135,7 @@ pub async fn submit_user_response(
     state: State<'_, AppState>,
     window: Window,
 ) -> Result<(), String> {
-    // Validate question_id is a valid UUID
-    let validated_id = Validator::validate_uuid(&question_id)
-        .map_err(|e| format!("Invalid question_id: {}", e))?;
+    let validated_id = validate_uuid_field(&question_id, "question_id")?;
 
     validate_question_pending(&state.db, &validated_id).await?;
     update_question_answered(
@@ -156,14 +153,13 @@ pub async fn submit_user_response(
         "User submitted response - verified status"
     );
 
-    // Emit event for any listeners
-    let chunk = json!({
-        "chunk_type": "user_question_complete",
-        "question_id": validated_id,
-        "status": "answered"
-    });
+    // Emit typed event for any listeners
+    let chunk = StreamChunk::user_question_complete(
+        String::new(), // workflow_id not available in this command context
+        validated_id.to_string(),
+    );
 
-    if let Err(e) = window.emit("workflow_stream", &chunk) {
+    if let Err(e) = window.emit(events::WORKFLOW_STREAM, &chunk) {
         warn!(error = %e, "Failed to emit user_question_complete event");
     }
 
@@ -176,9 +172,7 @@ pub async fn get_pending_questions(
     workflow_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<UserQuestion>, String> {
-    // Validate workflow_id is a valid UUID
-    let validated_id = Validator::validate_uuid(&workflow_id)
-        .map_err(|e| format!("Invalid workflow_id: {}", e))?;
+    let validated_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Use parameterized query to prevent injection
     let query = "SELECT meta::id(id) AS id, workflow_id, agent_id, question, question_type, \
@@ -221,9 +215,7 @@ pub async fn skip_question(
     state: State<'_, AppState>,
     window: Window,
 ) -> Result<(), String> {
-    // Validate question_id is a valid UUID
-    let validated_id = Validator::validate_uuid(&question_id)
-        .map_err(|e| format!("Invalid question_id: {}", e))?;
+    let validated_id = validate_uuid_field(&question_id, "question_id")?;
 
     // Validate question exists and is pending (validated_id is safe UUID)
     let result: Vec<serde_json::Value> = state
@@ -262,14 +254,13 @@ pub async fn skip_question(
 
     info!(question_id = %validated_id, "User skipped question");
 
-    // Emit event
-    let chunk = json!({
-        "chunk_type": "user_question_complete",
-        "question_id": validated_id,
-        "status": "skipped"
-    });
+    // Emit typed event
+    let chunk = StreamChunk::user_question_complete(
+        String::new(), // workflow_id not available in this command context
+        validated_id.to_string(),
+    );
 
-    if let Err(e) = window.emit("workflow_stream", &chunk) {
+    if let Err(e) = window.emit(events::WORKFLOW_STREAM, &chunk) {
         warn!(error = %e, "Failed to emit user_question_complete event");
     }
 
@@ -282,7 +273,7 @@ mod tests {
     use crate::tools::constants::user_question as uq_const;
 
     // ============================================================================
-    // OPT-UQ-6: SQL Injection Tests
+    // SQL Injection Tests
     // ============================================================================
 
     #[test]
@@ -329,7 +320,7 @@ mod tests {
     }
 
     // ============================================================================
-    // OPT-UQ-1: Text Response Length Validation Tests
+    // Text Response Length Validation Tests
     // ============================================================================
 
     #[test]
@@ -377,7 +368,7 @@ mod tests {
     }
 
     // ============================================================================
-    // OPT-UQ-2: Option ID Validation Tests (validates constant exists)
+    // Option ID Validation Tests (validates constant exists)
     // ============================================================================
 
     #[test]
@@ -434,7 +425,7 @@ mod tests {
     }
 
     // ============================================================================
-    // OPT-UQ-9: Additional Integration Tests
+    // Additional Integration Tests
     // ============================================================================
 
     #[test]

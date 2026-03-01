@@ -17,6 +17,7 @@
 //! This tool allows agents to ask questions to users through a modal interface.
 
 use crate::db::{sanitize_for_surrealdb, DBClient};
+use crate::models::streaming::{events, StreamChunk};
 use crate::models::{QuestionOption, UserQuestionCreate, UserQuestionStreamPayload};
 use crate::tools::constants::user_question as uq_const;
 use crate::tools::user_question::circuit_breaker::UserQuestionCircuitBreaker;
@@ -51,14 +52,14 @@ struct AskInput {
 /// - Ask users questions with multiple response types
 /// - Wait for responses with progressive polling (5-minute timeout)
 /// - Receive checkbox selections, text input, or both
-/// - Circuit breaker protection against repeated timeouts (OPT-UQ-12)
+/// - Circuit breaker protection against repeated timeouts
 ///
 /// # Scope
 ///
 /// Each UserQuestionTool instance is scoped to a specific workflow and agent.
 /// Questions created will be associated with the workflow_id provided at construction.
 ///
-/// # Circuit Breaker (OPT-UQ-12)
+/// # Circuit Breaker
 ///
 /// The tool tracks consecutive timeouts per workflow. After 3 consecutive timeouts,
 /// the circuit opens and new questions are rejected immediately for 60 seconds.
@@ -72,7 +73,7 @@ pub struct UserQuestionTool {
     agent_id: String,
     /// Tauri app handle for emitting streaming events
     app_handle: Option<AppHandle>,
-    /// Circuit breaker for timeout resilience (OPT-UQ-12)
+    /// Circuit breaker for timeout resilience
     circuit_breaker: RwLock<UserQuestionCircuitBreaker>,
 }
 
@@ -257,13 +258,9 @@ impl UserQuestionTool {
                 context: input.context.clone(),
             };
 
-            let chunk = json!({
-                "workflow_id": self.workflow_id,
-                "chunk_type": "user_question_start",
-                "user_question": payload
-            });
+            let chunk = StreamChunk::user_question_start(self.workflow_id.clone(), payload);
 
-            if let Err(e) = handle.emit("workflow_stream", &chunk) {
+            if let Err(e) = handle.emit(events::WORKFLOW_STREAM, &chunk) {
                 warn!(error = %e, "Failed to emit user_question_start event");
             }
         }
@@ -275,13 +272,12 @@ impl UserQuestionTool {
     /// * `question_id` - UUID of the question
     fn emit_completion_event(&self, question_id: &str) {
         if let Some(ref handle) = self.app_handle {
-            let chunk = json!({
-                "workflow_id": self.workflow_id,
-                "chunk_type": "user_question_complete",
-                "question_id": question_id
-            });
+            let chunk = StreamChunk::user_question_complete(
+                self.workflow_id.clone(),
+                question_id.to_string(),
+            );
 
-            if let Err(e) = handle.emit("workflow_stream", &chunk) {
+            if let Err(e) = handle.emit(events::WORKFLOW_STREAM, &chunk) {
                 warn!(error = %e, "Failed to emit user_question_complete event");
             }
         }
@@ -292,7 +288,7 @@ impl UserQuestionTool {
     /// # Arguments
     /// * `input` - Question details including type, options, and context
     ///
-    /// # Circuit Breaker (OPT-UQ-12)
+    /// # Circuit Breaker
     ///
     /// Before asking, checks if the circuit breaker allows new questions.
     /// If the circuit is open (too many recent timeouts), returns an error immediately.
@@ -302,7 +298,7 @@ impl UserQuestionTool {
     /// - Skip: treated as success (user actively responded)
     #[instrument(skip(self), fields(workflow_id = %self.workflow_id, agent_id = %self.agent_id))]
     async fn ask_question(&self, input: AskInput) -> ToolResult<Value> {
-        // OPT-UQ-12: Check circuit breaker before asking
+        // Check circuit breaker before asking
         {
             let mut cb = self.circuit_breaker.write().map_err(|e| {
                 ToolError::ExecutionFailed(format!("Circuit breaker lock poisoned: {}", e))
@@ -337,7 +333,7 @@ impl UserQuestionTool {
         // Wait for response and update circuit breaker based on result
         let response = self.wait_for_response(&question_id).await;
 
-        // OPT-UQ-12: Update circuit breaker based on response
+        // Update circuit breaker based on response
         match &response {
             Ok(_) => {
                 if let Ok(mut cb) = self.circuit_breaker.write() {
@@ -384,7 +380,7 @@ impl UserQuestionTool {
         let mut interval_idx = 0;
 
         loop {
-            // Check timeout first (OPT-UQ-7)
+            // Check timeout first
             if start.elapsed() > timeout {
                 warn!(
                     question_id = %question_id,

@@ -15,7 +15,9 @@
 use crate::mcp::MCPManager;
 use crate::models::{AgentConfig, Lifecycle};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Task represents a request to the agent
 #[derive(Debug, Clone)]
@@ -61,6 +63,25 @@ pub enum ReportStatus {
     Partial,
 }
 
+/// Source of a reasoning step
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSource {
+    /// Synthetic descriptions from agent flow (e.g. "Analyzing task...", "Calling tool X...")
+    AgentFlow,
+    /// Real thinking content from reasoning models (e.g. Mistral Magistral)
+    ModelThinking,
+}
+
+impl std::fmt::Display for ReasoningSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReasoningSource::AgentFlow => write!(f, "agent_flow"),
+            ReasoningSource::ModelThinking => write!(f, "model_thinking"),
+        }
+    }
+}
+
 /// Intermediate reasoning step data for persistence
 #[derive(Debug, Clone)]
 pub struct ReasoningStepData {
@@ -68,6 +89,10 @@ pub struct ReasoningStepData {
     pub content: String,
     /// Duration in milliseconds (from start of execution to this step)
     pub duration_ms: u64,
+    /// Global ordering sequence within the execution
+    pub sequence: u32,
+    /// Source of this reasoning step
+    pub source: ReasoningSource,
 }
 
 /// Detailed tool execution data for persistence
@@ -91,6 +116,8 @@ pub struct ToolExecutionData {
     pub duration_ms: u64,
     /// Iteration number in the tool loop
     pub iteration: u32,
+    /// Global ordering sequence within the execution
+    pub sequence: u32,
 }
 
 /// Metrics collected during task execution
@@ -122,7 +149,7 @@ pub trait Agent: Send + Sync {
     /// New implementations should prefer `execute_with_mcp`.
     async fn execute(&self, task: Task) -> anyhow::Result<Report>;
 
-    /// Executes a task with access to MCP tools
+    /// Executes a task with access to MCP tools and optional cancellation support.
     ///
     /// This method allows the agent to call MCP tools during execution.
     /// The default implementation delegates to `execute()` for backward compatibility.
@@ -130,6 +157,9 @@ pub trait Agent: Send + Sync {
     /// # Arguments
     /// * `task` - The task to execute
     /// * `mcp_manager` - Optional MCP manager for tool invocation
+    /// * `cancellation_token` - Optional cancellation token for graceful shutdown.
+    ///   When provided, the agent should propagate this token to sub-agent tools
+    ///   so they can abort when the user cancels the workflow.
     ///
     /// # Returns
     /// A report containing the execution results and metrics
@@ -137,6 +167,7 @@ pub trait Agent: Send + Sync {
         &self,
         task: Task,
         _mcp_manager: Option<Arc<MCPManager>>,
+        _cancellation_token: Option<CancellationToken>,
     ) -> anyhow::Result<Report> {
         // Default implementation for backward compatibility
         self.execute(task).await

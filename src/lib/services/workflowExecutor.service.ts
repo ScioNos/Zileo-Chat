@@ -29,25 +29,26 @@
  * 3. Execute workflow via WorkflowService
  * 4. Update tokens
  * 5. Save assistant response
- * 6. Capture activities
- * 7. Refresh workflows
- * 8. Return result with metrics
+ * 6. Refresh workflows
+ * 7. Return result with metrics
  *
  * @module lib/services/workflowExecutor
  */
 
 import type { Message, SubAgentSummary } from '$types/message';
 import type { Workflow, WorkflowMetrics, WorkflowResult } from '$types/workflow';
+import type { ChatBlock } from '$types/chat-block';
 import { MessageService } from './message.service';
 import { WorkflowService } from './workflow.service';
 import { streamingStore, activeSubAgents } from '$lib/stores/streaming';
 import { get } from 'svelte/store';
 import { tokenStore } from '$lib/stores/tokens';
-import { activityStore } from '$lib/stores/activity';
 import { workflowStore } from '$lib/stores/workflows';
-import { backgroundWorkflowsStore } from '$lib/stores/backgroundWorkflows';
+import { backgroundWorkflowsStore } from '$lib/stores/background-workflows';
+import { executionBlocksStore, executionBlocks } from '$lib/stores/execution-blocks';
 import { toastStore } from '$lib/stores/toast';
 import { t } from '$lib/i18n';
+import { getErrorMessage } from '$lib/utils/error';
 
 /**
  * Parameters for executing a workflow message.
@@ -71,7 +72,7 @@ export interface ExecutionResult {
 	success: boolean;
 	/** ID of the saved user message */
 	userMessageId?: string;
-	/** ID of the saved assistant message */
+	/** ID of the saved assistant message (matches backend message_id for block association) */
 	assistantMessageId?: string;
 	/** Error message if execution failed */
 	error?: string;
@@ -79,6 +80,8 @@ export interface ExecutionResult {
 	metrics?: WorkflowMetrics;
 	/** The full workflow result */
 	workflowResult?: WorkflowResult;
+	/** Snapshot of execution blocks captured before reset (SA-019 P5) */
+	blocks?: ChatBlock[];
 }
 
 /**
@@ -124,7 +127,7 @@ function createUserMessage(workflowId: string, content: string): Message {
  */
 function createAssistantMessage(workflowId: string, result: WorkflowResult): Message {
 	return {
-		id: crypto.randomUUID(),
+		id: result.message_id,
 		workflow_id: workflowId,
 		role: 'assistant',
 		content: result.response,
@@ -159,17 +162,27 @@ function createErrorMessage(workflowId: string, error: string): Message {
 /**
  * Service for orchestrating workflow execution.
  *
- * Encapsulates the 8-step message sending and streaming logic:
+ * Encapsulates the 7-step message sending and streaming logic:
  * 1. Save user message to database
  * 2. Start streaming state
  * 3. Execute workflow via backend
  * 4. Update token counts and cost
  * 5. Save assistant response to database
- * 6. Capture streaming activities to historical
- * 7. Refresh workflows and update cumulative tokens
- * 8. Return execution result
+ * 6. Refresh workflows and update cumulative tokens
+ * 7. Return execution result
  */
+/** Tracks workflow IDs currently being executed to prevent double-submit */
+const executingWorkflows = new Set<string>();
+
 export const WorkflowExecutorService = {
+	/**
+	 * Check if a workflow is currently being executed.
+	 * Used by the UI to disable the send button during execution.
+	 */
+	isExecuting(workflowId: string): boolean {
+		return executingWorkflows.has(workflowId);
+	},
+
 	/**
 	 * Execute a workflow message with full orchestration.
 	 *
@@ -183,26 +196,17 @@ export const WorkflowExecutorService = {
 	 * @param params - Execution parameters
 	 * @param callbacks - Optional callbacks for UI updates
 	 * @returns Execution result with success status and metrics
-	 *
-	 * @example
-	 * ```typescript
-	 * const result = await WorkflowExecutorService.execute(
-	 *   {
-	 *     workflowId: 'wf-123',
-	 *     message: 'Hello, analyze this code',
-	 *     agentId: 'agent-456',
-	 *     locale: 'en'
-	 *   },
-	 *   {
-	 *     onUserMessage: (msg) => messages.push(msg),
-	 *     onAssistantMessage: (msg) => messages.push(msg),
-	 *     onError: (msg) => messages.push(msg)
-	 *   }
-	 * );
-	 * ```
 	 */
 	async execute(params: ExecutionParams, callbacks?: ExecutionCallbacks): Promise<ExecutionResult> {
 		const { workflowId, message, agentId, locale } = params;
+
+		// Double-submit guard: prevent concurrent executions for same workflow
+		if (executingWorkflows.has(workflowId)) {
+			return {
+				success: false,
+				error: 'A message is already being processed for this workflow'
+			};
+		}
 
 		// Check concurrent limit before starting
 		if (!backgroundWorkflowsStore.canStart()) {
@@ -224,6 +228,9 @@ export const WorkflowExecutorService = {
 		const isStillViewed = () =>
 			backgroundWorkflowsStore.getViewedWorkflowId() === workflowId;
 
+		// Mark workflow as executing (atomic guard)
+		executingWorkflows.add(workflowId);
+
 		try {
 			// Step 1: Save user message
 			const userMessageId = await MessageService.saveUser(workflowId, message);
@@ -238,8 +245,9 @@ export const WorkflowExecutorService = {
 				selectedWorkflow?.name ?? 'Workflow'
 			);
 
-			// Step 2: Start streaming (for the viewed workflow)
+			// Step 2: Start streaming and execution blocks (for the viewed workflow)
 			tokenStore.startStreaming();
+			executionBlocksStore.start(workflowId);
 			await streamingStore.start(workflowId);
 
 			// Step 3: Execute workflow (long-running IPC - user may switch workflows)
@@ -262,10 +270,12 @@ export const WorkflowExecutorService = {
 			callbacks?.onTokenUpdate?.(workflowResult.metrics);
 
 			// Step 5: Save assistant response (always persist to DB)
+			// Use backend-generated message_id to match persisted blocks (SA-019 P5)
 			const assistantMessageId = await MessageService.saveAssistant(
 				workflowId,
 				workflowResult.response,
-				workflowResult.metrics
+				workflowResult.metrics,
+				workflowResult.message_id
 			);
 			// Only push to UI if still viewing this workflow
 			if (isStillViewed()) {
@@ -275,6 +285,7 @@ export const WorkflowExecutorService = {
 				const subAgentSummaries: SubAgentSummary[] = subAgents
 					.filter(a => a.status === 'completed' || a.status === 'error')
 					.map(a => ({
+						id: a.id,
 						name: a.name,
 						status: a.status as 'completed' | 'error',
 						duration_ms: a.metrics?.duration_ms,
@@ -287,12 +298,7 @@ export const WorkflowExecutorService = {
 				callbacks?.onAssistantMessage?.(assistantMessage);
 			}
 
-			// Step 6: Capture streaming activities to historical (UI-only, guard)
-			if (isStillViewed()) {
-				activityStore.captureStreamingActivities();
-			}
-
-			// Step 7: Refresh workflows (always reload list)
+			// Step 6: Refresh workflows (always reload list)
 			await workflowStore.loadWorkflows();
 			if (isStillViewed()) {
 				const workflow = workflowStore.getSelected();
@@ -302,17 +308,19 @@ export const WorkflowExecutorService = {
 				callbacks?.onWorkflowRefresh?.(workflow);
 			}
 
-			// Step 8: Return success result
+			// Step 7: Return success result
+			// Capture blocks snapshot BEFORE finally{} resets the store (SA-019 P5)
 			return {
 				success: true,
 				userMessageId,
 				assistantMessageId,
 				metrics: workflowResult.metrics,
-				workflowResult
+				workflowResult,
+				blocks: get(executionBlocks)
 			};
 		} catch (error) {
 			// Handle execution errors - always save to DB
-			const errorMsg = error instanceof Error ? error.message : String(error);
+			const errorMsg = getErrorMessage(error);
 			await MessageService.saveSystem(workflowId, `Error: ${errorMsg}`);
 
 			// Only push error to UI if still viewing this workflow
@@ -326,9 +334,13 @@ export const WorkflowExecutorService = {
 				error: errorMsg
 			};
 		} finally {
+			// Release double-submit guard
+			executingWorkflows.delete(workflowId);
+
 			// Only cleanup streaming/token UI if still viewing this workflow
 			if (isStillViewed()) {
 				streamingStore.reset();
+				executionBlocksStore.reset();
 				tokenStore.stopStreaming();
 			}
 		}

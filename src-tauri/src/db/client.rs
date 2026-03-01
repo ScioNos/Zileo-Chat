@@ -17,23 +17,7 @@ use surrealdb::{
     engine::local::{Db, RocksDb},
     Surreal,
 };
-use tracing::{debug, error, info, instrument, warn};
-
-// =========================================================================
-// OPT-DB-10: Query Statistics (Monitoring/Diagnostic)
-// =========================================================================
-
-/// Statistics returned from a query execution.
-///
-/// Used for monitoring and performance analysis.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct QueryStats {
-    /// Execution time in milliseconds
-    pub execution_time_ms: u64,
-    /// Number of rows returned
-    pub row_count: usize,
-}
+use tracing::{debug, error, info, instrument};
 
 /// Database client for SurrealDB embedded operations
 pub struct DBClient {
@@ -72,17 +56,9 @@ impl DBClient {
             e
         })?;
 
-        // Run MCP HTTP migration to ensure command field supports 'http' value
-        // Must use REMOVE FIELD + DEFINE FIELD to force ASSERT constraint update
-        // (SurrealDB does not update ASSERT constraints on existing fields with just DEFINE)
-        let mcp_http_migration = r#"
-            REMOVE FIELD IF EXISTS command ON TABLE mcp_server;
-            DEFINE FIELD command ON mcp_server TYPE string ASSERT $value IN ['docker', 'npx', 'uvx', 'http'];
-        "#;
-        self.db.query(mcp_http_migration).await.map_err(|e| {
-            warn!(error = %e, "MCP HTTP migration query failed (may be expected if table doesn't exist yet)");
-            e
-        })?;
+        // Note: MCP HTTP migration (command field ASSERT with 'http') is handled
+        // in SCHEMA_SQL via DEFINE FIELD OVERWRITE (PAT_DB_003 compliant).
+        // The guarded migration in commands/migration.rs handles existing databases.
 
         info!("Database schema initialized successfully");
         Ok(())
@@ -220,24 +196,6 @@ impl DBClient {
         }
     }
 
-    /// Updates a record by ID (prepared for future phases)
-    #[allow(dead_code)]
-    #[instrument(name = "db_update", skip(self, data), fields(record_id = %id))]
-    pub async fn update<T>(&self, id: &str, data: T) -> Result<()>
-    where
-        T: serde::Serialize + Send + Sync + 'static,
-    {
-        debug!("Updating record");
-
-        let _: Vec<serde_json::Value> = self.db.update(id).content(data).await.map_err(|e| {
-            error!(error = %e, "Failed to update record");
-            e
-        })?;
-
-        debug!("Record updated");
-        Ok(())
-    }
-
     /// Deletes a record by ID
     ///
     /// Accepts ID in format `table:uuid` (e.g., "workflow:123e4567-...")
@@ -280,7 +238,6 @@ impl DBClient {
     ///     vec![("data".to_string(), json!({"name": "test"}))]
     /// ).await?;
     /// ```
-    #[allow(dead_code)] // May be used by future tools
     #[instrument(name = "db_query_with_params", skip(self, params), fields(query_len = query.len()))]
     pub async fn query_with_params<T>(
         &self,
@@ -395,188 +352,6 @@ impl DBClient {
         })?;
 
         debug!("Parameterized mutation executed successfully");
-        Ok(())
-    }
-
-    /// Executes a series of operations within a database transaction.
-    ///
-    /// If any operation fails, the transaction is rolled back (CANCEL TRANSACTION).
-    /// If all operations succeed, the transaction is committed (COMMIT TRANSACTION).
-    ///
-    /// # Arguments
-    /// * `queries` - Vector of SurrealQL queries to execute within the transaction
-    ///
-    /// # Example
-    /// ```ignore
-    /// db.transaction(vec![
-    ///     "CREATE workflow:`123` CONTENT { name: 'Test' }".to_string(),
-    ///     "CREATE message:`456` CONTENT { workflow_id: '123', content: 'Hello' }".to_string(),
-    /// ]).await?;
-    /// ```
-    ///
-    /// # Note
-    /// For complex transactions with bind parameters, use `transaction_with_params`.
-    #[allow(dead_code)] // Prepared for future use in complex multi-table operations
-    #[instrument(name = "db_transaction", skip(self, queries), fields(query_count = queries.len()))]
-    pub async fn transaction(&self, queries: Vec<String>) -> Result<()> {
-        debug!("Starting transaction with {} queries", queries.len());
-
-        // Begin transaction
-        if let Err(e) = self.db.query("BEGIN TRANSACTION").await {
-            error!(error = %e, "Failed to begin transaction");
-            return Err(e.into());
-        }
-
-        // Execute all queries
-        for (i, query) in queries.iter().enumerate() {
-            debug!(query_index = i, "Executing transaction query");
-            if let Err(e) = self.db.query(query).await {
-                error!(error = %e, query_index = i, "Transaction query failed, rolling back");
-                // Attempt to cancel the transaction
-                if let Err(cancel_err) = self.db.query("CANCEL TRANSACTION").await {
-                    warn!(error = %cancel_err, "Failed to cancel transaction after error");
-                }
-                return Err(e.into());
-            }
-        }
-
-        // Commit transaction
-        if let Err(e) = self.db.query("COMMIT TRANSACTION").await {
-            error!(error = %e, "Failed to commit transaction");
-            // Attempt to cancel on commit failure
-            if let Err(cancel_err) = self.db.query("CANCEL TRANSACTION").await {
-                warn!(error = %cancel_err, "Failed to cancel transaction after commit failure");
-            }
-            return Err(e.into());
-        }
-
-        info!("Transaction committed successfully");
-        Ok(())
-    }
-
-    // =========================================================================
-    // OPT-DB-10: Query with Stats (Monitoring/Diagnostic)
-    // =========================================================================
-
-    /// Executes a query with timing statistics for monitoring.
-    ///
-    /// Returns both the results and execution statistics.
-    /// Useful for performance profiling and query optimization analysis.
-    ///
-    /// # Arguments
-    /// * `query` - The SurrealQL query to execute
-    ///
-    /// # Example
-    /// ```ignore
-    /// let (results, stats) = db.query_with_stats::<Workflow>("SELECT * FROM workflow").await?;
-    /// println!("Query returned {} rows in {}ms", stats.row_count, stats.execution_time_ms);
-    /// ```
-    #[allow(dead_code)] // Prepared for monitoring/diagnostic use
-    #[instrument(name = "db_query_with_stats", skip(self), fields(query_len = query.len()))]
-    pub async fn query_with_stats<T>(&self, query: &str) -> Result<(Vec<T>, QueryStats)>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        use std::time::Instant;
-
-        debug!(query_preview = %query.chars().take(100).collect::<String>(), "Executing query with stats");
-
-        let start = Instant::now();
-
-        let mut result = self.db.query(query).await.map_err(|e| {
-            error!(error = %e, "Query execution failed");
-            e
-        })?;
-
-        let data: Vec<T> = result.take(0).map_err(|e| {
-            error!(error = %e, "Failed to deserialize query results");
-            e
-        })?;
-
-        let elapsed = start.elapsed();
-        let stats = QueryStats {
-            execution_time_ms: elapsed.as_millis() as u64,
-            row_count: data.len(),
-        };
-
-        debug!(
-            result_count = stats.row_count,
-            execution_time_ms = stats.execution_time_ms,
-            "Query with stats completed"
-        );
-        Ok((data, stats))
-    }
-
-    // =========================================================================
-    // Transaction Support
-    // =========================================================================
-
-    /// Executes a series of parameterized operations within a database transaction.
-    ///
-    /// Each operation is a tuple of (query, params) allowing bind parameters.
-    /// If any operation fails, the transaction is rolled back.
-    ///
-    /// # Arguments
-    /// * `operations` - Vector of (query, params) tuples
-    ///
-    /// # Example
-    /// ```ignore
-    /// db.transaction_with_params(vec![
-    ///     (
-    ///         "CREATE workflow:`123` CONTENT $data".to_string(),
-    ///         vec![("data".to_string(), json!({"name": "Test"}))]
-    ///     ),
-    ///     (
-    ///         "CREATE message:`456` CONTENT $data".to_string(),
-    ///         vec![("data".to_string(), json!({"workflow_id": "123"}))]
-    ///     ),
-    /// ]).await?;
-    /// ```
-    #[allow(dead_code)] // Prepared for future use in complex multi-table operations
-    #[instrument(name = "db_transaction_with_params", skip(self, operations), fields(op_count = operations.len()))]
-    pub async fn transaction_with_params(
-        &self,
-        operations: Vec<(String, Vec<(String, serde_json::Value)>)>,
-    ) -> Result<()> {
-        debug!(
-            "Starting parameterized transaction with {} operations",
-            operations.len()
-        );
-
-        // Begin transaction
-        if let Err(e) = self.db.query("BEGIN TRANSACTION").await {
-            error!(error = %e, "Failed to begin transaction");
-            return Err(e.into());
-        }
-
-        // Execute all operations with their parameters
-        for (i, (query, params)) in operations.iter().enumerate() {
-            debug!(op_index = i, "Executing transaction operation");
-
-            let mut query_builder = self.db.query(query);
-            for (name, value) in params {
-                query_builder = query_builder.bind((name.clone(), value.clone()));
-            }
-
-            if let Err(e) = query_builder.await {
-                error!(error = %e, op_index = i, "Transaction operation failed, rolling back");
-                if let Err(cancel_err) = self.db.query("CANCEL TRANSACTION").await {
-                    warn!(error = %cancel_err, "Failed to cancel transaction after error");
-                }
-                return Err(e.into());
-            }
-        }
-
-        // Commit transaction
-        if let Err(e) = self.db.query("COMMIT TRANSACTION").await {
-            error!(error = %e, "Failed to commit transaction");
-            if let Err(cancel_err) = self.db.query("CANCEL TRANSACTION").await {
-                warn!(error = %cancel_err, "Failed to cancel transaction after commit failure");
-            }
-            return Err(e.into());
-        }
-
-        info!("Parameterized transaction committed successfully");
         Ok(())
     }
 }

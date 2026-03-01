@@ -19,12 +19,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::UserQuestionStreamPayload;
+
 /// Type of streaming chunk content
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkType {
-    /// Token from LLM response
-    Token,
     /// Tool execution started
     ToolStart,
     /// Tool execution completed
@@ -47,6 +47,16 @@ pub enum ChunkType {
     TaskUpdate,
     /// Task completed
     TaskComplete,
+    /// User question started (waiting for user response)
+    UserQuestionStart,
+    /// User question completed (answered, skipped, or timed out)
+    UserQuestionComplete,
+    /// Complete thinking block from reasoning model (SA-019)
+    ThinkingBlock,
+    /// Tool call completed with full input/output details (SA-019)
+    ToolCallComplete,
+    /// Complete response block with real tokens (SA-019)
+    ResponseBlock,
 }
 
 /// Streaming chunk emitted during workflow execution
@@ -56,7 +66,7 @@ pub struct StreamChunk {
     pub workflow_id: String,
     /// Type of chunk content
     pub chunk_type: ChunkType,
-    /// Text content (for token/reasoning/error chunks)
+    /// Text content (for reasoning/error/thinking_block/response_block chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// Tool name (for tool_start/tool_end chunks)
@@ -92,12 +102,36 @@ pub struct StreamChunk {
     /// Task priority (for task_* chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_priority: Option<u8>,
+    /// Agent name associated with task (for task_* chunks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_agent_name: Option<String>,
+    /// User question payload (for user_question_start chunks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_question: Option<UserQuestionStreamPayload>,
+    /// Question ID (for user_question_complete chunks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
     /// Token count for this chunk (incremental)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_delta: Option<usize>,
     /// Cumulative token count (running total)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_total: Option<usize>,
+    /// Tool input parameters as JSON string (for tool_call_complete)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<String>,
+    /// Tool output result as JSON string (for tool_call_complete)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_output: Option<String>,
+    /// Tool execution success/failure (for tool_call_complete)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_success: Option<bool>,
+    /// Input tokens count (for response_block)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_input: Option<usize>,
+    /// Output tokens count (for response_block)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_output: Option<usize>,
 }
 
 /// Metrics included in sub-agent complete events
@@ -112,56 +146,6 @@ pub struct SubAgentStreamMetrics {
 }
 
 impl StreamChunk {
-    /// Creates a new token chunk
-    pub fn token(workflow_id: String, content: String) -> Self {
-        Self {
-            workflow_id,
-            chunk_type: ChunkType::Token,
-            content: Some(content),
-            tool: None,
-            duration: None,
-            sub_agent_id: None,
-            sub_agent_name: None,
-            parent_agent_id: None,
-            metrics: None,
-            progress: None,
-            task_id: None,
-            task_name: None,
-            task_status: None,
-            task_priority: None,
-            tokens_delta: None,
-            tokens_total: None,
-        }
-    }
-
-    /// Creates a new token chunk with token counts
-    #[allow(dead_code)]
-    pub fn token_with_counts(
-        workflow_id: String,
-        content: String,
-        tokens_delta: usize,
-        tokens_total: usize,
-    ) -> Self {
-        Self {
-            workflow_id,
-            chunk_type: ChunkType::Token,
-            content: Some(content),
-            tool: None,
-            duration: None,
-            sub_agent_id: None,
-            sub_agent_name: None,
-            parent_agent_id: None,
-            metrics: None,
-            progress: None,
-            task_id: None,
-            task_name: None,
-            task_status: None,
-            task_priority: None,
-            tokens_delta: Some(tokens_delta),
-            tokens_total: Some(tokens_total),
-        }
-    }
-
     /// Creates a new tool start chunk
     pub fn tool_start(workflow_id: String, tool: String) -> Self {
         Self {
@@ -179,8 +163,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -201,8 +193,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -223,8 +223,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -245,8 +253,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -275,41 +291,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
-        }
-    }
-
-    /// Creates a sub-agent progress event chunk.
-    ///
-    /// Emitted periodically during sub-agent execution to report progress.
-    /// Currently not used but defined for future implementation.
-    #[allow(dead_code)]
-    pub fn sub_agent_progress(
-        workflow_id: String,
-        sub_agent_id: String,
-        sub_agent_name: String,
-        parent_agent_id: String,
-        progress: u8,
-        status_message: Option<String>,
-    ) -> Self {
-        Self {
-            workflow_id,
-            chunk_type: ChunkType::SubAgentProgress,
-            content: status_message,
-            tool: None,
-            duration: None,
-            sub_agent_id: Some(sub_agent_id),
-            sub_agent_name: Some(sub_agent_name),
-            parent_agent_id: Some(parent_agent_id),
-            metrics: None,
-            progress: Some(progress.min(100)),
-            task_id: None,
-            task_name: None,
-            task_status: None,
-            task_priority: None,
-            tokens_delta: None,
-            tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -339,8 +330,16 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
@@ -370,20 +369,28 @@ impl StreamChunk {
             task_name: None,
             task_status: None,
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
     /// Creates a task create event chunk.
     ///
     /// Emitted when a new task is created.
-    #[allow(dead_code)]
     pub fn task_create(
         workflow_id: impl Into<String>,
         task_id: impl Into<String>,
         task_name: impl Into<String>,
         priority: u8,
+        agent_name: Option<String>,
     ) -> Self {
         Self {
             workflow_id: workflow_id.into(),
@@ -400,15 +407,22 @@ impl StreamChunk {
             task_name: Some(task_name.into()),
             task_status: Some("pending".to_string()),
             task_priority: Some(priority),
+            task_agent_name: agent_name,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
     /// Creates a task update event chunk.
     ///
     /// Emitted when a task status is updated.
-    #[allow(dead_code)]
     pub fn task_update(
         workflow_id: impl Into<String>,
         task_id: impl Into<String>,
@@ -430,15 +444,22 @@ impl StreamChunk {
             task_name: Some(task_name.into()),
             task_status: Some(status.into()),
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
         }
     }
 
     /// Creates a task complete event chunk.
     ///
     /// Emitted when a task is completed.
-    #[allow(dead_code)]
     pub fn task_complete(
         workflow_id: impl Into<String>,
         task_id: impl Into<String>,
@@ -460,8 +481,188 @@ impl StreamChunk {
             task_name: Some(task_name.into()),
             task_status: Some("completed".to_string()),
             task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
             tokens_delta: None,
             tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
+        }
+    }
+
+    /// Creates a user question start chunk.
+    ///
+    /// Emitted when an agent asks a question to the user and waits for response.
+    pub fn user_question_start(workflow_id: String, payload: UserQuestionStreamPayload) -> Self {
+        Self {
+            workflow_id,
+            chunk_type: ChunkType::UserQuestionStart,
+            content: None,
+            tool: None,
+            duration: None,
+            sub_agent_id: None,
+            sub_agent_name: None,
+            parent_agent_id: None,
+            metrics: None,
+            progress: None,
+            task_id: None,
+            task_name: None,
+            task_status: None,
+            task_priority: None,
+            task_agent_name: None,
+            user_question: Some(payload),
+            question_id: None,
+            tokens_delta: None,
+            tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
+        }
+    }
+
+    /// Creates a user question complete chunk.
+    ///
+    /// Emitted when a user question is answered, skipped, or timed out.
+    pub fn user_question_complete(workflow_id: String, question_id: String) -> Self {
+        Self {
+            workflow_id,
+            chunk_type: ChunkType::UserQuestionComplete,
+            content: None,
+            tool: None,
+            duration: None,
+            sub_agent_id: None,
+            sub_agent_name: None,
+            parent_agent_id: None,
+            metrics: None,
+            progress: None,
+            task_id: None,
+            task_name: None,
+            task_status: None,
+            task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: Some(question_id),
+            tokens_delta: None,
+            tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
+        }
+    }
+
+    /// Creates a thinking block chunk from reasoning model output (SA-019).
+    ///
+    /// Emitted when a reasoning model returns thinking content.
+    pub fn thinking_block(workflow_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            chunk_type: ChunkType::ThinkingBlock,
+            content: Some(content.into()),
+            tool: None,
+            duration: None,
+            sub_agent_id: None,
+            sub_agent_name: None,
+            parent_agent_id: None,
+            metrics: None,
+            progress: None,
+            task_id: None,
+            task_name: None,
+            task_status: None,
+            task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
+            tokens_delta: None,
+            tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: None,
+            tokens_output: None,
+        }
+    }
+
+    /// Creates a tool call complete chunk with full input/output details (SA-019).
+    ///
+    /// Replaces tool_end with enriched data for inline display.
+    pub fn tool_call_complete(
+        workflow_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        duration: u64,
+        input: impl Into<String>,
+        output: impl Into<String>,
+        success: bool,
+    ) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            chunk_type: ChunkType::ToolCallComplete,
+            content: None,
+            tool: Some(tool_name.into()),
+            duration: Some(duration),
+            sub_agent_id: None,
+            sub_agent_name: None,
+            parent_agent_id: None,
+            metrics: None,
+            progress: None,
+            task_id: None,
+            task_name: None,
+            task_status: None,
+            task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
+            tokens_delta: None,
+            tokens_total: None,
+            tool_input: Some(input.into()),
+            tool_output: Some(output.into()),
+            tool_success: Some(success),
+            tokens_input: None,
+            tokens_output: None,
+        }
+    }
+
+    /// Creates a response block chunk with complete content and real tokens (SA-019).
+    ///
+    /// Replaces progressive token streaming with a single complete response.
+    pub fn response_block(
+        workflow_id: impl Into<String>,
+        content: impl Into<String>,
+        tokens_input: usize,
+        tokens_output: usize,
+    ) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            chunk_type: ChunkType::ResponseBlock,
+            content: Some(content.into()),
+            tool: None,
+            duration: None,
+            sub_agent_id: None,
+            sub_agent_name: None,
+            parent_agent_id: None,
+            metrics: None,
+            progress: None,
+            task_id: None,
+            task_name: None,
+            task_status: None,
+            task_priority: None,
+            task_agent_name: None,
+            user_question: None,
+            question_id: None,
+            tokens_delta: None,
+            tokens_total: None,
+            tool_input: None,
+            tool_output: None,
+            tool_success: None,
+            tokens_input: Some(tokens_input),
+            tokens_output: Some(tokens_output),
         }
     }
 }
@@ -519,15 +720,17 @@ impl WorkflowComplete {
     }
 }
 
-/// Validation request details for human-in-the-loop approval
+/// Validation request details for human-in-the-loop approval.
+///
+/// Used for all validation types: sub-agent, tool, and MCP operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationRequiredEvent {
     /// Validation request ID (for approve/reject calls)
     pub validation_id: String,
     /// Associated workflow ID
     pub workflow_id: String,
-    /// Type of sub-agent operation
-    pub operation_type: SubAgentOperationType,
+    /// Validation type (e.g. "sub_agent", "tool", "mcp", "file_op", "db_op")
+    pub validation_type: String,
     /// Operation description
     pub operation: String,
     /// Risk level assessment
@@ -598,10 +801,6 @@ mod tests {
 
     #[test]
     fn test_chunk_type_serialization() {
-        let chunk_type = ChunkType::Token;
-        let json = serde_json::to_string(&chunk_type).unwrap();
-        assert_eq!(json, "\"token\"");
-
         let chunk_type = ChunkType::ToolStart;
         let json = serde_json::to_string(&chunk_type).unwrap();
         assert_eq!(json, "\"tool_start\"");
@@ -609,18 +808,10 @@ mod tests {
         let chunk_type = ChunkType::ToolEnd;
         let json = serde_json::to_string(&chunk_type).unwrap();
         assert_eq!(json, "\"tool_end\"");
-    }
 
-    #[test]
-    fn test_stream_chunk_token() {
-        let chunk = StreamChunk::token("wf_001".to_string(), "Hello".to_string());
-        assert_eq!(chunk.chunk_type, ChunkType::Token);
-        assert_eq!(chunk.content, Some("Hello".to_string()));
-        assert!(chunk.tool.is_none());
-
-        let json = serde_json::to_string(&chunk).unwrap();
-        assert!(json.contains("\"chunk_type\":\"token\""));
-        assert!(json.contains("\"content\":\"Hello\""));
+        let chunk_type = ChunkType::ThinkingBlock;
+        let json = serde_json::to_string(&chunk_type).unwrap();
+        assert_eq!(json, "\"thinking_block\"");
     }
 
     #[test]
@@ -732,32 +923,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_chunk_sub_agent_progress() {
-        let chunk = StreamChunk::sub_agent_progress(
-            "wf_001".to_string(),
-            "sub_123".to_string(),
-            "Analyzer".to_string(),
-            "parent_456".to_string(),
-            50,
-            Some("Processing files...".to_string()),
-        );
-        assert_eq!(chunk.chunk_type, ChunkType::SubAgentProgress);
-        assert_eq!(chunk.progress, Some(50));
-        assert_eq!(chunk.content, Some("Processing files...".to_string()));
-
-        // Test clamping to 100
-        let chunk_over = StreamChunk::sub_agent_progress(
-            "wf_001".to_string(),
-            "sub_123".to_string(),
-            "Analyzer".to_string(),
-            "parent_456".to_string(),
-            150,
-            None,
-        );
-        assert_eq!(chunk_over.progress, Some(100));
-    }
-
-    #[test]
     fn test_stream_chunk_sub_agent_complete() {
         let metrics = SubAgentStreamMetrics {
             duration_ms: 2500,
@@ -820,28 +985,173 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_chunk_with_tokens() {
-        // Test token chunk without counts (default)
-        let chunk = StreamChunk::token("wf_001".to_string(), "Hello".to_string());
-        assert!(chunk.tokens_delta.is_none());
-        assert!(chunk.tokens_total.is_none());
+    fn test_user_question_chunk_type_serialization() {
+        let chunk_type = ChunkType::UserQuestionStart;
+        let json = serde_json::to_string(&chunk_type).unwrap();
+        assert_eq!(json, "\"user_question_start\"");
 
-        // Test that optional fields are not serialized when None
+        let chunk_type = ChunkType::UserQuestionComplete;
+        let json = serde_json::to_string(&chunk_type).unwrap();
+        assert_eq!(json, "\"user_question_complete\"");
+    }
+
+    #[test]
+    fn test_stream_chunk_user_question_start() {
+        let payload = UserQuestionStreamPayload {
+            question_id: "q_001".to_string(),
+            question: "Which database?".to_string(),
+            question_type: "checkbox".to_string(),
+            options: None,
+            text_placeholder: None,
+            text_required: false,
+            context: Some("We need to choose a DB".to_string()),
+        };
+        let chunk = StreamChunk::user_question_start("wf_001".to_string(), payload);
+        assert_eq!(chunk.chunk_type, ChunkType::UserQuestionStart);
+        assert!(chunk.user_question.is_some());
+        let uq = chunk.user_question.as_ref().unwrap();
+        assert_eq!(uq.question_id, "q_001");
+        assert_eq!(uq.question, "Which database?");
+        assert!(chunk.question_id.is_none());
+        assert!(chunk.content.is_none());
+
         let json = serde_json::to_string(&chunk).unwrap();
-        assert!(!json.contains("tokens_delta"));
-        assert!(!json.contains("tokens_total"));
+        assert!(json.contains("\"chunk_type\":\"user_question_start\""));
+        assert!(json.contains("\"user_question\""));
+        // Inside the payload, fields are camelCase due to UserQuestionStreamPayload serde rename
+        assert!(json.contains("\"questionId\":\"q_001\""));
+    }
 
-        // Test token chunk with counts
-        let chunk_with_tokens =
-            StreamChunk::token_with_counts("wf_001".to_string(), "Hello".to_string(), 5, 100);
-        assert_eq!(chunk_with_tokens.tokens_delta, Some(5));
-        assert_eq!(chunk_with_tokens.tokens_total, Some(100));
-        assert_eq!(chunk_with_tokens.chunk_type, ChunkType::Token);
-        assert_eq!(chunk_with_tokens.content, Some("Hello".to_string()));
+    #[test]
+    fn test_stream_chunk_user_question_complete() {
+        let chunk = StreamChunk::user_question_complete("wf_001".to_string(), "q_001".to_string());
+        assert_eq!(chunk.chunk_type, ChunkType::UserQuestionComplete);
+        assert_eq!(chunk.question_id, Some("q_001".to_string()));
+        assert!(chunk.user_question.is_none());
 
-        // Test serialization includes token fields when present
-        let json_with_tokens = serde_json::to_string(&chunk_with_tokens).unwrap();
-        assert!(json_with_tokens.contains("\"tokens_delta\":5"));
-        assert!(json_with_tokens.contains("\"tokens_total\":100"));
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"chunk_type\":\"user_question_complete\""));
+        assert!(json.contains("\"question_id\":\"q_001\""));
+    }
+
+    #[test]
+    fn test_user_question_fields_skipped_when_none() {
+        let chunk = StreamChunk::reasoning("wf_001".to_string(), "Analyzing...".to_string());
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(!json.contains("user_question"));
+        assert!(!json.contains("question_id"));
+    }
+
+    // SA-019: New chunk type tests
+
+    #[test]
+    fn test_new_chunk_type_serialization() {
+        let chunk_type = ChunkType::ThinkingBlock;
+        assert_eq!(
+            serde_json::to_string(&chunk_type).unwrap(),
+            "\"thinking_block\""
+        );
+
+        let chunk_type = ChunkType::ToolCallComplete;
+        assert_eq!(
+            serde_json::to_string(&chunk_type).unwrap(),
+            "\"tool_call_complete\""
+        );
+
+        let chunk_type = ChunkType::ResponseBlock;
+        assert_eq!(
+            serde_json::to_string(&chunk_type).unwrap(),
+            "\"response_block\""
+        );
+    }
+
+    #[test]
+    fn test_stream_chunk_thinking_block() {
+        let chunk = StreamChunk::thinking_block("wf_001", "Let me reason about this...");
+        assert_eq!(chunk.chunk_type, ChunkType::ThinkingBlock);
+        assert_eq!(
+            chunk.content,
+            Some("Let me reason about this...".to_string())
+        );
+        assert!(chunk.tool.is_none());
+        assert!(chunk.tool_input.is_none());
+
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"chunk_type\":\"thinking_block\""));
+        assert!(json.contains("Let me reason about this..."));
+        // New fields should be omitted when None
+        assert!(!json.contains("tool_input"));
+        assert!(!json.contains("tokens_input"));
+    }
+
+    #[test]
+    fn test_stream_chunk_tool_call_complete() {
+        let chunk = StreamChunk::tool_call_complete(
+            "wf_001",
+            "MemoryTool",
+            150,
+            r#"{"query": "find docs"}"#,
+            r#"{"results": ["doc1", "doc2"]}"#,
+            true,
+        );
+        assert_eq!(chunk.chunk_type, ChunkType::ToolCallComplete);
+        assert_eq!(chunk.tool, Some("MemoryTool".to_string()));
+        assert_eq!(chunk.duration, Some(150));
+        assert_eq!(
+            chunk.tool_input,
+            Some(r#"{"query": "find docs"}"#.to_string())
+        );
+        assert_eq!(
+            chunk.tool_output,
+            Some(r#"{"results": ["doc1", "doc2"]}"#.to_string())
+        );
+        assert_eq!(chunk.tool_success, Some(true));
+        assert!(chunk.tokens_input.is_none());
+
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"chunk_type\":\"tool_call_complete\""));
+        assert!(json.contains("\"tool_input\""));
+        assert!(json.contains("\"tool_output\""));
+        assert!(json.contains("\"tool_success\":true"));
+    }
+
+    #[test]
+    fn test_stream_chunk_tool_call_complete_failure() {
+        let chunk = StreamChunk::tool_call_complete(
+            "wf_001",
+            "BadTool",
+            50,
+            "{}",
+            r#"{"error": "Connection refused"}"#,
+            false,
+        );
+        assert_eq!(chunk.tool_success, Some(false));
+    }
+
+    #[test]
+    fn test_stream_chunk_response_block() {
+        let chunk = StreamChunk::response_block("wf_001", "The answer is 42.", 100, 25);
+        assert_eq!(chunk.chunk_type, ChunkType::ResponseBlock);
+        assert_eq!(chunk.content, Some("The answer is 42.".to_string()));
+        assert_eq!(chunk.tokens_input, Some(100));
+        assert_eq!(chunk.tokens_output, Some(25));
+        assert!(chunk.tool.is_none());
+        assert!(chunk.tool_input.is_none());
+
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"chunk_type\":\"response_block\""));
+        assert!(json.contains("\"tokens_input\":100"));
+        assert!(json.contains("\"tokens_output\":25"));
+    }
+
+    #[test]
+    fn test_new_fields_skipped_when_none() {
+        let chunk = StreamChunk::reasoning("wf_001".to_string(), "Analyzing...".to_string());
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(!json.contains("tool_input"));
+        assert!(!json.contains("tool_output"));
+        assert!(!json.contains("tool_success"));
+        assert!(!json.contains("tokens_input"));
+        assert!(!json.contains("tokens_output"));
     }
 }

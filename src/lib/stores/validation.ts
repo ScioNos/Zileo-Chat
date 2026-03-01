@@ -27,7 +27,8 @@
 import { writable, derived, get } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import type { ValidationRequest, RiskLevel } from '$types/validation';
+import type { ValidationRequest, RiskLevel, ValidationType } from '$types/validation';
+import { getErrorMessage } from '$lib/utils/error';
 import type { ValidationRequiredEvent } from '$types/sub-agent';
 
 /**
@@ -37,6 +38,9 @@ const EVENTS = {
 	VALIDATION_REQUIRED: 'validation_required',
 	VALIDATION_RESPONSE: 'validation_response'
 } as const;
+
+/** Auto-reject timeout for pending validations (5 minutes) */
+const VALIDATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ============================================================================
 // Types
@@ -99,20 +103,38 @@ let unlistener: UnlistenFn | null = null;
 let isInitialized = false;
 
 /**
+ * Timer for auto-rejecting pending validations after VALIDATION_TIMEOUT_MS.
+ */
+let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Clear any active validation timeout timer.
+ */
+function clearValidationTimeout(): void {
+	if (timeoutTimer) {
+		clearTimeout(timeoutTimer);
+		timeoutTimer = null;
+	}
+}
+
+/**
+ * Start a timeout timer that auto-rejects the pending validation.
+ */
+function startValidationTimeout(): void {
+	clearValidationTimeout();
+	timeoutTimer = setTimeout(() => {
+		validationStore.reject('Auto-rejected: validation timeout');
+	}, VALIDATION_TIMEOUT_MS);
+}
+
+/**
  * Converts a ValidationRequiredEvent to a ValidationRequest for the modal.
  */
 function convertToValidationRequest(event: ValidationRequiredEvent): ValidationRequest {
-	// Map operation_type to ValidationType
-	const typeMap: Record<string, 'sub_agent'> = {
-		spawn: 'sub_agent',
-		delegate: 'sub_agent',
-		parallel_batch: 'sub_agent'
-	};
-
 	return {
 		id: event.validation_id,
 		workflow_id: event.workflow_id,
-		type: typeMap[event.operation_type] ?? 'sub_agent',
+		type: (event.validation_type as ValidationType) ?? 'sub_agent',
 		operation: event.operation,
 		details: event.details,
 		risk_level: event.risk_level as RiskLevel,
@@ -137,7 +159,6 @@ export const validationStore = {
 	async init(): Promise<void> {
 		// Safety check: cleanup existing listener if already initialized
 		if (isInitialized) {
-			console.warn('[validation] Store already initialized, cleaning up first');
 			await this.cleanup();
 		}
 
@@ -157,6 +178,9 @@ export const validationStore = {
 					},
 					lastError: null
 				}));
+
+				// Start timeout timer for auto-rejection
+				startValidationTimeout();
 			}
 		);
 
@@ -172,6 +196,7 @@ export const validationStore = {
 			return;
 		}
 
+		clearValidationTimeout();
 		store.update((s) => ({ ...s, isProcessing: true }));
 
 		try {
@@ -186,7 +211,7 @@ export const validationStore = {
 				totalProcessed: s.totalProcessed + 1
 			}));
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error);
+			const errorMessage = getErrorMessage(error);
 			store.update((s) => ({
 				...s,
 				isProcessing: false,
@@ -206,6 +231,7 @@ export const validationStore = {
 			return;
 		}
 
+		clearValidationTimeout();
 		store.update((s) => ({ ...s, isProcessing: true }));
 
 		try {
@@ -221,7 +247,7 @@ export const validationStore = {
 				totalProcessed: s.totalProcessed + 1
 			}));
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error);
+			const errorMessage = getErrorMessage(error);
 			store.update((s) => ({
 				...s,
 				isProcessing: false,
@@ -234,6 +260,7 @@ export const validationStore = {
 	 * Dismiss the pending validation without action (treats as timeout).
 	 */
 	dismiss(): void {
+		clearValidationTimeout();
 		store.update((s) => ({
 			...s,
 			pending: null,
@@ -252,6 +279,7 @@ export const validationStore = {
 	 * Cleanup event listeners.
 	 */
 	async cleanup(): Promise<void> {
+		clearValidationTimeout();
 		if (unlistener) {
 			unlistener();
 			unlistener = null;

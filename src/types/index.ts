@@ -27,7 +27,7 @@
  *
  * @example
  * ```typescript
- * import type { Workflow, Agent, Message } from '$lib/types';
+ * import type { Workflow, Agent, Message } from '$types';
  *
  * const workflow: Workflow = {
  *   id: 'wf_001',
@@ -52,6 +52,15 @@ export * from './mcp';
 export * from './task';
 export * from './embedding';
 export * from './prompt';
-export * from './importExport';
-export * from './function_calling';
+export * from './import-export';
+export * from './function-calling';
 export * from './onboarding';
+export * from './background-workflow';
+export * from './chat-block';
+export * from './custom-provider';
+export * from './i18n';
+export * from './services';
+export * from './sub-agent';
+export * from './thinking';
+export * from './tool';
+export * from './user-question';

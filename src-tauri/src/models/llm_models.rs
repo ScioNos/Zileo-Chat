@@ -15,81 +15,11 @@
 //! LLM model and provider settings types for CRUD operations.
 //!
 //! This module defines the data structures for managing LLM models (both builtin and custom)
-//! and provider configuration settings. It supports Mistral and Ollama providers in Phase 1.
+//! and provider configuration settings.
 
-// Allow dead code temporarily - these types will be used in Phase 2 (Commands CRUD)
-#![allow(dead_code)]
-
+use crate::llm::{ProviderType, DEFAULT_OLLAMA_URL};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// Provider Type
-// ============================================================================
-
-/// LLM provider type supported by the application.
-///
-/// Mistral and Ollama are builtin providers with dedicated implementations.
-/// Custom(String) represents user-created OpenAI-compatible providers
-/// (RouterLab, OpenRouter, Together AI, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ProviderType {
-    /// Mistral AI cloud API
-    Mistral,
-    /// Ollama local inference server
-    Ollama,
-    /// User-created OpenAI-compatible provider (e.g., Custom("routerlab"))
-    Custom(String),
-}
-
-impl Serialize for ProviderType {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            ProviderType::Mistral => s.serialize_str("mistral"),
-            ProviderType::Ollama => s.serialize_str("ollama"),
-            ProviderType::Custom(name) => s.serialize_str(name),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ProviderType {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "mistral" => ProviderType::Mistral,
-            "ollama" => ProviderType::Ollama,
-            other => ProviderType::Custom(other.to_string()),
-        })
-    }
-}
-
-impl std::fmt::Display for ProviderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProviderType::Mistral => write!(f, "mistral"),
-            ProviderType::Ollama => write!(f, "ollama"),
-            ProviderType::Custom(name) => write!(f, "{}", name),
-        }
-    }
-}
-
-impl std::str::FromStr for ProviderType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "mistral" => Ok(ProviderType::Mistral),
-            "ollama" => Ok(ProviderType::Ollama),
-            other => {
-                if other.is_empty() {
-                    Err(format!("Unknown provider type: {}", s))
-                } else {
-                    Ok(ProviderType::Custom(other.to_string()))
-                }
-            }
-        }
-    }
-}
 
 // ============================================================================
 // LLM Model
@@ -143,23 +73,6 @@ pub struct LLMModel {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Parameters for creating a new builtin model.
-#[derive(Debug, Clone)]
-pub struct BuiltinModelParams {
-    /// Provider type (Mistral or Ollama)
-    pub provider: ProviderType,
-    /// Human-readable display name
-    pub name: String,
-    /// Model identifier used in API calls
-    pub api_name: String,
-    /// Maximum context length in tokens
-    pub context_window: usize,
-    /// Maximum generation length in tokens
-    pub max_output_tokens: usize,
-    /// Whether this is a reasoning/thinking model
-    pub is_reasoning: bool,
-}
-
 impl LLMModel {
     /// Creates a new custom LLM model from a create request.
     ///
@@ -180,28 +93,6 @@ impl LLMModel {
             is_reasoning: request.is_reasoning,
             input_price_per_mtok: request.input_price_per_mtok,
             output_price_per_mtok: request.output_price_per_mtok,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    /// Creates a new builtin LLM model.
-    ///
-    /// Builtin models use their api_name as the id and cannot be deleted.
-    pub fn new_builtin(params: BuiltinModelParams) -> Self {
-        let now = Utc::now();
-        Self {
-            id: params.api_name.clone(),
-            provider: params.provider,
-            name: params.name,
-            api_name: params.api_name,
-            context_window: params.context_window,
-            max_output_tokens: params.max_output_tokens,
-            temperature_default: 0.7,
-            is_builtin: true,
-            is_reasoning: params.is_reasoning,
-            input_price_per_mtok: 0.0,
-            output_price_per_mtok: 0.0,
             created_at: now,
             updated_at: now,
         }
@@ -457,7 +348,7 @@ pub struct ProviderSettings {
     #[serde(default)]
     pub api_key_configured: bool,
     /// Custom base URL (primarily for Ollama, e.g., "http://localhost:11434")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub base_url: Option<String>,
     /// Last update timestamp
     pub updated_at: DateTime<Utc>,
@@ -472,7 +363,7 @@ impl ProviderSettings {
     /// Creates default settings for a provider.
     pub fn default_for(provider: ProviderType) -> Self {
         let base_url = match &provider {
-            ProviderType::Ollama => Some("http://localhost:11434".into()),
+            ProviderType::Ollama => Some(DEFAULT_OLLAMA_URL.into()),
             ProviderType::Mistral => None,
             ProviderType::Custom(_) => None,
         };
@@ -532,16 +423,6 @@ impl ConnectionTestResult {
     }
 }
 
-// ============================================================================
-// Builtin Models Data
-// ============================================================================
-
-/// Mistral builtin models: empty - users add their own models
-pub const MISTRAL_BUILTIN_MODELS: &[(&str, &str, usize, usize)] = &[];
-
-/// Ollama builtin models: empty - users add their own models
-pub const OLLAMA_BUILTIN_MODELS: &[(&str, &str, usize, usize)] = &[];
-
 /// Returns all builtin models for seeding the database.
 /// Currently returns empty - users add their own custom models.
 pub fn get_all_builtin_models() -> Vec<LLMModel> {
@@ -556,32 +437,8 @@ pub fn get_all_builtin_models() -> Vec<LLMModel> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_provider_type_display() {
-        assert_eq!(ProviderType::Mistral.to_string(), "mistral");
-        assert_eq!(ProviderType::Ollama.to_string(), "ollama");
-        assert_eq!(
-            ProviderType::Custom("routerlab".to_string()).to_string(),
-            "routerlab"
-        );
-    }
-
-    #[test]
-    fn test_provider_type_from_str() {
-        assert_eq!(
-            "mistral".parse::<ProviderType>().unwrap(),
-            ProviderType::Mistral
-        );
-        assert_eq!(
-            "OLLAMA".parse::<ProviderType>().unwrap(),
-            ProviderType::Ollama
-        );
-        assert_eq!(
-            "routerlab".parse::<ProviderType>().unwrap(),
-            ProviderType::Custom("routerlab".to_string())
-        );
-        assert!("".parse::<ProviderType>().is_err());
-    }
+    // ProviderType Display and FromStr tests are in llm/provider.rs
+    // (canonical location after SA-023/P1 consolidation)
 
     #[test]
     fn test_create_model_request_validation() {
@@ -684,23 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_model_new_builtin() {
-        let model = LLMModel::new_builtin(BuiltinModelParams {
-            provider: ProviderType::Mistral,
-            name: "Mistral Large".into(),
-            api_name: "mistral-large-latest".into(),
-            context_window: 128000,
-            max_output_tokens: 8192,
-            is_reasoning: false,
-        });
-
-        assert_eq!(model.id, "mistral-large-latest");
-        assert!(model.is_builtin);
-        assert!(!model.is_reasoning);
-        assert_eq!(model.temperature_default, 0.7);
-    }
-
-    #[test]
     fn test_get_all_builtin_models() {
         let models = get_all_builtin_models();
         // No builtin models - users add their own
@@ -734,5 +574,53 @@ mod tests {
         let ollama = ProviderSettings::default_for(ProviderType::Ollama);
         assert!(ollama.enabled);
         assert_eq!(ollama.base_url, Some("http://localhost:11434".into()));
+    }
+
+    /// SA-013 #12: base_url must always be present in serialized JSON.
+    /// When None, it should serialize as `null` (not be absent),
+    /// because TS declares `base_url: string | null`.
+    #[test]
+    fn test_provider_settings_base_url_serializes_as_null_when_none() {
+        let settings = ProviderSettings::default_for(ProviderType::Mistral);
+        assert!(settings.base_url.is_none());
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert!(
+            json.get("base_url").is_some(),
+            "base_url must be present in JSON output even when None"
+        );
+        assert!(
+            json.get("base_url").unwrap().is_null(),
+            "base_url should be null, not absent"
+        );
+    }
+
+    /// SA-013 #12: base_url serializes correctly when set.
+    #[test]
+    fn test_provider_settings_base_url_serializes_when_set() {
+        let settings = ProviderSettings::default_for(ProviderType::Ollama);
+        assert!(settings.base_url.is_some());
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            json.get("base_url").unwrap().as_str().unwrap(),
+            "http://localhost:11434"
+        );
+    }
+
+    /// SA-013 #12: base_url roundtrip (serialize then deserialize).
+    #[test]
+    fn test_provider_settings_base_url_roundtrip() {
+        // With base_url = None (Mistral)
+        let original = ProviderSettings::default_for(ProviderType::Mistral);
+        let json_str = serde_json::to_string(&original).unwrap();
+        let restored: ProviderSettings = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(restored.base_url, None);
+
+        // With base_url = Some (Ollama)
+        let original = ProviderSettings::default_for(ProviderType::Ollama);
+        let json_str = serde_json::to_string(&original).unwrap();
+        let restored: ProviderSettings = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(restored.base_url, Some("http://localhost:11434".into()));
     }
 }

@@ -16,6 +16,7 @@
 
 mod agents;
 mod commands;
+mod constants;
 mod db;
 mod llm;
 mod mcp;
@@ -23,6 +24,9 @@ mod models;
 mod security;
 mod state;
 mod tools;
+
+#[cfg(test)]
+mod test_utils;
 
 use state::AppState;
 use tauri::menu::{
@@ -133,30 +137,31 @@ async fn main() -> anyhow::Result<()> {
                 > 0;
 
             if !exists {
-                let insert_query = format!(
-                    "CREATE llm_model:`{}` CONTENT {{ \
-                        id: '{}', \
-                        provider: '{}', \
-                        name: '{}', \
-                        api_name: '{}', \
-                        context_window: {}, \
-                        max_output_tokens: {}, \
-                        temperature_default: {}, \
-                        is_builtin: true, \
-                        created_at: time::now(), \
-                        updated_at: time::now() \
-                    }}",
-                    model.id,
-                    model.id,
-                    model.provider,
-                    model.name.replace('\'', "''"),
-                    model.api_name.replace('\'', "''"),
-                    model.context_window,
-                    model.max_output_tokens,
-                    model.temperature_default
-                );
-
-                if app_state.db.execute(&insert_query).await.is_ok() {
+                let data = serde_json::json!({
+                    "id": model.id,
+                    "provider": model.provider,
+                    "name": model.name,
+                    "api_name": model.api_name,
+                    "context_window": model.context_window,
+                    "max_output_tokens": model.max_output_tokens,
+                    "temperature_default": model.temperature_default,
+                    "is_builtin": true,
+                });
+                let query = format!("CREATE llm_model:`{}` CONTENT $data", model.id);
+                if app_state
+                    .db
+                    .execute_with_params(&query, vec![("data".to_string(), data)])
+                    .await
+                    .is_ok()
+                {
+                    // Set timestamps via SurrealQL functions (can't be in CONTENT bind)
+                    let _ = app_state
+                        .db
+                        .execute(&format!(
+                            "UPDATE llm_model:`{}` SET created_at = time::now(), updated_at = time::now()",
+                            model.id
+                        ))
+                        .await;
                     inserted += 1;
                 }
             }
@@ -194,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
             commands::workflow::create_workflow,
             commands::workflow::execute_workflow,
             commands::workflow::load_workflows,
+            commands::workflow::rename_workflow,
             commands::workflow::delete_workflow,
             commands::workflow::load_workflow_full_state,
             // Agent commands (CRUD)
@@ -224,53 +230,47 @@ async fn main() -> anyhow::Result<()> {
             commands::custom_provider::update_custom_provider,
             commands::custom_provider::delete_custom_provider,
             // Model CRUD commands
-            commands::models::list_models,
-            commands::models::get_model,
-            commands::models::get_model_by_api_name,
-            commands::models::create_model,
-            commands::models::update_model,
-            commands::models::delete_model,
-            commands::models::get_provider_settings,
-            commands::models::update_provider_settings,
-            commands::models::test_provider_connection,
-            commands::models::seed_builtin_models,
-            // Validation commands (Phase 5)
+            commands::llm_models::list_models,
+            commands::llm_models::get_model,
+            commands::llm_models::get_model_by_api_name,
+            commands::llm_models::create_model,
+            commands::llm_models::update_model,
+            commands::llm_models::delete_model,
+            commands::llm_models::get_provider_settings,
+            commands::llm_models::update_provider_settings,
+            commands::llm_models::test_provider_connection,
+            commands::llm_models::seed_builtin_models,
             commands::validation::create_validation_request,
             commands::validation::list_pending_validations,
             commands::validation::list_workflow_validations,
             commands::validation::approve_validation,
             commands::validation::reject_validation,
             commands::validation::delete_validation,
-            // Validation settings commands (Phase 7A)
             commands::validation::get_validation_settings,
             commands::validation::update_validation_settings,
             commands::validation::reset_validation_settings,
             // Tool discovery for validation settings
             commands::validation::list_available_tools,
-            // Memory commands (Phase 5)
             commands::memory::add_memory,
             commands::memory::list_memories,
             commands::memory::get_memory,
             commands::memory::delete_memory,
             commands::memory::search_memories,
             commands::memory::clear_memories_by_type,
-            // Streaming commands (Phase 5)
             commands::streaming::execute_workflow_streaming,
             commands::streaming::cancel_workflow_streaming,
-            // Message commands (Phase 6 - Message Persistence)
             commands::message::save_message,
             commands::message::load_workflow_messages,
             commands::message::load_workflow_messages_paginated,
             commands::message::delete_message,
             commands::message::clear_workflow_messages,
-            // Tool execution commands (Phase 3 - Tool Execution Persistence)
+            commands::message::load_message_blocks,
             commands::tool_execution::save_tool_execution,
             commands::tool_execution::get_tool_execution,
             commands::tool_execution::load_workflow_tool_executions,
             commands::tool_execution::load_message_tool_executions,
             commands::tool_execution::delete_tool_execution,
             commands::tool_execution::clear_workflow_tool_executions,
-            // Thinking step commands (Phase 4 - Thinking Steps Persistence)
             commands::thinking::save_thinking_step,
             commands::thinking::load_workflow_thinking_steps,
             commands::thinking::load_message_thinking_steps,
@@ -288,7 +288,6 @@ async fn main() -> anyhow::Result<()> {
             commands::task::update_task_status,
             commands::task::complete_task,
             commands::task::delete_task,
-            // MCP commands (Phase 3)
             commands::mcp::list_mcp_servers,
             commands::mcp::get_mcp_server,
             commands::mcp::create_mcp_server,
@@ -300,12 +299,10 @@ async fn main() -> anyhow::Result<()> {
             commands::mcp::list_mcp_tools,
             commands::mcp::call_mcp_tool,
             commands::mcp::get_mcp_latency_metrics,
-            // Migration commands (Memory Tool Phase 2 + MCP HTTP + Memory v2)
             commands::migration::migrate_memory_schema,
             commands::migration::get_memory_schema_status,
             commands::migration::migrate_mcp_http_schema,
             commands::migration::migrate_memory_v2_schema,
-            // Embedding commands (Memory Tool Phase 5)
             commands::embedding::get_embedding_config,
             commands::embedding::save_embedding_config,
             commands::embedding::get_memory_stats,
@@ -329,8 +326,6 @@ async fn main() -> anyhow::Result<()> {
             commands::import_export::validate_import,
             commands::import_export::execute_import,
             commands::import_export::save_export_to_file,
-            commands::import_export::read_import_file,
-            // User Question commands (Phase 8 - UserQuestionTool)
             commands::user_question::submit_user_response,
             commands::user_question::get_pending_questions,
             commands::user_question::skip_question,
@@ -454,6 +449,7 @@ async fn main() -> anyhow::Result<()> {
                         model: llm_value["model"].as_str().unwrap_or("mistral-large-latest").to_string(),
                         temperature: llm_value["temperature"].as_f64().unwrap_or(0.7) as f32,
                         max_tokens: llm_value["max_tokens"].as_u64().unwrap_or(4096) as usize,
+                        is_reasoning: llm_value["is_reasoning"].as_bool().unwrap_or(false),
                     };
 
                     let tools: Vec<String> = row["tools"]

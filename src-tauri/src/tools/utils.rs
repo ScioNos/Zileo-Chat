@@ -14,9 +14,11 @@
 
 //! Database and validation utilities for tools.
 
+use crate::agents::core::registry::AgentRegistry;
 use crate::db::DBClient;
 use crate::tools::{ToolError, ToolResult};
 use std::sync::Arc;
+use tracing::{debug, instrument};
 
 /// Verifies a record exists in the database.
 ///
@@ -126,79 +128,7 @@ pub fn validate_enum_value(value: &str, valid_values: &[&str], field_name: &str)
     Ok(())
 }
 
-/// Fluent builder for SurrealDB queries.
-#[allow(dead_code)]
-pub struct QueryBuilder {
-    table: String,
-    fields: Vec<String>,
-    conditions: Vec<String>,
-    order_by: Option<(String, bool)>,
-    limit: Option<usize>,
-}
-
-#[allow(dead_code)]
-impl QueryBuilder {
-    pub fn new(table: &str) -> Self {
-        Self {
-            table: table.to_string(),
-            fields: vec!["meta::id(id) AS id".to_string()],
-            conditions: Vec::new(),
-            order_by: None,
-            limit: None,
-        }
-    }
-
-    pub fn select(mut self, fields: &[&str]) -> Self {
-        self.fields.extend(fields.iter().map(|f| f.to_string()));
-        self
-    }
-
-    pub fn where_eq(mut self, field: &str, value: &str) -> Self {
-        let escaped = serde_json::to_string(value).unwrap_or_else(|_| format!("'{}'", value));
-        self.conditions.push(format!("{} = {}", field, escaped));
-        self
-    }
-
-    pub fn where_clause(mut self, condition: &str) -> Self {
-        self.conditions.push(condition.to_string());
-        self
-    }
-
-    pub fn order_by(mut self, field: &str, desc: bool) -> Self {
-        self.order_by = Some((field.to_string(), desc));
-        self
-    }
-
-    pub fn limit(mut self, n: usize) -> Self {
-        self.limit = Some(n);
-        self
-    }
-
-    pub fn build(self) -> String {
-        let mut query = format!("SELECT {} FROM {}", self.fields.join(", "), self.table);
-
-        if !self.conditions.is_empty() {
-            query.push_str(" WHERE ");
-            query.push_str(&self.conditions.join(" AND "));
-        }
-
-        if let Some((field, desc)) = self.order_by {
-            query.push_str(&format!(
-                " ORDER BY {} {}",
-                field,
-                if desc { "DESC" } else { "ASC" }
-            ));
-        }
-
-        if let Some(n) = self.limit {
-            query.push_str(&format!(" LIMIT {}", n));
-        }
-
-        query
-    }
-}
-
-/// OPT-MEM-9: Parameterized query builder for SQL-injection safe queries.
+/// Parameterized query builder for SQL-injection safe queries.
 /// Returns both the query string and the bind parameters.
 #[allow(dead_code)]
 pub struct ParamQueryBuilder {
@@ -307,6 +237,71 @@ impl ParamQueryBuilder {
     }
 }
 
+/// Resolves an agent reference that can be either an ID or a name.
+///
+/// Attempts ID lookup first (fast path), then falls back to name lookup (slow path).
+/// Returns the resolved agent ID.
+///
+/// # Arguments
+/// * `registry` - The agent registry to search
+/// * `agent_ref` - Agent ID (UUID) or agent name
+///
+/// # Errors
+/// * `ToolError::InvalidInput` if `agent_ref` is empty after trimming
+/// * `ToolError::NotFound` if no agent matches by ID or name
+#[instrument(name = "resolve_agent_ref", skip(registry), fields(agent_ref = %agent_ref))]
+pub async fn resolve_agent_ref(registry: &AgentRegistry, agent_ref: &str) -> ToolResult<String> {
+    let trimmed = agent_ref.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::InvalidInput(
+            "Agent reference cannot be empty. Provide an agent ID or name.".to_string(),
+        ));
+    }
+
+    // Fast path: direct ID lookup
+    if registry.get(trimmed).await.is_some() {
+        debug!("Resolved by ID");
+        return Ok(trimmed.to_string());
+    }
+
+    // Slow path: name lookup (case-insensitive)
+    if let Some((agent_id, _)) = registry.get_by_name(trimmed).await {
+        debug!(resolved_id = %agent_id, "Resolved by name");
+        return Ok(agent_id);
+    }
+
+    Err(ToolError::NotFound(format!(
+        "Agent '{}' not found. Use 'list_agents' to see available agents.",
+        trimmed
+    )))
+}
+
+/// Safely truncates a string to a maximum number of characters.
+///
+/// This function handles multi-byte UTF-8 characters correctly by working
+/// with char boundaries instead of byte positions.
+///
+/// # Arguments
+/// * `s` - The string to truncate
+/// * `max_chars` - Maximum number of characters to keep
+/// * `ellipsis` - Whether to append "..." if truncated
+///
+/// # Returns
+/// The truncated string
+pub fn safe_truncate(s: &str, max_chars: usize, ellipsis: bool) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        if ellipsis {
+            format!("{}...", truncated)
+        } else {
+            truncated
+        }
+    }
+}
+
 /// Generates common sub-agent tool description sections.
 ///
 /// Returns a formatted string containing:
@@ -346,6 +341,9 @@ Sub-agents return structured JSON with:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::core::agent::{Agent, Report, ReportMetrics, ReportStatus, Task};
+    use crate::models::{AgentConfig, LLMConfig, Lifecycle};
+    use async_trait::async_trait;
 
     #[test]
     fn test_validate_not_empty_valid() {
@@ -396,30 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn test_query_builder_simple() {
-        let query = QueryBuilder::new("memory")
-            .select(&["content", "memory_type"])
-            .build();
-        assert_eq!(
-            query,
-            "SELECT meta::id(id) AS id, content, memory_type FROM memory"
-        );
-    }
-
-    #[test]
-    fn test_query_builder_with_conditions() {
-        let query = QueryBuilder::new("memory")
-            .select(&["content"])
-            .where_eq("memory_type", "knowledge")
-            .order_by("created_at", true)
-            .limit(10)
-            .build();
-        assert!(query.contains("WHERE memory_type ="));
-        assert!(query.contains("ORDER BY created_at DESC"));
-        assert!(query.contains("LIMIT 10"));
-    }
-
-    #[test]
     fn test_param_query_builder_simple() {
         let (query, params) = ParamQueryBuilder::new("memory")
             .select(&["content", "type"])
@@ -456,5 +430,156 @@ mod tests {
             .build();
         assert!(query.contains("workflow_id IS NONE AND type = $mem_type"));
         assert_eq!(params.len(), 1);
+    }
+
+    // --- SA-020/P3: resolve_agent_ref tests ---
+
+    /// Minimal test agent for resolve_agent_ref tests
+    struct TestAgent {
+        config: AgentConfig,
+    }
+
+    impl TestAgent {
+        fn new(id: &str, lifecycle: Lifecycle) -> Self {
+            Self {
+                config: AgentConfig {
+                    id: id.to_string(),
+                    name: format!("Test Agent {}", id),
+                    lifecycle,
+                    llm: LLMConfig {
+                        provider: "Test".to_string(),
+                        model: "test-model".to_string(),
+                        temperature: 0.7,
+                        max_tokens: 100,
+                        is_reasoning: false,
+                    },
+                    tools: vec![],
+                    mcp_servers: vec![],
+                    system_prompt: "Test prompt".to_string(),
+                    max_tool_iterations: 50,
+                    enable_thinking: true,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Agent for TestAgent {
+        async fn execute(&self, task: Task) -> anyhow::Result<Report> {
+            Ok(Report {
+                task_id: task.id,
+                status: ReportStatus::Success,
+                content: "Test report".to_string(),
+                response: "Test report".to_string(),
+                metrics: ReportMetrics {
+                    duration_ms: 10,
+                    tokens_input: 0,
+                    tokens_output: 0,
+                    tools_used: vec![],
+                    mcp_calls: vec![],
+                    tool_executions: vec![],
+                    reasoning_steps: vec![],
+                },
+                system_prompt: None,
+                tools_json: None,
+            })
+        }
+
+        fn capabilities(&self) -> Vec<String> {
+            vec!["test".to_string()]
+        }
+
+        fn lifecycle(&self) -> Lifecycle {
+            self.config.lifecycle.clone()
+        }
+
+        fn tools(&self) -> Vec<String> {
+            self.config.tools.clone()
+        }
+
+        fn mcp_servers(&self) -> Vec<String> {
+            self.config.mcp_servers.clone()
+        }
+
+        fn system_prompt(&self) -> String {
+            self.config.system_prompt.clone()
+        }
+
+        fn config(&self) -> &AgentConfig {
+            &self.config
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_ref_by_id() {
+        let registry = AgentRegistry::new();
+        let agent = Arc::new(TestAgent::new("agent-uuid-1", Lifecycle::Permanent));
+        registry.register("agent-uuid-1".to_string(), agent).await;
+
+        let result = resolve_agent_ref(&registry, "agent-uuid-1").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "agent-uuid-1");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_ref_by_name() {
+        let registry = AgentRegistry::new();
+        let agent = Arc::new(TestAgent::new("agent-uuid-2", Lifecycle::Permanent));
+        registry.register("agent-uuid-2".to_string(), agent).await;
+
+        let result = resolve_agent_ref(&registry, "Test Agent agent-uuid-2").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "agent-uuid-2");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_ref_not_found() {
+        let registry = AgentRegistry::new();
+        let agent = Arc::new(TestAgent::new("agent-uuid-3", Lifecycle::Permanent));
+        registry.register("agent-uuid-3".to_string(), agent).await;
+
+        let result = resolve_agent_ref(&registry, "ghost").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_ref_empty_input() {
+        let registry = AgentRegistry::new();
+
+        let result = resolve_agent_ref(&registry, "").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidInput(_)));
+
+        // Whitespace-only should also be rejected
+        let result = resolve_agent_ref(&registry, "   ").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_safe_truncate_utf8_multibyte() {
+        // Test with French accented characters
+        let text = "Ceci est un texte en francais avec des accents: e, a, o, i, u";
+        let truncated = safe_truncate(text, 50, true);
+        assert!(truncated.ends_with("..."));
+        assert!(!truncated.contains("\\u")); // No escaped unicode
+
+        // Test with text where byte 100 is inside a multi-byte char
+        // This is the exact scenario that caused the panic
+        let mission_text = "# MISSION\nRechercher sources fiables sur ACTUALITE pour: Mistral AI nouveautes 2025 actualites recentes lancements produits";
+        let truncated = safe_truncate(mission_text, 100, true);
+        assert!(truncated.ends_with("..."));
+
+        // Test with emojis (4-byte UTF-8)
+        let emoji_text =
+            "Test avec emojis X et Y et beaucoup de texte apres pour depasser la limite";
+        let truncated = safe_truncate(emoji_text, 30, true);
+        assert!(truncated.ends_with("..."));
+
+        // Test short text (no truncation needed)
+        let short_text = "Court";
+        let not_truncated = safe_truncate(short_text, 100, false);
+        assert_eq!(not_truncated, "Court");
     }
 }

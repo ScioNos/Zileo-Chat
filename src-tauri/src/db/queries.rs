@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Centralized Query Constants (OPT-WF-1)
+//! # Centralized Query Constants
 //!
 //! Contains SQL query templates for SurrealDB to eliminate duplication
 //! and ensure consistent field selection across commands.
@@ -50,7 +50,10 @@ pub mod workflow {
         (total_tokens_input ?? 0) AS total_tokens_input,
         (total_tokens_output ?? 0) AS total_tokens_output,
         (total_cost_usd ?? 0.0) AS total_cost_usd,
-        model_id
+        model_id,
+        (current_context_tokens ?? 0) AS current_context_tokens,
+        (sub_agent_tokens_input ?? 0) AS sub_agent_tokens_input,
+        (sub_agent_tokens_output ?? 0) AS sub_agent_tokens_output
     FROM workflow"#;
 
     /// SELECT query for listing all workflows ordered by update time.
@@ -66,7 +69,10 @@ pub mod workflow {
         (total_tokens_input ?? 0) AS total_tokens_input,
         (total_tokens_output ?? 0) AS total_tokens_output,
         (total_cost_usd ?? 0.0) AS total_cost_usd,
-        model_id
+        model_id,
+        (current_context_tokens ?? 0) AS current_context_tokens,
+        (sub_agent_tokens_input ?? 0) AS sub_agent_tokens_input,
+        (sub_agent_tokens_output ?? 0) AS sub_agent_tokens_output
     FROM workflow
     ORDER BY updated_at DESC"#;
 
@@ -82,7 +88,7 @@ pub mod workflow {
         completed_at
     FROM workflow"#;
 
-    /// Tables that have workflow_id foreign key and need cascade delete (OPT-WF-8).
+    /// Tables that have workflow_id foreign key and need cascade delete.
     /// Order doesn't matter as these are deleted in parallel.
     pub const CASCADE_DELETE_TABLES: &[&str] = &[
         "task",
@@ -96,9 +102,10 @@ pub mod workflow {
     ];
 }
 
-/// Cascade delete helpers (OPT-WF-8).
+/// Cascade delete helpers.
 pub mod cascade {
     use crate::db::DBClient;
+    use futures_util::future::join_all;
     use std::sync::Arc;
     use tracing::{info, warn};
 
@@ -109,11 +116,22 @@ pub mod cascade {
     ///
     /// # Arguments
     /// * `db` - Database client Arc reference
-    /// * `table` - Table name to delete from
-    /// * `workflow_id` - The workflow ID to match
+    /// * `table` - Table name from CASCADE_DELETE_TABLES constant (hardcoded, not user input)
+    /// * `workflow_id` - The workflow ID to match (parameterized to prevent injection)
     pub async fn delete_by_workflow_id(db: &Arc<DBClient>, table: &str, workflow_id: &str) {
-        let query = format!("DELETE {} WHERE workflow_id = '{}'", table, workflow_id);
-        match db.execute(&query).await {
+        // Table names come from the hardcoded CASCADE_DELETE_TABLES constant.
+        // workflow_id is parameterized via $wf_id bind variable.
+        let query = format!("DELETE {} WHERE workflow_id = $wf_id", table);
+        match db
+            .execute_with_params(
+                &query,
+                vec![(
+                    "wf_id".to_string(),
+                    serde_json::Value::String(workflow_id.to_string()),
+                )],
+            )
+            .await
+        {
             Ok(_) => info!(table = %table, workflow_id = %workflow_id, "Cascade deleted records"),
             Err(e) => warn!(error = %e, table = %table, "Cascade delete failed (may not exist)"),
         }
@@ -145,7 +163,7 @@ pub mod cascade {
             .collect();
 
         // Execute all in parallel using join_all
-        futures::future::join_all(futures).await;
+        join_all(futures).await;
 
         info!(workflow_id = %workflow_id, "Cascade delete completed for all related tables");
     }

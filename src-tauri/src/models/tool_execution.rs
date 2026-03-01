@@ -17,33 +17,11 @@
 //! This module provides types for storing and retrieving tool execution logs
 //! for both local tools (MemoryTool, TodoTool) and MCP tools.
 //!
-//! Phase 3: Tool Execution Persistence
+//! Provides persistence for tool execution logs.
 
+use crate::models::serde_utils::{deserialize_json_string, serialize_as_json_string};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-/// Deserialize a JSON string from DB back into serde_json::Value.
-/// Handles both string (new format) and object (legacy format) inputs.
-fn deserialize_json_string<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
-        // Legacy: if DB still has object type data, pass through as-is
-        other => Ok(other),
-    }
-}
-
-/// Serialize serde_json::Value to a JSON string for DB storage.
-fn serialize_as_json_string<S>(value: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let s = serde_json::to_string(value).map_err(serde::ser::Error::custom)?;
-    serializer.serialize_str(&s)
-}
+use serde::{Deserialize, Serialize};
 
 /// Tool type indicating execution context
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +77,9 @@ pub struct ToolExecution {
     pub duration_ms: u64,
     /// Iteration number within the tool execution loop (0-indexed)
     pub iteration: u32,
+    /// Global ordering sequence within the execution (SA-019 P1/B8)
+    #[serde(default)]
+    pub sequence: u32,
     /// Timestamp when the execution was recorded
     pub created_at: DateTime<Utc>,
 }
@@ -136,6 +117,8 @@ pub struct ToolExecutionCreate {
     pub duration_ms: u64,
     /// Iteration number
     pub iteration: u32,
+    /// Global ordering sequence within the execution (SA-019 P1/B8)
+    pub sequence: u32,
 }
 
 impl ToolExecutionCreate {
@@ -167,6 +150,7 @@ impl ToolExecutionCreate {
             error_message,
             duration_ms,
             iteration,
+            sequence: 0,
         }
     }
 
@@ -199,6 +183,7 @@ impl ToolExecutionCreate {
             error_message,
             duration_ms,
             iteration,
+            sequence: 0,
         }
     }
 }
@@ -249,6 +234,7 @@ mod tests {
             error_message: None,
             duration_ms: 150,
             iteration: 0,
+            sequence: 0,
             created_at: Utc::now(),
         };
 
@@ -275,6 +261,7 @@ mod tests {
             error_message: None,
             duration_ms: 500,
             iteration: 1,
+            sequence: 0,
             created_at: Utc::now(),
         };
 
@@ -299,6 +286,7 @@ mod tests {
             error_message: Some("Task not found".to_string()),
             duration_ms: 10,
             iteration: 0,
+            sequence: 0,
             created_at: Utc::now(),
         };
 

@@ -36,18 +36,12 @@ DEFINE FIELD OVERWRITE total_cost_usd ON workflow TYPE float DEFAULT 0.0;
 DEFINE FIELD OVERWRITE model_id ON workflow TYPE option<string>;
 -- Current context size (last API call context window usage)
 DEFINE FIELD OVERWRITE current_context_tokens ON workflow TYPE int DEFAULT 0;
-
--- Table: agent_state
-DEFINE TABLE OVERWRITE agent_state SCHEMAFULL;
-DEFINE FIELD OVERWRITE agent_id ON agent_state TYPE string;
-DEFINE FIELD OVERWRITE lifecycle ON agent_state TYPE string ASSERT $value IN ['permanent', 'temporary'];
-DEFINE FIELD OVERWRITE config ON agent_state TYPE object;
-DEFINE FIELD OVERWRITE metrics ON agent_state TYPE object;
-DEFINE FIELD OVERWRITE last_active ON agent_state TYPE datetime DEFAULT time::now();
-DEFINE INDEX OVERWRITE unique_agent_id ON agent_state FIELDS agent_id UNIQUE;
+-- Sub-agent token tracking (separate from main agent totals)
+DEFINE FIELD OVERWRITE sub_agent_tokens_input ON workflow TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE sub_agent_tokens_output ON workflow TYPE int DEFAULT 0;
 
 -- Table: message
--- Extended with metrics fields for Phase 6 persistence
+-- Extended with metrics fields for persistence
 DEFINE TABLE OVERWRITE message SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON message TYPE string;
 DEFINE FIELD OVERWRITE workflow_id ON message TYPE string;
@@ -63,7 +57,7 @@ DEFINE FIELD OVERWRITE duration_ms ON message TYPE option<int>;
 DEFINE FIELD OVERWRITE timestamp ON message TYPE datetime DEFAULT time::now();
 
 -- =============================================
--- Index Review (OPT-DB-11): Write-Heavy Table Analysis
+-- Index Review: Write-Heavy Table Analysis
 -- =============================================
 -- message is a write-heavy table (every LLM response creates a record)
 -- Index trade-off: faster reads vs slower writes
@@ -93,9 +87,9 @@ DEFINE FIELD OVERWRITE created_at ON memory TYPE datetime DEFAULT time::now();
 DEFINE INDEX OVERWRITE memory_vec_idx ON memory FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 -- Index for workflow scoping
 DEFINE INDEX OVERWRITE memory_workflow_idx ON memory FIELDS workflow_id;
--- OPT-MEM-4: Composite index for search_memories() with type + workflow_id
+-- Composite index for search_memories() with type + workflow_id
 DEFINE INDEX OVERWRITE memory_type_workflow_idx ON memory FIELDS type, workflow_id;
--- OPT-MEM-4: Composite index for TTL cleanup preparation (type + created_at)
+-- Composite index for TTL cleanup preparation (type + created_at)
 DEFINE INDEX OVERWRITE memory_type_created_idx ON memory FIELDS type, created_at;
 
 -- Table: validation_request
@@ -104,8 +98,8 @@ DEFINE FIELD OVERWRITE id ON validation_request TYPE string;
 DEFINE FIELD OVERWRITE workflow_id ON validation_request TYPE string;
 DEFINE FIELD OVERWRITE type ON validation_request TYPE string ASSERT $value IN ['tool', 'sub_agent', 'mcp', 'file_op', 'db_op'];
 DEFINE FIELD OVERWRITE operation ON validation_request TYPE string;
-DEFINE FIELD OVERWRITE details ON validation_request TYPE object;
-DEFINE FIELD OVERWRITE risk_level ON validation_request TYPE string ASSERT $value IN ['low', 'medium', 'high'];
+DEFINE FIELD OVERWRITE details ON validation_request TYPE string DEFAULT '{}'; -- JSON string (ERR_SURREAL_001: TYPE object drops dynamic keys)
+DEFINE FIELD OVERWRITE risk_level ON validation_request TYPE string ASSERT $value IN ['low', 'medium', 'high', 'critical'];
 DEFINE FIELD OVERWRITE status ON validation_request TYPE string DEFAULT 'pending' ASSERT $value IN ['pending', 'approved', 'rejected'];
 DEFINE FIELD OVERWRITE created_at ON validation_request TYPE datetime DEFAULT time::now();
 
@@ -133,12 +127,6 @@ DEFINE INDEX OVERWRITE task_status_idx ON task FIELDS status;
 DEFINE INDEX OVERWRITE task_priority_idx ON task FIELDS priority;
 DEFINE INDEX OVERWRITE task_agent_idx ON task FIELDS agent_assigned;
 
--- Relations graph
-DEFINE TABLE OVERWRITE workflow_agent SCHEMAFULL;
-DEFINE FIELD OVERWRITE in ON workflow_agent TYPE record<workflow>;
-DEFINE FIELD OVERWRITE out ON workflow_agent TYPE record<agent_state>;
-DEFINE FIELD OVERWRITE created_by ON workflow_agent TYPE bool DEFAULT true;
-
 -- Table: mcp_server (MCP server configurations)
 DEFINE TABLE OVERWRITE mcp_server SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON mcp_server TYPE string;
@@ -160,19 +148,19 @@ DEFINE FIELD OVERWRITE id ON mcp_call_log TYPE string;
 DEFINE FIELD OVERWRITE workflow_id ON mcp_call_log TYPE option<string>;
 DEFINE FIELD OVERWRITE server_name ON mcp_call_log TYPE string;
 DEFINE FIELD OVERWRITE tool_name ON mcp_call_log TYPE string;
-DEFINE FIELD OVERWRITE params ON mcp_call_log TYPE object;
-DEFINE FIELD OVERWRITE result ON mcp_call_log TYPE array | object; -- MCP tool results can be arrays or objects
+DEFINE FIELD OVERWRITE params ON mcp_call_log TYPE string DEFAULT '{}'; -- JSON string (ERR_SURREAL_001: TYPE object drops dynamic keys)
+DEFINE FIELD OVERWRITE result ON mcp_call_log TYPE string DEFAULT '[]'; -- JSON string (was TYPE array | object)
 DEFINE FIELD OVERWRITE success ON mcp_call_log TYPE bool;
 DEFINE FIELD OVERWRITE duration_ms ON mcp_call_log TYPE int;
 DEFINE FIELD OVERWRITE timestamp ON mcp_call_log TYPE datetime DEFAULT time::now();
 -- =============================================
--- Index Review (OPT-DB-11): Write-Heavy Table Analysis
+-- Index Review: Write-Heavy Table Analysis
 -- =============================================
 -- mcp_call_log is write-heavy (every MCP tool call creates a record)
 -- Index trade-off: faster reads vs slower writes
 -- Keep both indexes as they are actively used:
 --   - mcp_call_workflow: Required for workflow-scoped MCP call history
---   - mcp_call_server: Required for Phase 4 latency metrics (get_mcp_latency_metrics)
+--   - mcp_call_server: Required for latency metrics (get_mcp_latency_metrics)
 DEFINE INDEX OVERWRITE mcp_call_workflow ON mcp_call_log FIELDS workflow_id;
 DEFINE INDEX OVERWRITE mcp_call_server ON mcp_call_log FIELDS server_name;
 
@@ -287,13 +275,12 @@ DEFINE FIELD OVERWRITE updated_at ON agent TYPE datetime DEFAULT time::now();
 
 -- Indexes
 DEFINE INDEX OVERWRITE unique_agent_id ON agent FIELDS id UNIQUE;
-DEFINE INDEX OVERWRITE agent_name_idx ON agent FIELDS name;
+DEFINE INDEX OVERWRITE agent_name_idx ON agent FIELDS name UNIQUE;
 DEFINE INDEX OVERWRITE agent_provider_idx ON agent FIELDS llm.provider;
 
 -- =============================================
 -- Table: tool_execution
 -- Logs all tool executions (local + MCP)
--- Phase 3: Tool Execution Persistence
 -- =============================================
 DEFINE TABLE OVERWRITE tool_execution SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON tool_execution TYPE string;
@@ -311,6 +298,7 @@ DEFINE FIELD OVERWRITE success ON tool_execution TYPE bool;
 DEFINE FIELD OVERWRITE error_message ON tool_execution TYPE option<string>;
 DEFINE FIELD OVERWRITE duration_ms ON tool_execution TYPE int;
 DEFINE FIELD OVERWRITE iteration ON tool_execution TYPE int;
+DEFINE FIELD OVERWRITE sequence ON tool_execution TYPE int DEFAULT 0;
 DEFINE FIELD OVERWRITE created_at ON tool_execution TYPE datetime DEFAULT time::now();
 
 -- Indexes for efficient querying
@@ -322,7 +310,6 @@ DEFINE INDEX OVERWRITE tool_exec_type_idx ON tool_execution FIELDS tool_type;
 -- =============================================
 -- Table: thinking_step
 -- Captures agent reasoning/thinking steps
--- Phase 4: Thinking Steps Persistence
 -- =============================================
 DEFINE TABLE OVERWRITE thinking_step SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON thinking_step TYPE string;
@@ -335,6 +322,9 @@ DEFINE FIELD OVERWRITE content ON thinking_step TYPE string
     ASSERT string::len($value) >= 1 AND string::len($value) <= 50000;
 DEFINE FIELD OVERWRITE duration_ms ON thinking_step TYPE option<int>;
 DEFINE FIELD OVERWRITE tokens ON thinking_step TYPE option<int>;
+DEFINE FIELD OVERWRITE sequence ON thinking_step TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE source ON thinking_step TYPE string DEFAULT 'agent_flow'
+    ASSERT $value IN ['agent_flow', 'model_thinking'];
 DEFINE FIELD OVERWRITE created_at ON thinking_step TYPE datetime DEFAULT time::now();
 
 -- Indexes for efficient querying
@@ -345,7 +335,6 @@ DEFINE INDEX OVERWRITE thinking_agent_idx ON thinking_step FIELDS agent_id;
 -- =============================================
 -- Table: sub_agent_execution
 -- Tracks sub-agent spawn/delegate operations
--- Phase 6A: Sub-Agent System Infrastructure
 -- =============================================
 DEFINE TABLE OVERWRITE sub_agent_execution SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON sub_agent_execution TYPE string;
@@ -363,6 +352,7 @@ DEFINE FIELD OVERWRITE tokens_input ON sub_agent_execution TYPE option<int>;
 DEFINE FIELD OVERWRITE tokens_output ON sub_agent_execution TYPE option<int>;
 DEFINE FIELD OVERWRITE result_summary ON sub_agent_execution TYPE option<string>;
 DEFINE FIELD OVERWRITE error_message ON sub_agent_execution TYPE option<string>;
+DEFINE FIELD OVERWRITE parent_execution_id ON sub_agent_execution TYPE option<string>;
 DEFINE FIELD OVERWRITE created_at ON sub_agent_execution TYPE datetime DEFAULT time::now();
 DEFINE FIELD OVERWRITE completed_at ON sub_agent_execution TYPE option<datetime>;
 
@@ -374,7 +364,6 @@ DEFINE INDEX OVERWRITE sub_agent_status_idx ON sub_agent_execution FIELDS status
 -- =============================================
 -- Table: user_question
 -- Stores user interaction questions for agent clarification
--- Phase 4: UserQuestionTool - Database Schema Setup
 -- =============================================
 DEFINE TABLE OVERWRITE user_question SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON user_question TYPE string;
@@ -399,4 +388,14 @@ DEFINE FIELD OVERWRITE answered_at ON user_question TYPE option<datetime>;
 DEFINE INDEX OVERWRITE user_question_workflow_idx ON user_question FIELDS workflow_id;
 DEFINE INDEX OVERWRITE user_question_status_idx ON user_question FIELDS status;
 DEFINE INDEX OVERWRITE user_question_workflow_status_idx ON user_question FIELDS workflow_id, status;
+
+-- =============================================
+-- Table: migration_log
+-- Tracks applied database migrations to prevent re-execution
+-- SA-005 H3: Migration guard for embedding-destructive operations
+-- =============================================
+DEFINE TABLE OVERWRITE migration_log SCHEMAFULL;
+DEFINE FIELD OVERWRITE name ON migration_log TYPE string;
+DEFINE FIELD OVERWRITE applied_at ON migration_log TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE unique_migration_name ON migration_log FIELDS name UNIQUE;
 "#;

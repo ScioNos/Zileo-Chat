@@ -51,9 +51,13 @@ export interface Workflow {
   /** Cumulative cost for this workflow (USD) */
   total_cost_usd: number;
   /** Model ID used (for context_window lookup) */
-  model_id?: string;
+  model_id: string | null;
   /** Current context size (last API call context window usage) */
   current_context_tokens: number;
+  /** Cumulative input tokens from sub-agents only */
+  sub_agent_tokens_input: number;
+  /** Cumulative output tokens from sub-agents only */
+  sub_agent_tokens_output: number;
 }
 
 /**
@@ -72,6 +76,8 @@ export interface WorkflowResult {
   mcp_calls: string[];
   /** Detailed tool execution data for persistence and display */
   tool_executions: WorkflowToolExecution[];
+  /** Pre-generated message ID for block association (SA-019 P5) */
+  message_id: string;
 }
 
 /**
@@ -101,7 +107,7 @@ export interface WorkflowMetrics {
  * - Tool execution history
  * - Thinking/reasoning steps
  *
- * Used by `load_workflow_full_state` command for Phase 5: Complete State Recovery.
+ * Used by `load_workflow_full_state` command for Complete State Recovery.
  */
 export interface WorkflowFullState {
   /** The workflow entity with metadata */
@@ -135,6 +141,12 @@ export interface TokenDisplayData {
   cost_usd: number;
   /** Cumulative cost for workflow (USD) */
   cumulative_cost_usd: number;
+  /** Sub-agent cumulative input tokens */
+  sub_agent_input: number;
+  /** Sub-agent cumulative output tokens */
+  sub_agent_output: number;
+  /** Total workflow cost (main agent + sub-agent estimate) */
+  workflow_total_cost: number;
   /** Token generation speed (tokens/second) - only during streaming */
   speed_tks?: number;
   /** Whether currently streaming */

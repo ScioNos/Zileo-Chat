@@ -17,13 +17,13 @@
 //! Provides Tauri commands for saving and retrieving tool execution logs
 //! for workflow state recovery and debugging.
 //!
-//! Phase 3: Tool Execution Persistence - Enables complete workflow state
-//! recovery with full tool call history.
+//! Enables complete workflow state recovery with full tool call history.
 
 use crate::{
+    constants::commands as cmd_const,
+    db::extract_count,
     models::{ToolExecution, ToolExecutionCreate},
-    security::Validator,
-    tools::constants::commands as cmd_const,
+    security::validate_uuid_field,
     AppState,
 };
 use tauri::State;
@@ -48,6 +48,66 @@ use uuid::Uuid;
 ///
 /// # Returns
 /// The ID of the created tool execution record
+/// Validates tool-specific fields (type, name, params size, server_name).
+fn validate_tool_fields(
+    tool_type: &str,
+    tool_name: &str,
+    server_name: &Option<String>,
+    input_params: &serde_json::Value,
+    output_result: &serde_json::Value,
+) -> Result<(), String> {
+    // Validate tool type
+    match tool_type {
+        "local" | "mcp" => {}
+        _ => {
+            warn!(tool_type = %tool_type, "Invalid tool type");
+            return Err(format!(
+                "Invalid tool type: {}. Expected 'local' or 'mcp'",
+                tool_type
+            ));
+        }
+    };
+
+    // Validate tool name
+    if tool_name.is_empty() {
+        return Err("Tool name cannot be empty".to_string());
+    }
+    if tool_name.len() > cmd_const::MAX_TOOL_NAME_LEN {
+        return Err(format!(
+            "Tool name exceeds maximum length of {} characters",
+            cmd_const::MAX_TOOL_NAME_LEN
+        ));
+    }
+
+    // Validate params size
+    let input_size = serde_json::to_string(input_params)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let output_size = serde_json::to_string(output_result)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    if input_size > cmd_const::MAX_PARAMS_SIZE {
+        return Err(format!(
+            "Input params exceed maximum size of {} bytes",
+            cmd_const::MAX_PARAMS_SIZE
+        ));
+    }
+    if output_size > cmd_const::MAX_PARAMS_SIZE {
+        return Err(format!(
+            "Output result exceeds maximum size of {} bytes",
+            cmd_const::MAX_PARAMS_SIZE
+        ));
+    }
+
+    // Validate server_name for MCP tools
+    if tool_type == "mcp" && server_name.is_none() {
+        return Err("server_name is required for MCP tools".to_string());
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[instrument(
@@ -76,81 +136,24 @@ pub async fn save_tool_execution(
 ) -> Result<String, String> {
     info!("Saving tool execution");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
-
-    // Validate message ID
-    let validated_message_id = Validator::validate_uuid(&message_id).map_err(|e| {
-        warn!(error = %e, "Invalid message_id");
-        format!("Invalid message_id: {}", e)
-    })?;
-
-    // Validate agent ID
-    let validated_agent_id = Validator::validate_uuid(&agent_id).map_err(|e| {
-        warn!(error = %e, "Invalid agent_id");
-        format!("Invalid agent_id: {}", e)
-    })?;
-
-    // Validate tool type
-    let validated_tool_type = match tool_type.as_str() {
-        "local" | "mcp" => tool_type.clone(),
-        _ => {
-            warn!(tool_type = %tool_type, "Invalid tool type");
-            return Err(format!(
-                "Invalid tool type: {}. Expected 'local' or 'mcp'",
-                tool_type
-            ));
-        }
-    };
-
-    // Validate tool name
-    if tool_name.is_empty() {
-        return Err("Tool name cannot be empty".to_string());
-    }
-    if tool_name.len() > cmd_const::MAX_TOOL_NAME_LEN {
-        return Err(format!(
-            "Tool name exceeds maximum length of {} characters",
-            cmd_const::MAX_TOOL_NAME_LEN
-        ));
-    }
-
-    // Validate params size
-    let input_size = serde_json::to_string(&input_params)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let output_size = serde_json::to_string(&output_result)
-        .map(|s| s.len())
-        .unwrap_or(0);
-
-    if input_size > cmd_const::MAX_PARAMS_SIZE {
-        return Err(format!(
-            "Input params exceed maximum size of {} bytes",
-            cmd_const::MAX_PARAMS_SIZE
-        ));
-    }
-    if output_size > cmd_const::MAX_PARAMS_SIZE {
-        return Err(format!(
-            "Output result exceeds maximum size of {} bytes",
-            cmd_const::MAX_PARAMS_SIZE
-        ));
-    }
-
-    // Validate server_name for MCP tools
-    if validated_tool_type == "mcp" && server_name.is_none() {
-        return Err("server_name is required for MCP tools".to_string());
-    }
+    validate_uuid_field(&workflow_id, "workflow_id")?;
+    validate_uuid_field(&message_id, "message_id")?;
+    validate_uuid_field(&agent_id, "agent_id")?;
+    validate_tool_fields(
+        &tool_type,
+        &tool_name,
+        &server_name,
+        &input_params,
+        &output_result,
+    )?;
 
     let execution_id = Uuid::new_v4().to_string();
 
-    // Build ToolExecutionCreate payload
     let execution = ToolExecutionCreate {
-        workflow_id: validated_workflow_id,
-        message_id: validated_message_id,
-        agent_id: validated_agent_id,
-        tool_type: validated_tool_type,
+        workflow_id,
+        message_id,
+        agent_id,
+        tool_type,
         tool_name,
         server_name,
         input_params,
@@ -159,9 +162,9 @@ pub async fn save_tool_execution(
         error_message,
         duration_ms,
         iteration,
+        sequence: 0,
     };
 
-    // Insert into database
     let id = state
         .db
         .create("tool_execution", &execution_id, execution)
@@ -190,11 +193,7 @@ pub async fn load_workflow_tool_executions(
 ) -> Result<Vec<ToolExecution>, String> {
     info!("Loading workflow tool executions");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Use explicit field selection with meta::id(id) to avoid SurrealDB SDK
     // serialization issues with internal Thing type (see CLAUDE.md)
@@ -213,10 +212,11 @@ pub async fn load_workflow_tool_executions(
             error_message,
             duration_ms,
             iteration,
+            sequence,
             created_at
         FROM tool_execution
         WHERE workflow_id = '{}'
-        ORDER BY created_at ASC"#,
+        ORDER BY sequence ASC, created_at ASC"#,
         validated_workflow_id
     );
 
@@ -256,11 +256,7 @@ pub async fn load_message_tool_executions(
 ) -> Result<Vec<ToolExecution>, String> {
     info!("Loading message tool executions");
 
-    // Validate message ID
-    let validated_message_id = Validator::validate_uuid(&message_id).map_err(|e| {
-        warn!(error = %e, "Invalid message_id");
-        format!("Invalid message_id: {}", e)
-    })?;
+    let validated_message_id = validate_uuid_field(&message_id, "message_id")?;
 
     let query = format!(
         r#"SELECT
@@ -277,10 +273,11 @@ pub async fn load_message_tool_executions(
             error_message,
             duration_ms,
             iteration,
+            sequence,
             created_at
         FROM tool_execution
         WHERE message_id = '{}'
-        ORDER BY created_at ASC"#,
+        ORDER BY sequence ASC, created_at ASC"#,
         validated_message_id
     );
 
@@ -317,17 +314,14 @@ pub async fn get_tool_execution(
 ) -> Result<ToolExecution, String> {
     info!("Loading tool execution by ID");
 
-    let validated_id = Validator::validate_uuid(&execution_id).map_err(|e| {
-        warn!(error = %e, "Invalid execution_id");
-        format!("Invalid execution_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&execution_id, "execution_id")?;
 
     let query = format!(
         r#"SELECT
             meta::id(id) AS id,
             workflow_id, message_id, agent_id, tool_type, tool_name,
             server_name, input_params, output_result, success,
-            error_message, duration_ms, iteration, created_at
+            error_message, duration_ms, iteration, sequence, created_at
         FROM tool_execution
         WHERE meta::id(id) = '{}'"#,
         validated_id
@@ -366,11 +360,7 @@ pub async fn delete_tool_execution(
 ) -> Result<(), String> {
     info!("Deleting tool execution");
 
-    // Validate execution ID
-    let validated_id = Validator::validate_uuid(&execution_id).map_err(|e| {
-        warn!(error = %e, "Invalid execution ID");
-        format!("Invalid execution ID: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&execution_id, "execution_id")?;
 
     // Use execute() with DELETE query to avoid SurrealDB SDK serialization issues
     state
@@ -401,11 +391,7 @@ pub async fn clear_workflow_tool_executions(
 ) -> Result<u64, String> {
     info!("Clearing workflow tool executions");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // First count existing executions
     let count_query = format!(
@@ -415,11 +401,7 @@ pub async fn clear_workflow_tool_executions(
     let count_result: Vec<serde_json::Value> =
         state.db.query(&count_query).await.unwrap_or_default();
 
-    let count = count_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0);
+    let count = extract_count(&count_result);
 
     // Delete all executions for the workflow
     state

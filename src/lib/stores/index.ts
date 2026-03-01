@@ -29,11 +29,10 @@ export * from './mcp';
 export * from './llm';
 export * from './streaming';
 export * from './prompts';
-export * from './activity';
 export * from './tokens';
 export * from './locale';
 export * from './onboarding';
-export * from './userQuestion';
+export * from './user-question';
 export * from './validation';
 export * from './factory';
 export {
@@ -44,3 +43,6 @@ export {
 	settingsError as validationSettingsError,
 	hasSettings as hasValidationSettings
 } from './validation-settings';
+export * from './background-workflows';
+export * from './execution-blocks';
+export * from './toast';

@@ -22,7 +22,6 @@
  */
 
 const KEYS = {
-	RIGHT_SIDEBAR_COLLAPSED: 'zileo_right_sidebar_collapsed',
 	LEFT_SIDEBAR_COLLAPSED: 'zileo_left_sidebar_collapsed',
 	SELECTED_WORKFLOW_ID: 'zileo_last_workflow_id'
 } as const;
@@ -61,8 +60,8 @@ export const LocalStorage = {
 
 		try {
 			localStorage.setItem(key, JSON.stringify(value));
-		} catch (error) {
-			console.error('Failed to save to localStorage:', error);
+		} catch {
+			// localStorage may fail (quota exceeded, private browsing)
 		}
 	},
 
@@ -77,8 +76,8 @@ export const LocalStorage = {
 
 		try {
 			localStorage.removeItem(key);
-		} catch (error) {
-			console.error('Failed to remove from localStorage:', error);
+		} catch {
+			// localStorage may fail (private browsing)
 		}
 	}
 };

@@ -34,7 +34,6 @@ import type { UserQuestionStreamPayload } from './user-question';
  * Synchronized with Rust `ChunkType` enum in `src-tauri/src/models/streaming.rs`.
  */
 export type ChunkType =
-  | 'token'
   | 'tool_start'
   | 'tool_end'
   | 'reasoning'
@@ -47,7 +46,10 @@ export type ChunkType =
   | 'task_update'
   | 'task_complete'
   | 'user_question_start'
-  | 'user_question_complete';
+  | 'user_question_complete'
+  | 'thinking_block'
+  | 'tool_call_complete'
+  | 'response_block';
 
 /**
  * Metrics included in sub-agent complete events.
@@ -97,12 +99,26 @@ export interface StreamChunk {
   task_status?: 'pending' | 'in_progress' | 'completed' | 'blocked';
   /** Task priority (for task_* chunks) */
   task_priority?: 1 | 2 | 3 | 4 | 5;
+  /** Agent name associated with task (for task_* chunks) */
+  task_agent_name?: string;
   /** User question payload (for user_question_start chunks) */
   user_question?: UserQuestionStreamPayload;
+  /** Question ID (for user_question_complete chunks) */
+  question_id?: string;
   /** Token count for this chunk (incremental) */
   tokens_delta?: number;
   /** Cumulative token count (running total) */
   tokens_total?: number;
+  /** Tool input parameters as JSON string (for tool_call_complete) */
+  tool_input?: string;
+  /** Tool output result as JSON string (for tool_call_complete) */
+  tool_output?: string;
+  /** Tool execution success/failure (for tool_call_complete) */
+  tool_success?: boolean;
+  /** Input tokens count (for response_block) */
+  tokens_input?: number;
+  /** Output tokens count (for response_block) */
+  tokens_output?: number;
 }
 
 /**

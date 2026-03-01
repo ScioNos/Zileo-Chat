@@ -47,13 +47,12 @@ use crate::db::DBClient;
 use crate::mcp::MCPManager;
 use crate::models::streaming::SubAgentOperationType;
 use crate::models::sub_agent::{
-    constants::MAX_SUB_AGENTS, DelegateResult, SubAgentExecutionComplete, SubAgentExecutionCreate,
-    SubAgentStatus,
+    constants::MAX_SUB_AGENTS, DelegateResult, SubAgentExecutionCreate, SubAgentStatus,
 };
 use crate::models::Lifecycle;
 use crate::tools::context::AgentToolContext;
 use crate::tools::sub_agent_executor::SubAgentExecutor;
-use crate::tools::utils::sub_agent_description_template;
+use crate::tools::utils::{resolve_agent_ref, sub_agent_description_template};
 use crate::tools::validation_helper::ValidationHelper;
 use crate::tools::{Tool, ToolDefinition, ToolError, ToolResult};
 use async_trait::async_trait;
@@ -79,6 +78,65 @@ pub struct ActiveDelegation {
     pub status: SubAgentStatus,
     /// Execution record ID in database
     pub execution_id: String,
+}
+
+/// Validates delegate operation parameters: requires prompt + (agent_id OR agent_name).
+///
+/// Pure function for testability. Used by `DelegateTaskTool::validate_input`.
+fn validate_delegate_operation(input: &Value) -> ToolResult<()> {
+    let has_agent_id = input
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_agent_name = input
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+
+    if !has_agent_id && !has_agent_name {
+        return Err(ToolError::InvalidInput(
+            "Missing 'agent_id' or 'agent_name' for delegate operation. \
+             Provide at least one. Use 'list_agents' to find available agents."
+                .to_string(),
+        ));
+    }
+    if input.get("prompt").is_none() {
+        return Err(ToolError::InvalidInput(
+            "Missing 'prompt' for delegate operation. The prompt is the only input \
+             the agent receives - include all necessary context."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the input schema for DelegateTaskTool.
+///
+/// Pure function for testability. Used by `DelegateTaskTool::definition`.
+fn delegate_task_input_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["delegate", "list_agents"],
+                "description": "Operation: 'delegate' executes task via permanent agent, 'list_agents' shows available LLM agents for delegation"
+            },
+            "agent_id": {
+                "type": "string",
+                "description": "Target agent ID (UUID). Use list_agents to find available agents. Either agent_id or agent_name is required."
+            },
+            "agent_name": {
+                "type": "string",
+                "description": "Target agent name (case-insensitive). Alternative to agent_id. If both are provided, agent_id takes priority."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "COMPLETE prompt for the agent. Must include task, any data needed, and expected report format. This is the ONLY input the agent receives."
+            }
+        },
+        "required": ["operation"]
+    })
 }
 
 /// Tool for delegating tasks to existing permanent agents.
@@ -108,7 +166,7 @@ pub struct DelegateTaskTool {
     mcp_manager: Option<Arc<MCPManager>>,
     /// Tauri app handle for event emission (optional, for validation)
     app_handle: Option<AppHandle>,
-    /// Cancellation token for graceful shutdown (OPT-SA-7)
+    /// Cancellation token for graceful shutdown
     cancellation_token: Option<CancellationToken>,
     /// Current agent ID (parent agent)
     current_agent_id: String,
@@ -130,7 +188,7 @@ impl DelegateTaskTool {
     /// * `workflow_id` - Workflow ID for scoping
     /// * `is_primary_agent` - Whether this is the primary workflow agent
     ///
-    /// # Cancellation Token (OPT-SA-7)
+    /// # Cancellation Token
     ///
     /// The cancellation token is extracted from the `AgentToolContext`. If provided,
     /// delegated agents will monitor the token and abort execution when cancellation
@@ -286,7 +344,7 @@ impl DelegateTaskTool {
             agent_id.to_string(),
             agent_name.clone(),
             prompt.to_string(),
-            None, // OPT-SA-11: No parent for top-level delegations
+            None, // No parent for top-level delegations
         );
         // Set status to running (new() defaults to pending)
         execution_create.status = "running".to_string();
@@ -299,7 +357,7 @@ impl DelegateTaskTool {
                 ToolError::DatabaseError(format!("Failed to create execution record: {}", e))
             })?;
 
-        // OPT-SA-11: Log execution creation with tracing ID
+        // Log execution creation with tracing ID
         debug!(
             execution_id = %execution_id,
             agent_id = %agent_id,
@@ -317,8 +375,8 @@ impl DelegateTaskTool {
         };
         self.active_delegations.write().await.push(delegation);
 
-        // 9b. Create executor for unified event emission (OPT-SA-4)
-        // OPT-SA-7: Use with_cancellation for graceful shutdown support
+        // 9b. Create executor for unified event emission
+        // Use with_cancellation for graceful shutdown support
         let executor = SubAgentExecutor::with_cancellation(
             self.db.clone(),
             self.orchestrator.clone(),
@@ -343,68 +401,26 @@ impl DelegateTaskTool {
             }),
         };
 
-        // 11. Execute via unified executor with retry and heartbeat monitoring (OPT-SA-1, OPT-SA-10)
+        // 11. Execute via unified executor with retry and heartbeat monitoring
         let exec_result = executor.execute_with_retry(agent_id, task, None).await;
 
-        // 12. Emit sub_agent_complete or sub_agent_error event via unified executor (OPT-SA-4)
+        // 12. Emit sub_agent_complete or sub_agent_error event via unified executor
         executor.emit_complete_event(agent_id, &agent_name, &exec_result);
 
         // Extract values for subsequent processing
         let report = exec_result.report.clone();
         let metrics = exec_result.metrics.clone();
         let success = exec_result.success;
-        let error_message = exec_result.error_message.clone();
 
-        // 13. Update execution record
-        let completion = if success {
-            SubAgentExecutionComplete::success(
-                metrics.duration_ms,
-                Some(metrics.tokens_input),
-                Some(metrics.tokens_output),
-                report.clone(),
-            )
-        } else {
-            SubAgentExecutionComplete::error(
-                metrics.duration_ms,
-                error_message
-                    .clone()
-                    .unwrap_or_else(|| "Unknown error".to_string()),
-            )
-        };
+        // 13. Update execution record (SA-014: use unified parameterized method)
+        executor
+            .update_execution_record(&execution_id, &exec_result)
+            .await;
 
-        let update_query = format!(
-            "UPDATE sub_agent_execution:`{}` SET \
-             status = '{}', \
-             duration_ms = {}, \
-             tokens_input = {}, \
-             tokens_output = {}, \
-             result_summary = {}, \
-             error_message = {}, \
-             completed_at = time::now()",
-            execution_id,
-            completion.status,
-            completion.duration_ms,
-            completion.tokens_input.unwrap_or(0),
-            completion.tokens_output.unwrap_or(0),
-            completion
-                .result_summary
-                .as_ref()
-                .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".to_string()))
-                .unwrap_or_else(|| "null".to_string()),
-            completion
-                .error_message
-                .as_ref()
-                .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".to_string()))
-                .unwrap_or_else(|| "null".to_string()),
-        );
-
-        if let Err(e) = self.db.execute(&update_query).await {
-            warn!(
-                execution_id = %execution_id,
-                error = %e,
-                "Failed to update execution record"
-            );
-        }
+        // 13b. Persist sub-agent internal tool executions and reasoning steps (SA-014 P1/P2)
+        executor
+            .persist_sub_agent_internals(&execution_id, agent_id, &exec_result)
+            .await;
 
         // 14. Update active delegations status
         {
@@ -418,7 +434,7 @@ impl DelegateTaskTool {
             }
         }
 
-        // OPT-SA-11: Include execution_id for hierarchical tracing
+        // Include execution_id for hierarchical tracing
         info!(
             agent_id = %agent_id,
             execution_id = %execution_id,
@@ -497,7 +513,7 @@ impl Tool for DelegateTaskTool {
         let tool_specific_desc = r#"Delegates tasks to existing permanent LLM agents.
 
 ⚠️ LLM AGENTS ONLY - NOT MCP SERVERS:
-- agent_id must be an LLM agent ID (e.g., "db_agent", "analytics_agent")
+- Use agent_name (preferred) or agent_id (UUID) to identify the target agent
 - DO NOT use MCP server IDs here (e.g., "mcp-xxx-7tj9p")
 - For MCP tools, call them DIRECTLY: server_id:tool_name
 
@@ -520,7 +536,8 @@ SPAWN vs DELEGATE:
 
 OPERATIONS:
 - delegate: Execute task via permanent agent
-  Required: agent_id, prompt
+  Required: (agent_id OR agent_name) + prompt
+  If both agent_id and agent_name provided, agent_id takes priority.
 
 - list_agents: Show available agents for delegation
 
@@ -530,8 +547,11 @@ PROMPT GUIDELINES:
 3. Specify the expected report format
 4. Set scope boundaries if needed
 
-EXAMPLE:
-{"operation": "delegate", "agent_id": "db_agent", "prompt": "TASK: Analyze the users table for performance issues.\n\nCONTEXT: Table has 50k rows, queries taking >2s.\n\nFOCUS: Missing indexes, query patterns, schema optimization.\n\nREPORT FORMAT:\n- Summary\n- Findings with impact level\n- Recommended changes"}
+EXAMPLE (by name - preferred):
+{"operation": "delegate", "agent_name": "Database Agent", "prompt": "TASK: Analyze the users table..."}
+
+EXAMPLE (by ID):
+{"operation": "delegate", "agent_id": "550e8400-e29b-41d4-a716-446655440000", "prompt": "TASK: Analyze..."}
 
 {"operation": "list_agents"}"#;
 
@@ -540,25 +560,7 @@ EXAMPLE:
             name: "Delegate Task".to_string(),
             description: sub_agent_description_template(tool_specific_desc),
 
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["delegate", "list_agents"],
-                        "description": "Operation: 'delegate' executes task via permanent agent, 'list_agents' shows available LLM agents for delegation"
-                    },
-                    "agent_id": {
-                        "type": "string",
-                        "description": "Target agent ID (for delegate). Use list_agents to find available agents."
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "COMPLETE prompt for the agent. Must include task, any data needed, and expected report format. This is the ONLY input the agent receives."
-                    }
-                },
-                "required": ["operation"]
-            }),
+            input_schema: delegate_task_input_schema(),
 
             output_schema: serde_json::json!({
                 "type": "object",
@@ -596,18 +598,29 @@ EXAMPLE:
 
         match operation {
             "delegate" => {
-                let agent_id = input["agent_id"].as_str().ok_or_else(|| {
-                    ToolError::InvalidInput(
-                        "Missing 'agent_id' for delegate operation. Use 'list_agents' to find available agents.".to_string(),
-                    )
-                })?;
+                let agent_ref = input["agent_id"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        input["agent_name"]
+                            .as_str()
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput(
+                            "Missing 'agent_id' or 'agent_name' for delegate operation."
+                                .to_string(),
+                        )
+                    })?;
                 let prompt = input["prompt"].as_str().ok_or_else(|| {
                     ToolError::InvalidInput(
                         "Missing 'prompt' for delegate operation. The prompt is the only input the agent receives.".to_string(),
                     )
                 })?;
 
-                self.delegate(agent_id, prompt).await
+                // Resolve via ID or name lookup
+                let resolved_id = resolve_agent_ref(&self.registry, agent_ref).await?;
+                self.delegate(&resolved_id, prompt).await
             }
 
             "list_agents" => self.list_agents().await,
@@ -632,20 +645,7 @@ EXAMPLE:
 
         match operation {
             "delegate" => {
-                if input.get("agent_id").is_none() {
-                    return Err(ToolError::InvalidInput(
-                        "Missing 'agent_id' for delegate operation. \
-                         Use 'list_agents' to find available agents."
-                            .to_string(),
-                    ));
-                }
-                if input.get("prompt").is_none() {
-                    return Err(ToolError::InvalidInput(
-                        "Missing 'prompt' for delegate operation. The prompt is the only input \
-                         the agent receives - include all necessary context."
-                            .to_string(),
-                    ));
-                }
+                validate_delegate_operation(input)?;
             }
             "list_agents" => {
                 // No required params
@@ -749,5 +749,55 @@ mod tests {
     #[test]
     fn test_max_sub_agents_constant() {
         assert_eq!(MAX_SUB_AGENTS, 15);
+    }
+
+    // --- SA-020/P4: DelegateTaskTool accepts agent_name ---
+
+    #[test]
+    fn test_validate_input_accepts_agent_id() {
+        let input = serde_json::json!({
+            "operation": "delegate",
+            "agent_id": "some-uuid-123",
+            "prompt": "Analyze the database"
+        });
+        let result = validate_delegate_operation(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_input_accepts_agent_name() {
+        let input = serde_json::json!({
+            "operation": "delegate",
+            "agent_name": "Database Agent",
+            "prompt": "Analyze the database"
+        });
+        let result = validate_delegate_operation(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_input_rejects_missing_both() {
+        let input = serde_json::json!({
+            "operation": "delegate",
+            "prompt": "Analyze the database"
+        });
+        let result = validate_delegate_operation(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_definition_has_agent_name_property() {
+        let schema = delegate_task_input_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(
+            properties.contains_key("agent_name"),
+            "Schema must contain agent_name property"
+        );
+        assert!(
+            properties.contains_key("agent_id"),
+            "Schema must still contain agent_id property"
+        );
     }
 }

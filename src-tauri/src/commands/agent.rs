@@ -25,39 +25,23 @@
 //! - [`delete_agent`] - Delete an agent
 
 use crate::agents::LLMAgent;
-use crate::models::llm_models::ProviderType;
+use crate::constants::commands as cmd_const;
+use crate::llm::ProviderType;
 use crate::models::{
     AgentConfig, AgentConfigCreate, AgentConfigUpdate, AgentSummary, LLMConfig, Lifecycle,
 };
-use crate::security::Validator;
+use crate::security::{serialize_for_query, Validator};
 use crate::state::AppState;
-use crate::tools::constants::commands as cmd_const;
 use crate::tools::context::AgentToolContext;
 use crate::tools::registry::TOOL_REGISTRY;
+use crate::tools::validation_helper::validate_trimmed_name;
 use std::sync::Arc;
 use tauri::State;
 use tracing::{error, info, instrument, warn};
 
-/// Validates agent name
+/// Delegates to centralized validate_trimmed_name
 fn validate_agent_name(name: &str) -> Result<String, String> {
-    let trimmed = name.trim();
-
-    if trimmed.is_empty() {
-        return Err("Agent name cannot be empty".to_string());
-    }
-
-    if trimmed.len() > cmd_const::MAX_AGENT_NAME_LEN {
-        return Err(format!(
-            "Agent name exceeds maximum length of {} characters",
-            cmd_const::MAX_AGENT_NAME_LEN
-        ));
-    }
-
-    if trimmed.chars().any(|c| c.is_control() && c != '\n') {
-        return Err("Agent name cannot contain control characters".to_string());
-    }
-
-    Ok(trimmed.to_string())
+    validate_trimmed_name(name, "Agent name", cmd_const::MAX_AGENT_NAME_LEN)
 }
 
 /// Validates system prompt
@@ -118,6 +102,7 @@ fn validate_llm_config(llm: &LLMConfig) -> Result<LLMConfig, String> {
         model: model.to_string(),
         temperature: llm.temperature,
         max_tokens: llm.max_tokens,
+        is_reasoning: llm.is_reasoning,
     })
 }
 
@@ -187,7 +172,7 @@ fn validate_agent_create(config: &AgentConfigCreate) -> Result<AgentConfigCreate
 }
 
 // ============================================================================
-// Database Serialization Helpers (OPT-5)
+// Database Serialization Helpers
 // ============================================================================
 
 /// Serialized agent configuration fields for database operations
@@ -201,30 +186,11 @@ struct SerializedAgentFields {
 
 /// Serializes agent configuration fields for database storage
 fn serialize_agent_fields(config: &AgentConfig) -> Result<SerializedAgentFields, String> {
-    let name_json = serde_json::to_string(&config.name).map_err(|e| {
-        error!(error = %e, "Failed to serialize name");
-        format!("Failed to serialize name: {}", e)
-    })?;
-
-    let llm_json = serde_json::to_string(&config.llm).map_err(|e| {
-        error!(error = %e, "Failed to serialize LLM config");
-        format!("Failed to serialize LLM config: {}", e)
-    })?;
-
-    let tools_json = serde_json::to_string(&config.tools).map_err(|e| {
-        error!(error = %e, "Failed to serialize tools");
-        format!("Failed to serialize tools: {}", e)
-    })?;
-
-    let mcp_json = serde_json::to_string(&config.mcp_servers).map_err(|e| {
-        error!(error = %e, "Failed to serialize MCP servers");
-        format!("Failed to serialize MCP servers: {}", e)
-    })?;
-
-    let prompt_json = serde_json::to_string(&config.system_prompt).map_err(|e| {
-        error!(error = %e, "Failed to serialize system prompt");
-        format!("Failed to serialize system prompt: {}", e)
-    })?;
+    let name_json = serialize_for_query(&config.name, "name")?;
+    let llm_json = serialize_for_query(&config.llm, "LLM config")?;
+    let tools_json = serialize_for_query(&config.tools, "tools")?;
+    let mcp_json = serialize_for_query(&config.mcp_servers, "MCP servers")?;
+    let prompt_json = serialize_for_query(&config.system_prompt, "system prompt")?;
 
     Ok(SerializedAgentFields {
         name_json,
@@ -304,6 +270,42 @@ pub async fn get_agent_config(
     Ok(config)
 }
 
+/// Checks that agent name is unique (case-insensitive, trimmed).
+///
+/// - `exclude_id`: If Some, excludes this agent from the check (for update_agent).
+async fn check_agent_name_unique(
+    db: &crate::db::DBClient,
+    name: &str,
+    exclude_id: Option<&str>,
+) -> Result<(), String> {
+    let trimmed = name.trim();
+
+    let (query, params) = match exclude_id {
+        Some(id) => (
+            "SELECT meta::id(id) AS id FROM agent WHERE string::lowercase(name) = string::lowercase($name) AND meta::id(id) != $id LIMIT 1",
+            vec![
+                ("name".to_string(), serde_json::json!(trimmed)),
+                ("id".to_string(), serde_json::json!(id)),
+            ],
+        ),
+        None => (
+            "SELECT meta::id(id) AS id FROM agent WHERE string::lowercase(name) = string::lowercase($name) LIMIT 1",
+            vec![("name".to_string(), serde_json::json!(trimmed))],
+        ),
+    };
+
+    let results: Vec<serde_json::Value> = db
+        .query_with_params(query, params)
+        .await
+        .map_err(|e| format!("Failed to check agent name uniqueness: {}", e))?;
+
+    if !results.is_empty() {
+        return Err(format!("An agent with name '{}' already exists", trimmed));
+    }
+
+    Ok(())
+}
+
 /// Creates a new agent
 ///
 /// Validates the configuration, persists to database, and registers in memory.
@@ -321,10 +323,17 @@ pub async fn create_agent(
         e
     })?;
 
+    check_agent_name_unique(&state.db, &validated.name, None)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "Agent name uniqueness check failed");
+            e
+        })?;
+
     // Generate UUID for new agent
     let agent_id = uuid::Uuid::new_v4().to_string();
 
-    // Build full AgentConfig (OPT-7: destructure instead of cloning individual fields)
+    // Build full AgentConfig (destructure instead of cloning individual fields)
     let AgentConfigCreate {
         name,
         lifecycle,
@@ -354,7 +363,7 @@ pub async fn create_agent(
         enable_thinking,
     };
 
-    // Serialize fields for database (OPT-5 refactoring)
+    // Serialize fields for database
     let fields = serialize_agent_fields(&agent_config)?;
 
     let query = format!(
@@ -388,11 +397,54 @@ pub async fn create_agent(
         format!("Failed to persist agent: {}", e)
     })?;
 
-    // Register agent in runtime (OPT-5 refactoring)
+    // Register agent in runtime
     register_agent_runtime(state.inner(), &agent_id, agent_config).await;
 
     info!(agent_id = %agent_id, "Agent created successfully");
     Ok(agent_id)
+}
+
+/// Merges partial update fields with existing agent config, validating each field.
+fn merge_agent_config(
+    update: &AgentConfigUpdate,
+    existing: &AgentConfig,
+) -> Result<AgentConfig, String> {
+    let name = match &update.name {
+        Some(n) => validate_agent_name(n)?,
+        None => existing.name.clone(),
+    };
+    let llm = match &update.llm {
+        Some(l) => validate_llm_config(l)?,
+        None => existing.llm.clone(),
+    };
+    let tools = match &update.tools {
+        Some(t) => validate_tools(t)?,
+        None => existing.tools.clone(),
+    };
+    let mcp_servers = match &update.mcp_servers {
+        Some(m) => validate_mcp_servers(m)?,
+        None => existing.mcp_servers.clone(),
+    };
+    let system_prompt = match &update.system_prompt {
+        Some(p) => validate_system_prompt(p)?,
+        None => existing.system_prompt.clone(),
+    };
+    let max_tool_iterations = update
+        .max_tool_iterations
+        .map_or(existing.max_tool_iterations, |m| m.clamp(1, 200));
+    let enable_thinking = update.enable_thinking.unwrap_or(existing.enable_thinking);
+
+    Ok(AgentConfig {
+        id: existing.id.clone(),
+        name,
+        lifecycle: existing.lifecycle.clone(),
+        llm,
+        tools,
+        mcp_servers,
+        system_prompt,
+        max_tool_iterations,
+        enable_thinking,
+    })
 }
 
 /// Updates an existing agent
@@ -407,71 +459,28 @@ pub async fn update_agent(
 ) -> Result<AgentConfig, String> {
     info!("Updating agent");
 
-    // Validate agent ID
     let validated_id = Validator::validate_agent_id(&agent_id).map_err(|e| {
         warn!(error = %e, "Invalid agent_id");
         format!("Invalid agent_id: {}", e)
     })?;
 
-    // Get existing agent
     let existing = state.registry.get(&validated_id).await.ok_or_else(|| {
         warn!(agent_id = %validated_id, "Agent not found");
         "Agent not found".to_string()
     })?;
 
-    let existing_config = existing.config().clone();
+    let mut updated_config = merge_agent_config(&config, existing.config())?;
+    updated_config.id = validated_id.clone();
 
-    // Build updated config (merge with existing)
-    let new_name = match &config.name {
-        Some(n) => validate_agent_name(n)?,
-        None => existing_config.name.clone(),
-    };
+    check_agent_name_unique(&state.db, &updated_config.name, Some(&validated_id))
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "Agent name uniqueness check failed on update");
+            e
+        })?;
 
-    let new_llm = match &config.llm {
-        Some(l) => validate_llm_config(l)?,
-        None => existing_config.llm.clone(),
-    };
-
-    let new_tools = match &config.tools {
-        Some(t) => validate_tools(t)?,
-        None => existing_config.tools.clone(),
-    };
-
-    let new_mcp = match &config.mcp_servers {
-        Some(m) => validate_mcp_servers(m)?,
-        None => existing_config.mcp_servers.clone(),
-    };
-
-    let new_prompt = match &config.system_prompt {
-        Some(p) => validate_system_prompt(p)?,
-        None => existing_config.system_prompt.clone(),
-    };
-
-    let new_max_iterations = match config.max_tool_iterations {
-        Some(m) => m.clamp(1, 200),
-        None => existing_config.max_tool_iterations,
-    };
-
-    let new_enable_thinking = match config.enable_thinking {
-        Some(e) => e,
-        None => existing_config.enable_thinking,
-    };
-
-    let updated_config = AgentConfig {
-        id: validated_id.clone(),
-        name: new_name,
-        lifecycle: existing_config.lifecycle.clone(), // Cannot change lifecycle
-        llm: new_llm,
-        tools: new_tools,
-        mcp_servers: new_mcp,
-        system_prompt: new_prompt,
-        max_tool_iterations: new_max_iterations,
-        enable_thinking: new_enable_thinking,
-    };
-
-    // Serialize fields for database (OPT-5 refactoring)
+    // Serialize and persist to database
     let fields = serialize_agent_fields(&updated_config)?;
-
     let query = format!(
         "UPDATE agent:`{}` SET
             name = {},
@@ -488,8 +497,8 @@ pub async fn update_agent(
         fields.tools_json,
         fields.mcp_json,
         fields.prompt_json,
-        new_max_iterations,
-        new_enable_thinking
+        updated_config.max_tool_iterations,
+        updated_config.enable_thinking
     );
 
     state.db.execute(&query).await.map_err(|e| {
@@ -497,7 +506,7 @@ pub async fn update_agent(
         format!("Failed to update agent: {}", e)
     })?;
 
-    // Unregister old and register new agent (OPT-5 refactoring)
+    // Unregister old and register new agent
     state.registry.unregister_any(&validated_id).await;
     register_agent_runtime(state.inner(), &validated_id, updated_config.clone()).await;
 
@@ -539,123 +548,6 @@ pub async fn delete_agent(agent_id: String, state: State<'_, AppState>) -> Resul
     Ok(())
 }
 
-/// Loads all agents from database and registers them in memory
-///
-/// Note: This function is no longer called directly. Agent loading is now
-/// done inline in the setup hook in main.rs to ensure app_handle is available.
-#[allow(dead_code)]
-pub async fn load_agents_from_db(state: &AppState) -> Result<usize, String> {
-    info!("Loading agents from database");
-
-    // Query all agents from database
-    let query = "SELECT meta::id(id) AS id, name, lifecycle, llm, tools, mcp_servers, system_prompt FROM agent";
-
-    let results: Vec<serde_json::Value> = state
-        .db
-        .db
-        .query(query)
-        .await
-        .map(|mut r| r.take(0).unwrap_or_default())
-        .map_err(|e| {
-            error!(error = %e, "Failed to query agents from database");
-            format!("Failed to query agents: {}", e)
-        })?;
-
-    let mut loaded = 0;
-
-    for row in results {
-        // Parse agent config from row
-        let id = row["id"].as_str().unwrap_or("").to_string();
-        if id.is_empty() {
-            warn!("Skipping agent with empty ID");
-            continue;
-        }
-
-        let name = row["name"].as_str().unwrap_or("Unknown").to_string();
-
-        let lifecycle_str = row["lifecycle"].as_str().unwrap_or("permanent");
-        let lifecycle = match lifecycle_str {
-            "temporary" => Lifecycle::Temporary,
-            _ => Lifecycle::Permanent,
-        };
-
-        // Parse LLM config
-        let llm_value = &row["llm"];
-        let llm = LLMConfig {
-            provider: llm_value["provider"]
-                .as_str()
-                .unwrap_or("Mistral")
-                .to_string(),
-            model: llm_value["model"]
-                .as_str()
-                .unwrap_or("mistral-large-latest")
-                .to_string(),
-            temperature: llm_value["temperature"].as_f64().unwrap_or(0.7) as f32,
-            max_tokens: llm_value["max_tokens"].as_u64().unwrap_or(4096) as usize,
-        };
-
-        // Parse tools
-        let tools: Vec<String> = row["tools"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Parse MCP servers
-        let mcp_servers: Vec<String> = row["mcp_servers"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let system_prompt = row["system_prompt"]
-            .as_str()
-            .unwrap_or("You are a helpful assistant.")
-            .to_string();
-
-        let max_tool_iterations = row["max_tool_iterations"]
-            .as_u64()
-            .map(|v| v as usize)
-            .unwrap_or(50)
-            .clamp(1, 200);
-
-        let enable_thinking = row["enable_thinking"].as_bool().unwrap_or(true);
-
-        let config = AgentConfig {
-            id: id.clone(),
-            name,
-            lifecycle,
-            llm,
-            tools,
-            mcp_servers,
-            system_prompt,
-            max_tool_iterations,
-            enable_thinking,
-        };
-
-        // Create LLMAgent with AgentToolContext for sub-agent operations
-        let agent_context = AgentToolContext::from_app_state_full(state);
-        let llm_agent = LLMAgent::with_context(
-            config,
-            state.llm_manager.clone(),
-            state.tool_factory.clone(),
-            agent_context,
-        );
-        state.registry.register(id, Arc::new(llm_agent)).await;
-
-        loaded += 1;
-    }
-
-    info!(count = loaded, "Agents loaded from database");
-    Ok(loaded)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::agents::core::{AgentOrchestrator, AgentRegistry};
@@ -683,7 +575,8 @@ mod tests {
 
         let registry = Arc::new(AgentRegistry::new());
         let orchestrator = Arc::new(AgentOrchestrator::new(registry.clone()));
-        let llm_manager = Arc::new(crate::llm::ProviderManager::new());
+        let llm_manager =
+            Arc::new(crate::llm::ProviderManager::new().expect("test provider manager"));
         let mcp_manager = Arc::new(
             crate::mcp::MCPManager::new(db.clone())
                 .await
@@ -735,6 +628,7 @@ mod tests {
                 model: "test".to_string(),
                 temperature: 0.7,
                 max_tokens: 1000,
+                is_reasoning: false,
             },
             tools: vec!["tool1".to_string()],
             mcp_servers: vec![],
@@ -767,6 +661,7 @@ mod tests {
                 model: "mistral-large".to_string(),
                 temperature: 0.5,
                 max_tokens: 2000,
+                is_reasoning: false,
             },
             tools: vec!["tool_a".to_string(), "tool_b".to_string()],
             mcp_servers: vec!["serena".to_string()],
@@ -811,6 +706,7 @@ mod tests {
                 model: "llama3".to_string(),
                 temperature: 0.8,
                 max_tokens: 4096,
+                is_reasoning: false,
             },
             tools: vec![],
             mcp_servers: vec![],
@@ -857,6 +753,7 @@ mod tests {
                     model: "test".to_string(),
                     temperature: 0.7,
                     max_tokens: 1000,
+                    is_reasoning: false,
                 },
                 tools: vec![],
                 mcp_servers: vec![],
@@ -874,5 +771,88 @@ mod tests {
 
         let agents = state.registry.list().await;
         assert_eq!(agents.len(), 5);
+    }
+
+    // ========================================================================
+    // SA-020/P1: Agent name uniqueness tests
+    // ========================================================================
+
+    /// Seeds an agent with a given name in the database, returns its UUID.
+    /// Note: omit created_at/updated_at - schema defaults to time::now() (ERR_SURREAL_007).
+    async fn seed_agent_in_db(db: &DBClient, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let query = format!(
+            "CREATE agent:`{}` SET \
+                id = '{}', \
+                name = $name, \
+                lifecycle = 'permanent', \
+                llm = {{ provider: 'mistral', model: 'large', temperature: 0.7, max_tokens: 1000 }}, \
+                tools = [], \
+                mcp_servers = [], \
+                system_prompt = 'Test agent.', \
+                max_tool_iterations = 50, \
+                enable_thinking = false, \
+                created_at = time::now(), \
+                updated_at = time::now()",
+            id, id
+        );
+        let response = db
+            .db
+            .query(&query)
+            .bind(("name", name.to_string()))
+            .await
+            .expect("Query execution failed");
+        response.check().expect("CREATE agent failed validation");
+        id
+    }
+
+    #[tokio::test]
+    async fn test_create_agent_rejects_duplicate_name() {
+        let state = setup_test_state().await;
+        // Seed an agent named "Database Agent"
+        seed_agent_in_db(&state.db, "Database Agent").await;
+
+        // Attempt to check same name (case-insensitive) => should fail
+        let result = super::check_agent_name_unique(&state.db, "database agent", None).await;
+        assert!(
+            result.is_err(),
+            "Should reject duplicate name (case-insensitive)"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("already exists"),
+            "Error should mention 'already exists', got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_agent_allows_keeping_own_name() {
+        let state = setup_test_state().await;
+        // Seed agent
+        let agent_id = seed_agent_in_db(&state.db, "My Agent").await;
+
+        // Check uniqueness excluding self => should pass
+        let result = super::check_agent_name_unique(&state.db, "My Agent", Some(&agent_id)).await;
+        assert!(
+            result.is_ok(),
+            "Should allow keeping own name, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_agent_rejects_collision_with_other() {
+        let state = setup_test_state().await;
+        // Seed two agents
+        let _agent_a = seed_agent_in_db(&state.db, "Agent Alpha").await;
+        let agent_b = seed_agent_in_db(&state.db, "Agent Beta").await;
+
+        // Try to rename Agent Beta to "Agent Alpha" => should fail
+        let result = super::check_agent_name_unique(&state.db, "Agent Alpha", Some(&agent_b)).await;
+        assert!(
+            result.is_err(),
+            "Should reject renaming to existing agent's name"
+        );
     }
 }

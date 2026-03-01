@@ -24,7 +24,7 @@ use crate::{
         ValidationRequest, ValidationRequestCreate, ValidationSettings, ValidationStatus,
         ValidationType,
     },
-    security::Validator,
+    security::{serialize_for_query, validate_uuid_field, Validator},
     tools::registry::TOOL_REGISTRY,
     AppState,
 };
@@ -61,11 +61,7 @@ pub async fn create_validation_request(
 ) -> Result<ValidationRequest, String> {
     info!("Creating validation request");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Validate operation description
     let validated_operation = Validator::validate_message(&operation).map_err(|e| {
@@ -125,7 +121,11 @@ pub async fn list_pending_validations(
 
     let validations: Vec<ValidationRequest> = state
         .db
-        .query("SELECT * FROM validation_request WHERE status = 'pending' ORDER BY created_at DESC")
+        .query(
+            "SELECT meta::id(id) AS id, workflow_id, validation_type, details, status, \
+             risk_level, created_at, updated_at \
+             FROM validation_request WHERE status = 'pending' ORDER BY created_at DESC",
+        )
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to load pending validations");
@@ -151,23 +151,27 @@ pub async fn list_workflow_validations(
 ) -> Result<Vec<ValidationRequest>, String> {
     info!("Loading workflow validations");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     let validations: Vec<ValidationRequest> = state
         .db
-        .query(&format!(
-            "SELECT * FROM validation_request WHERE workflow_id = '{}' ORDER BY created_at DESC",
-            validated_workflow_id
-        ))
+        .query_json_with_params(
+            "SELECT meta::id(id) AS id, workflow_id, validation_type, details, status, \
+             risk_level, created_at, updated_at \
+             FROM validation_request WHERE workflow_id = $wf_id ORDER BY created_at DESC",
+            vec![(
+                "wf_id".to_string(),
+                serde_json::json!(validated_workflow_id),
+            )],
+        )
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to load workflow validations");
             format!("Failed to load workflow validations: {}", e)
-        })?;
+        })?
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
 
     info!(count = validations.len(), "Workflow validations loaded");
     Ok(validations)
@@ -185,19 +189,18 @@ pub async fn approve_validation(
 ) -> Result<(), String> {
     info!("Approving validation request");
 
-    // Validate validation ID
-    let validated_id = Validator::validate_uuid(&validation_id).map_err(|e| {
-        warn!(error = %e, "Invalid validation ID");
-        format!("Invalid validation ID: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&validation_id, "validation_id")?;
 
-    // Update status to approved using SurrealDB record ID format
+    // Update status to approved using bind param for status value
     state
         .db
-        .execute(&format!(
-            "UPDATE validation_request:`{}` SET status = 'approved'",
-            validated_id
-        ))
+        .execute_with_params(
+            &format!(
+                "UPDATE validation_request:`{}` SET status = $status",
+                validated_id
+            ),
+            vec![("status".to_string(), serde_json::json!("approved"))],
+        )
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to approve validation");
@@ -222,11 +225,7 @@ pub async fn reject_validation(
 ) -> Result<(), String> {
     info!("Rejecting validation request");
 
-    // Validate validation ID
-    let validated_id = Validator::validate_uuid(&validation_id).map_err(|e| {
-        warn!(error = %e, "Invalid validation ID");
-        format!("Invalid validation ID: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&validation_id, "validation_id")?;
 
     // Validate reason
     let validated_reason = Validator::validate_message(&reason).map_err(|e| {
@@ -234,16 +233,19 @@ pub async fn reject_validation(
         format!("Invalid rejection reason: {}", e)
     })?;
 
-    // Update status to rejected and store reason in details using SurrealDB record ID format
-    // Use JSON encoding for the reason to handle special characters
-    let reason_json = serde_json::to_string(&validated_reason)
-        .unwrap_or_else(|_| "\"Unknown reason\"".to_string());
+    // Update status to rejected and store reason using bind params
     state
         .db
-        .execute(&format!(
-            "UPDATE validation_request:`{}` SET status = 'rejected', details.rejection_reason = {}",
-            validated_id, reason_json
-        ))
+        .execute_with_params(
+            &format!(
+                "UPDATE validation_request:`{}` SET status = $status, details.rejection_reason = $reason",
+                validated_id
+            ),
+            vec![
+                ("status".to_string(), serde_json::json!("rejected")),
+                ("reason".to_string(), serde_json::json!(validated_reason)),
+            ],
+        )
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to reject validation");
@@ -266,11 +268,7 @@ pub async fn delete_validation(
 ) -> Result<(), String> {
     info!("Deleting validation request");
 
-    // Validate validation ID
-    let validated_id = Validator::validate_uuid(&validation_id).map_err(|e| {
-        warn!(error = %e, "Invalid validation ID");
-        format!("Invalid validation ID: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&validation_id, "validation_id")?;
 
     state
         .db
@@ -384,10 +382,7 @@ pub async fn update_validation_settings(
 
     // Save to database using UPSERT
     // Follow the same pattern as embedding config (CONTENT with id field)
-    let json_config = serde_json::to_string(&current).map_err(|e| {
-        error!(error = %e, "Failed to serialize settings");
-        format!("Failed to serialize settings: {}", e)
-    })?;
+    let json_config = serialize_for_query(&current, "settings")?;
 
     let upsert_query = format!(
         "UPSERT settings:`settings:validation` CONTENT {{ id: 'settings:validation', config: {} }}",
@@ -417,10 +412,7 @@ pub async fn reset_validation_settings(
     let settings = ValidationSettings::default();
 
     // Save defaults to database (follow embedding config pattern)
-    let json_config = serde_json::to_string(&settings).map_err(|e| {
-        error!(error = %e, "Failed to serialize default settings");
-        format!("Failed to serialize default settings: {}", e)
-    })?;
+    let json_config = serialize_for_query(&settings, "default settings")?;
 
     let upsert_query = format!(
         "UPSERT settings:`settings:validation` CONTENT {{ id: 'settings:validation', config: {} }}",
@@ -589,7 +581,7 @@ mod tests {
 
         let registry = Arc::new(AgentRegistry::new());
         let orchestrator = Arc::new(AgentOrchestrator::new(registry.clone()));
-        let llm_manager = Arc::new(ProviderManager::new());
+        let llm_manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let mcp_manager = Arc::new(
             crate::mcp::MCPManager::new(db.clone())
                 .await

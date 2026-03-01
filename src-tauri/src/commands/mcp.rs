@@ -35,12 +35,15 @@
 //! - [`list_mcp_tools`] - List available tools from a server
 //! - [`call_mcp_tool`] - Execute a tool on an MCP server
 
+use crate::constants::commands as cmd_const;
+use crate::models::custom_provider::check_http_warning;
 use crate::models::mcp::{
-    MCPLatencyMetrics, MCPServer, MCPServerConfig, MCPTestResult, MCPTool, MCPToolCallRequest,
-    MCPToolCallResult,
+    MCPDeploymentMethod, MCPLatencyMetrics, MCPServer, MCPServerConfig, MCPServerResponse,
+    MCPTestResult, MCPTool, MCPToolCallRequest, MCPToolCallResult,
 };
+use crate::security::serialize_for_query;
 use crate::state::AppState;
-use crate::tools::constants::commands as cmd_const;
+use crate::tools::validation_helper::validate_trimmed_name;
 use tauri::State;
 use tracing::{error, info, instrument, warn};
 
@@ -77,31 +80,9 @@ fn validate_mcp_server_id(id: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Validates an MCP server display name.
-///
-/// Rules:
-/// - Cannot be empty
-/// - Maximum 64 characters
-/// - No control characters (except newline)
+/// Delegates to centralized validate_trimmed_name
 fn validate_mcp_server_display_name(name: &str) -> Result<String, String> {
-    let trimmed = name.trim();
-
-    if trimmed.is_empty() {
-        return Err("Server name cannot be empty".to_string());
-    }
-
-    if trimmed.len() > cmd_const::MAX_MCP_SERVER_NAME_LEN {
-        return Err(format!(
-            "Server name exceeds maximum length of {} characters",
-            cmd_const::MAX_MCP_SERVER_NAME_LEN
-        ));
-    }
-
-    if trimmed.chars().any(|c| c.is_control() && c != '\n') {
-        return Err("Server name cannot contain control characters".to_string());
-    }
-
-    Ok(trimmed.to_string())
+    validate_trimmed_name(name, "Server name", cmd_const::MAX_MCP_SERVER_NAME_LEN)
 }
 
 /// Validates an MCP server description.
@@ -286,6 +267,17 @@ fn validate_tool_name(name: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Checks if an MCP server config uses HTTP on a non-localhost host.
+///
+/// Only applies to HTTP deployment method where args[0] is the base URL.
+/// Returns `Some(warning)` if insecure, `None` otherwise.
+fn check_mcp_http_warning(config: &MCPServerConfig) -> Option<String> {
+    if config.command != MCPDeploymentMethod::Http {
+        return None;
+    }
+    config.args.first().and_then(|url| check_http_warning(url))
+}
+
 // =============================================================================
 // Tauri Commands
 // =============================================================================
@@ -368,7 +360,7 @@ pub async fn get_mcp_server(id: String, state: State<'_, AppState>) -> Result<MC
 pub async fn create_mcp_server(
     config: MCPServerConfig,
     state: State<'_, AppState>,
-) -> Result<MCPServer, String> {
+) -> Result<MCPServerResponse, String> {
     // Log what we received from frontend BEFORE validation
     info!(
         name = %config.name,
@@ -400,6 +392,15 @@ pub async fn create_mcp_server(
         ));
     }
 
+    let warning = check_mcp_http_warning(&validated_config);
+    if warning.is_some() {
+        warn!(
+            id = %validated_config.id,
+            name = %validated_config.name,
+            "MCP server created with insecure HTTP URL"
+        );
+    }
+
     // Spawn the server (this also saves to DB)
     let server = state
         .mcp_manager
@@ -415,7 +416,7 @@ pub async fn create_mcp_server(
         status = %server.status,
         "MCP server created"
     );
-    Ok(server)
+    Ok(MCPServerResponse { server, warning })
 }
 
 /// Updates an existing MCP server configuration.
@@ -444,7 +445,7 @@ pub async fn update_mcp_server(
     id: String,
     config: MCPServerConfig,
     state: State<'_, AppState>,
-) -> Result<MCPServer, String> {
+) -> Result<MCPServerResponse, String> {
     let validated_id = validate_mcp_server_id(&id)?;
     let validated_config = validate_mcp_server_config(&config)?;
 
@@ -462,6 +463,15 @@ pub async fn update_mcp_server(
     // Check if server exists
     if state.mcp_manager.get_server(&validated_id).await.is_none() {
         return Err(format!("MCP server '{}' not found", validated_id));
+    }
+
+    let warning = check_mcp_http_warning(&validated_config);
+    if warning.is_some() {
+        warn!(
+            id = %validated_id,
+            name = %validated_config.name,
+            "MCP server updated with insecure HTTP URL"
+        );
     }
 
     // Update the configuration in database
@@ -494,7 +504,7 @@ pub async fn update_mcp_server(
         status = %server.status,
         "MCP server updated"
     );
-    Ok(server)
+    Ok(MCPServerResponse { server, warning })
 }
 
 /// Deletes an MCP server configuration.
@@ -841,7 +851,7 @@ pub async fn get_mcp_latency_metrics(
     let query = match &filter {
         Some(name) => {
             // Use JSON string encoding for proper escaping
-            let json_name = serde_json::to_string(name).map_err(|e| e.to_string())?;
+            let json_name = serialize_for_query(name, "server_name")?;
             format!(
                 r#"SELECT
                     server_name,
@@ -1000,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_validate_mcp_env_shell_injection() {
-        // OPT-6: Shell injection prevention tests
+        // Shell injection prevention tests
         let test_cases = vec![
             ("PIPE", "value|cmd", "pipe"),
             ("SEMI", "value;cmd", "semicolon"),
@@ -1095,5 +1105,208 @@ mod tests {
 
         let result = validate_mcp_server_config(&config);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_call_log_write_read_cycle() {
+        let state = crate::test_utils::setup_test_state().await;
+
+        // Write a call log with dynamic params using the MCPCallLogCreate struct
+        let log = crate::models::mcp::MCPCallLogCreate {
+            id: uuid::Uuid::new_v4().to_string(),
+            workflow_id: Some("test-workflow".to_string()),
+            server_name: "test-server".to_string(),
+            tool_name: "find_symbol".to_string(),
+            params: serde_json::json!({"symbol": "MyClass", "include_body": true}),
+            result: serde_json::json!([{"name": "MyClass", "line": 42}]),
+            success: true,
+            duration_ms: 150,
+        };
+
+        // Serialize and insert using the same pattern as manager.rs
+        let json_data = serde_json::to_value(&log).expect("Failed to serialize");
+        let json_data = crate::db::sanitize_for_surrealdb(json_data);
+        let query = format!("CREATE mcp_call_log:`{}` CONTENT $data", log.id);
+        state
+            .db
+            .execute_with_params(&query, vec![("data".to_string(), json_data)])
+            .await
+            .expect("Failed to create mcp_call_log");
+
+        // Read back and verify params/result are preserved as JSON strings
+        let logs: Vec<serde_json::Value> = state
+            .db
+            .query_json(&format!(
+                "SELECT meta::id(id) AS id, params, result, server_name FROM mcp_call_log WHERE meta::id(id) = '{}'",
+                log.id
+            ))
+            .await
+            .expect("Failed to query mcp_call_log");
+
+        assert_eq!(logs.len(), 1, "Should find exactly one log entry");
+        let entry = &logs[0];
+
+        // Params should be a JSON string in DB (new format)
+        let params_str = entry.get("params").expect("params missing");
+        assert!(params_str.is_string(), "params should be stored as string");
+        let params: serde_json::Value = serde_json::from_str(params_str.as_str().unwrap())
+            .expect("params should be valid JSON");
+        assert_eq!(params["symbol"], "MyClass");
+        assert_eq!(params["include_body"], true);
+
+        // Result should also be a JSON string
+        let result_str = entry.get("result").expect("result missing");
+        assert!(result_str.is_string(), "result should be stored as string");
+        let result: serde_json::Value = serde_json::from_str(result_str.as_str().unwrap())
+            .expect("result should be valid JSON");
+        assert_eq!(result[0]["name"], "MyClass");
+        assert_eq!(result[0]["line"], 42);
+    }
+
+    #[test]
+    fn test_deserialize_mcp_call_log_from_string_params() {
+        // New format: params and result stored as JSON strings
+        let json = serde_json::json!({
+            "id": "test-id",
+            "workflow_id": "wf-1",
+            "server_name": "test-server",
+            "tool_name": "find_symbol",
+            "params": "{\"symbol\": \"MyClass\"}",
+            "result": "[{\"name\": \"MyClass\"}]",
+            "success": true,
+            "duration_ms": 100,
+            "timestamp": "2026-01-01T00:00:00Z"
+        });
+
+        let log: crate::models::mcp::MCPCallLog =
+            serde_json::from_value(json).expect("Should deserialize MCPCallLog with string params");
+        assert_eq!(log.params["symbol"], "MyClass");
+        assert_eq!(log.result[0]["name"], "MyClass");
+    }
+
+    #[test]
+    fn test_deserialize_mcp_call_log_from_legacy_object_params() {
+        // Legacy format: params and result stored as objects (backward compat)
+        let json = serde_json::json!({
+            "id": "test-id",
+            "server_name": "test-server",
+            "tool_name": "find_symbol",
+            "params": {"symbol": "MyClass"},
+            "result": [{"name": "MyClass"}],
+            "success": true,
+            "duration_ms": 100,
+            "timestamp": "2026-01-01T00:00:00Z"
+        });
+
+        let log: crate::models::mcp::MCPCallLog = serde_json::from_value(json)
+            .expect("Should deserialize MCPCallLog with legacy object params");
+        assert_eq!(log.params["symbol"], "MyClass");
+        assert_eq!(log.result[0]["name"], "MyClass");
+    }
+
+    // =========================================================================
+    // SA-002 S2-H3: MCP HTTP warning tests
+    // =========================================================================
+
+    #[test]
+    fn test_check_mcp_http_warning_docker_no_warning() {
+        let config = MCPServerConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Docker,
+            args: vec!["run".to_string(), "-i".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_none());
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_npx_no_warning() {
+        let config = MCPServerConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Npx,
+            args: vec!["-y".to_string(), "@test/mcp".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_none());
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_https_no_warning() {
+        let config = MCPServerConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Http,
+            args: vec!["https://api.example.com/mcp".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_none());
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_localhost_no_warning() {
+        let config = MCPServerConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Http,
+            args: vec!["http://localhost:3000/mcp".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_none());
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_remote_http_returns_warning() {
+        let config = MCPServerConfig {
+            id: "remote-mcp".to_string(),
+            name: "Remote MCP".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Http,
+            args: vec!["http://api.example.com/mcp".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        let warning = check_mcp_http_warning(&config);
+        assert!(warning.is_some());
+        let msg = warning.unwrap();
+        assert!(msg.contains("HTTP instead of HTTPS"));
+        assert!(msg.contains("http://api.example.com/mcp"));
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_remote_ip_returns_warning() {
+        let config = MCPServerConfig {
+            id: "remote-ip".to_string(),
+            name: "Remote IP".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Http,
+            args: vec!["http://192.168.1.100:8080/mcp".to_string()],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_some());
+    }
+
+    #[test]
+    fn test_check_mcp_http_warning_empty_args_no_warning() {
+        let config = MCPServerConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            command: MCPDeploymentMethod::Http,
+            args: vec![],
+            env: HashMap::new(),
+            description: None,
+        };
+        assert!(check_mcp_http_warning(&config).is_none());
     }
 }

@@ -22,10 +22,9 @@
 //! a polymorphic content deserializer (string or array of content blocks).
 
 use super::provider::{LLMError, LLMResponse, ProviderType};
-use super::utils::simulate_streaming;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
 // ============================================================================
@@ -417,6 +416,7 @@ impl OpenAiCompatibleProvider {
             model: model.to_string(),
             provider: ProviderType::Custom(self.provider_name.clone()),
             finish_reason,
+            thinking_content: None,
         })
     }
 
@@ -428,8 +428,8 @@ impl OpenAiCompatibleProvider {
     )]
     pub async fn complete_with_tools(
         &self,
-        messages: Vec<serde_json::Value>,
-        tools: Vec<serde_json::Value>,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
         tool_choice: Option<serde_json::Value>,
         model: &str,
         temperature: f32,
@@ -448,10 +448,14 @@ impl OpenAiCompatibleProvider {
 
         let request_body = ToolChatRequest {
             model: model.to_string(),
-            messages,
+            messages: messages.to_vec(),
             temperature: Some(temperature),
             max_tokens: Some(max_tokens),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: if tools.is_empty() {
+                None
+            } else {
+                Some(tools.to_vec())
+            },
             tool_choice,
         };
 
@@ -524,21 +528,6 @@ impl OpenAiCompatibleProvider {
         }
 
         Ok(json_response)
-    }
-
-    /// Streaming completion via simulate_streaming (consistent with Mistral/Ollama).
-    pub async fn complete_stream(
-        &self,
-        prompt: &str,
-        system_prompt: Option<&str>,
-        model: &str,
-        temperature: f32,
-        max_tokens: usize,
-    ) -> Result<mpsc::Receiver<Result<String, LLMError>>, LLMError> {
-        let response = self
-            .complete(prompt, system_prompt, model, temperature, max_tokens)
-            .await?;
-        Ok(simulate_streaming(response.content, None, None))
     }
 
     /// Tests connection by making a GET request to `{base_url}/models`.

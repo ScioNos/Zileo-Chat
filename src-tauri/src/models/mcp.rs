@@ -160,6 +160,20 @@ pub struct MCPServer {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Response from create/update MCP server commands.
+///
+/// Wraps `MCPServer` with an optional security warning (e.g., HTTP usage).
+/// Mirrors the `CustomProviderResponse` pattern from custom_provider.rs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MCPServerResponse {
+    /// Server data
+    pub server: MCPServer,
+    /// Optional security warning (e.g., HTTP without TLS on non-localhost)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// MCP server connection test result
 ///
 /// Returned after testing an MCP server configuration.
@@ -222,9 +236,11 @@ pub struct MCPCallLog {
     pub server_name: String,
     /// Tool name that was called
     pub tool_name: String,
-    /// Parameters passed to the tool
+    /// Parameters passed to the tool (stored as JSON string in DB)
+    #[serde(deserialize_with = "crate::models::serde_utils::deserialize_json_string")]
     pub params: serde_json::Value,
-    /// Result returned by the tool
+    /// Result returned by the tool (stored as JSON string in DB)
+    #[serde(deserialize_with = "crate::models::serde_utils::deserialize_json_string")]
     pub result: serde_json::Value,
     /// Whether the call succeeded
     pub success: bool,
@@ -251,9 +267,11 @@ pub struct MCPCallLogCreate {
     pub server_name: String,
     /// Tool name that was called
     pub tool_name: String,
-    /// Parameters passed to the tool
+    /// Parameters passed to the tool (serialized as JSON string for SCHEMAFULL storage)
+    #[serde(serialize_with = "crate::models::serde_utils::serialize_as_json_string")]
     pub params: serde_json::Value,
-    /// Result returned by the tool
+    /// Result returned by the tool (serialized as JSON string for SCHEMAFULL storage)
+    #[serde(serialize_with = "crate::models::serde_utils::serialize_as_json_string")]
     pub result: serde_json::Value,
     /// Whether the call succeeded
     pub success: bool,
@@ -270,7 +288,6 @@ pub struct MCPCallLogCreate {
 /// IMPORTANT: `env` is stored as a JSON string (not an object) to work around
 /// SurrealDB SCHEMAFULL filtering of nested object fields. The string is
 /// deserialized back to HashMap when reading from the database.
-#[allow(dead_code)] // Will be used in Phase 2/3 for database operations
 #[derive(Debug, Clone, Serialize)]
 pub struct MCPServerCreate {
     /// Server name
@@ -290,7 +307,6 @@ pub struct MCPServerCreate {
 
 impl MCPServerCreate {
     /// Creates a new MCPServerCreate from MCPServerConfig
-    #[allow(dead_code)] // Will be used in Phase 2/3 for database operations
     pub fn from_config(config: &MCPServerConfig) -> Self {
         Self {
             name: config.name.clone(),

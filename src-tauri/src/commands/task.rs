@@ -38,9 +38,9 @@
 //! - `duration_ms` -> `durationMs`
 
 use crate::{
+    constants::query_limits,
     models::task::{Task, TaskCreate, TaskUpdate},
-    security::Validator,
-    tools::constants::query_limits,
+    security::{serialize_for_query, validate_uuid_field, Validator},
     AppState,
 };
 use tauri::State;
@@ -79,11 +79,7 @@ pub async fn create_task(
 ) -> Result<String, String> {
     info!("Creating new task");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Validate task name
     let validated_name = Validator::validate_message(&name).map_err(|e| {
@@ -108,10 +104,7 @@ pub async fn create_task(
     // Validate dependencies if provided
     let deps = if let Some(deps) = dependencies {
         for dep in &deps {
-            Validator::validate_uuid(dep).map_err(|e| {
-                warn!(error = %e, dependency = %dep, "Invalid dependency ID");
-                format!("Invalid dependency ID '{}': {}", dep, e)
-            })?;
+            validate_uuid_field(dep, "dependency_id")?;
         }
         deps
     } else {
@@ -138,7 +131,7 @@ pub async fn create_task(
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to create task");
-            format!("Database error: {}", e)
+            format!("Failed to create task: {}", e)
         })?;
 
     info!(task_id = %task_id, "Task created successfully");
@@ -160,10 +153,7 @@ pub async fn create_task(
 pub async fn get_task(task_id: String, state: State<'_, AppState>) -> Result<Task, String> {
     info!("Getting task");
 
-    let validated_id = Validator::validate_uuid(&task_id).map_err(|e| {
-        warn!(error = %e, "Invalid task_id");
-        format!("Invalid task_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&task_id, "task_id")?;
 
     // Use meta::id(id) to extract clean UUID from SurrealDB Thing type
     let query = format!(
@@ -186,7 +176,7 @@ pub async fn get_task(task_id: String, state: State<'_, AppState>) -> Result<Tas
 
     let results: Vec<Task> = state.db.query(&query).await.map_err(|e| {
         error!(error = %e, "Failed to query task");
-        format!("Database error: {}", e)
+        format!("Failed to query task: {}", e)
     })?;
 
     results
@@ -210,12 +200,9 @@ pub async fn list_workflow_tasks(
 ) -> Result<Vec<Task>, String> {
     info!("Listing workflow tasks");
 
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
-    // Add LIMIT to prevent memory explosion (OPT-DB-8)
+    // Add LIMIT to prevent memory explosion
     let query = format!(
         r#"SELECT
             meta::id(id) AS id,
@@ -239,7 +226,7 @@ pub async fn list_workflow_tasks(
 
     let tasks: Vec<Task> = state.db.query(&query).await.map_err(|e| {
         error!(error = %e, "Failed to list tasks");
-        format!("Database error: {}", e)
+        format!("Failed to list tasks: {}", e)
     })?;
 
     info!(count = tasks.len(), "Workflow tasks loaded");
@@ -272,10 +259,9 @@ pub async fn list_tasks_by_status(
         ));
     }
 
-    // Add LIMIT to prevent memory explosion (OPT-DB-8)
+    // Add LIMIT to prevent memory explosion
     let query = if let Some(wf_id) = workflow_id {
-        let validated_wf_id =
-            Validator::validate_uuid(&wf_id).map_err(|e| format!("Invalid workflow_id: {}", e))?;
+        let validated_wf_id = validate_uuid_field(&wf_id, "workflow_id")?;
         format!(
             r#"SELECT
                 meta::id(id) AS id,
@@ -322,7 +308,7 @@ pub async fn list_tasks_by_status(
 
     let tasks: Vec<Task> = state.db.query(&query).await.map_err(|e| {
         error!(error = %e, "Failed to list tasks by status");
-        format!("Database error: {}", e)
+        format!("Failed to list tasks by status: {}", e)
     })?;
 
     info!(count = tasks.len(), status = %status, "Tasks by status loaded");
@@ -349,10 +335,7 @@ pub async fn update_task(
 ) -> Result<Task, String> {
     info!("Updating task");
 
-    let validated_id = Validator::validate_uuid(&task_id).map_err(|e| {
-        warn!(error = %e, "Invalid task_id");
-        format!("Invalid task_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&task_id, "task_id")?;
 
     // Build SET clause dynamically
     let mut set_parts: Vec<String> = Vec::new();
@@ -361,18 +344,21 @@ pub async fn update_task(
         if name.len() > 128 {
             return Err("Task name must be 128 characters or less".to_string());
         }
-        set_parts.push(format!("name = '{}'", name.replace('\'', "''")));
+        let name_json = serialize_for_query(name, "name")?;
+        set_parts.push(format!("name = {}", name_json));
     }
 
     if let Some(desc) = &updates.description {
         if desc.len() > 1000 {
             return Err("Task description must be 1000 characters or less".to_string());
         }
-        set_parts.push(format!("description = '{}'", desc.replace('\'', "''")));
+        let desc_json = serialize_for_query(desc, "description")?;
+        set_parts.push(format!("description = {}", desc_json));
     }
 
     if let Some(agent) = &updates.agent_assigned {
-        set_parts.push(format!("agent_assigned = '{}'", agent.replace('\'', "''")));
+        let agent_json = serialize_for_query(agent, "agent_assigned")?;
+        set_parts.push(format!("agent_assigned = {}", agent_json));
     }
 
     if let Some(priority) = updates.priority {
@@ -391,8 +377,7 @@ pub async fn update_task(
     }
 
     if let Some(deps) = &updates.dependencies {
-        let deps_json = serde_json::to_string(deps)
-            .map_err(|e| format!("Failed to serialize dependencies: {}", e))?;
+        let deps_json = serialize_for_query(deps, "dependencies")?;
         set_parts.push(format!("dependencies = {}", deps_json));
     }
 
@@ -413,7 +398,7 @@ pub async fn update_task(
     // Use execute() for UPDATE to avoid SurrealDB SDK serialization issues
     state.db.execute(&query).await.map_err(|e| {
         error!(error = %e, "Failed to update task");
-        format!("Database error: {}", e)
+        format!("Failed to update task: {}", e)
     })?;
 
     info!(task_id = %validated_id, "Task updated successfully");
@@ -441,8 +426,7 @@ pub async fn update_task_status(
 ) -> Result<Task, String> {
     info!("Updating task status");
 
-    let validated_id =
-        Validator::validate_uuid(&task_id).map_err(|e| format!("Invalid task_id: {}", e))?;
+    let validated_id = validate_uuid_field(&task_id, "task_id")?;
 
     let valid_statuses = ["pending", "in_progress", "completed", "blocked"];
     if !valid_statuses.contains(&status.as_str()) {
@@ -463,7 +447,7 @@ pub async fn update_task_status(
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to update task status");
-            format!("Database error: {}", e)
+            format!("Failed to update task status: {}", e)
         })?;
 
     info!(task_id = %validated_id, status = %status, "Task status updated");
@@ -490,8 +474,7 @@ pub async fn complete_task(
 ) -> Result<Task, String> {
     info!("Completing task");
 
-    let validated_id =
-        Validator::validate_uuid(&task_id).map_err(|e| format!("Invalid task_id: {}", e))?;
+    let validated_id = validate_uuid_field(&task_id, "task_id")?;
 
     let duration_part = if let Some(d) = duration_ms {
         format!(", duration_ms = {}", d)
@@ -507,7 +490,7 @@ pub async fn complete_task(
     // Use execute() for UPDATE to avoid SurrealDB SDK serialization issues
     state.db.execute(&query).await.map_err(|e| {
         error!(error = %e, "Failed to complete task");
-        format!("Database error: {}", e)
+        format!("Failed to complete task: {}", e)
     })?;
 
     info!(task_id = %validated_id, "Task marked as completed");
@@ -526,8 +509,7 @@ pub async fn complete_task(
 pub async fn delete_task(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     info!("Deleting task");
 
-    let validated_id =
-        Validator::validate_uuid(&task_id).map_err(|e| format!("Invalid task_id: {}", e))?;
+    let validated_id = validate_uuid_field(&task_id, "task_id")?;
 
     state
         .db
@@ -535,7 +517,7 @@ pub async fn delete_task(task_id: String, state: State<'_, AppState>) -> Result<
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to delete task");
-            format!("Database error: {}", e)
+            format!("Failed to delete task: {}", e)
         })?;
 
     info!(task_id = %validated_id, "Task deleted");
@@ -566,7 +548,7 @@ mod tests {
 
         let registry = Arc::new(AgentRegistry::new());
         let orchestrator = Arc::new(AgentOrchestrator::new(registry.clone()));
-        let llm_manager = Arc::new(ProviderManager::new());
+        let llm_manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let mcp_manager = Arc::new(
             crate::mcp::MCPManager::new(db.clone())
                 .await
@@ -666,5 +648,117 @@ mod tests {
         assert!(json.contains("\"name\":\"Test task\""));
         assert!(json.contains("\"priority\":3"));
         assert!(json.contains("\"status\":\"pending\""));
+    }
+
+    /// Verifies that task names containing apostrophes, backslashes, newlines,
+    /// and other special characters are stored and retrieved without corruption
+    /// or injection risk.
+    #[tokio::test]
+    async fn test_update_task_name_with_special_chars() {
+        use crate::models::task::TaskCreate;
+
+        let state = setup_test_state().await;
+
+        // Create a workflow to satisfy the foreign key relationship
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let wf_json = serde_json::json!({
+            "id": workflow_id,
+            "name": "Test Workflow",
+            "status": "active",
+            "agent_id": null,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        });
+        state
+            .db
+            .execute_with_params(
+                &format!("CREATE workflow:`{}` CONTENT $data", workflow_id),
+                vec![("data".to_string(), wf_json)],
+            )
+            .await
+            .expect("Failed to create test workflow");
+
+        // Create the task
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let task_create = TaskCreate::new(
+            workflow_id.clone(),
+            "Original name".to_string(),
+            "Original description".to_string(),
+            3,
+        );
+        state
+            .db
+            .create("task", &task_id, task_create)
+            .await
+            .expect("Failed to create test task");
+
+        // Build an update with a name containing apostrophes, backslashes,
+        // newlines and embedded quotes - the characters that broke the old
+        // `replace('\'', "''")` approach.
+        let tricky_name =
+            "It's a \"tricky\" name\nwith backslash \\ and null-like \\0 chars".to_string();
+        let tricky_description = "Line one\nLine two's \"quoted\" section \\ end".to_string();
+        let tricky_agent = "agent'with\"quotes\\and\nnewline".to_string();
+
+        let updates = TaskUpdate {
+            name: Some(tricky_name.clone()),
+            description: Some(tricky_description.clone()),
+            agent_assigned: Some(tricky_agent.clone()),
+            ..TaskUpdate::default()
+        };
+
+        // Simulate the SET-clause generation the same way update_task() does,
+        // confirming that serde_json::to_string produces valid JSON literals
+        // for each field.
+        let mut set_parts: Vec<String> = Vec::new();
+
+        let name_json = serde_json::to_string(&updates.name.as_ref().unwrap())
+            .expect("name serialization must not fail");
+        set_parts.push(format!("name = {}", name_json));
+
+        let desc_json = serde_json::to_string(&updates.description.as_ref().unwrap())
+            .expect("description serialization must not fail");
+        set_parts.push(format!("description = {}", desc_json));
+
+        let agent_json = serde_json::to_string(&updates.agent_assigned.as_ref().unwrap())
+            .expect("agent_assigned serialization must not fail");
+        set_parts.push(format!("agent_assigned = {}", agent_json));
+
+        let query = format!("UPDATE task:`{}` SET {}", task_id, set_parts.join(", "));
+
+        state
+            .db
+            .execute(&query)
+            .await
+            .expect("UPDATE with special chars must not fail");
+
+        // Retrieve the task and assert values were stored verbatim
+        let fetch_query = format!(
+            "SELECT meta::id(id) AS id, name, description, agent_assigned FROM task WHERE meta::id(id) = '{}'",
+            task_id
+        );
+        let rows: Vec<serde_json::Value> = state
+            .db
+            .query(&fetch_query)
+            .await
+            .expect("SELECT must succeed");
+
+        assert_eq!(rows.len(), 1, "Expected exactly one task row");
+        let row = &rows[0];
+
+        assert_eq!(
+            row["name"].as_str().unwrap_or(""),
+            tricky_name,
+            "name with special chars must round-trip correctly"
+        );
+        assert_eq!(
+            row["description"].as_str().unwrap_or(""),
+            tricky_description,
+            "description with special chars must round-trip correctly"
+        );
+        assert_eq!(
+            row["agent_assigned"].as_str().unwrap_or(""),
+            tricky_agent,
+            "agent_assigned with special chars must round-trip correctly"
+        );
     }
 }

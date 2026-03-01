@@ -14,9 +14,6 @@
 
 //! # Embedding Service Module
 //!
-//! This module is prepared for Phase 3 (MemoryTool implementation).
-//! The `#[allow(dead_code)]` attribute is used until the module is integrated.
-//!
 //! This module provides vector embedding generation for semantic search and RAG operations.
 //! It supports multiple providers (Mistral, Ollama) with a unified interface.
 //!
@@ -40,9 +37,6 @@
 //! let embedding = service.embed("Hello, world!").await?;
 //! ```
 
-// Allow dead code until MemoryTool integration in Phase 3
-#![allow(dead_code)]
-
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -58,13 +52,14 @@ use tracing::{debug, info, instrument, warn};
 const MISTRAL_EMBEDDING_URL: &str = "https://api.mistral.ai/v1/embeddings";
 
 /// Default Mistral embedding model
+#[allow(dead_code)] // API constant, used by EmbeddingProvider constructors (test-only path)
 pub const MISTRAL_EMBED_MODEL: &str = "mistral-embed";
 
 /// Mistral embed model dimension (1024D)
 pub const MISTRAL_EMBED_DIMENSION: usize = 1024;
 
-/// Default Ollama embedding endpoint
-pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+// DEFAULT_OLLAMA_URL imported from ollama.rs (single source of truth, SA-018 HC-2)
+use super::ollama::DEFAULT_OLLAMA_URL;
 
 /// Ollama nomic-embed-text dimension (768D)
 pub const OLLAMA_NOMIC_DIMENSION: usize = 768;
@@ -73,12 +68,14 @@ pub const OLLAMA_NOMIC_DIMENSION: usize = 768;
 pub const OLLAMA_MXBAI_DIMENSION: usize = 1024;
 
 /// Default embedding model for Ollama
+#[allow(dead_code)] // Used by EmbeddingProvider::ollama() constructor (test-only path)
 pub const DEFAULT_OLLAMA_EMBED_MODEL: &str = "nomic-embed-text";
 
 /// Maximum text length for embedding (characters)
 pub const MAX_EMBEDDING_TEXT_LENGTH: usize = 50_000;
 
 /// Maximum batch size for embedding requests
+#[allow(dead_code)] // Used by embed_batch() (test-only path)
 pub const MAX_BATCH_SIZE: usize = 96;
 
 /// Default timeout for embedding requests (milliseconds)
@@ -109,6 +106,7 @@ pub enum EmbeddingError {
 
     /// Batch size exceeded
     #[error("Batch size exceeded: {0} items, max {1}")]
+    #[allow(dead_code)] // Error variant for embed_batch() validation (test-only path)
     BatchTooLarge(usize, usize),
 
     /// Model not available for embedding
@@ -125,10 +123,12 @@ pub enum EmbeddingError {
 
     /// Dimension mismatch (expected vs actual)
     #[error("Dimension mismatch: expected {0}, got {1}")]
+    #[allow(dead_code)] // Error variant for dimension validation
     DimensionMismatch(usize, usize),
 
     /// Internal error
     #[error("Internal error: {0}")]
+    #[allow(dead_code)] // General error variant
     Internal(String),
 }
 
@@ -169,6 +169,7 @@ pub enum EmbeddingProvider {
 
 impl EmbeddingProvider {
     /// Creates a Mistral provider with default model
+    #[allow(dead_code)] // Convenience constructor, used in tests
     pub fn mistral(api_key: &str) -> Self {
         EmbeddingProvider::Mistral {
             api_key: api_key.to_string(),
@@ -185,6 +186,7 @@ impl EmbeddingProvider {
     }
 
     /// Creates an Ollama provider with default URL and model
+    #[allow(dead_code)] // Convenience constructor, used in tests
     pub fn ollama() -> Self {
         EmbeddingProvider::Ollama {
             base_url: DEFAULT_OLLAMA_URL.to_string(),
@@ -219,6 +221,7 @@ impl EmbeddingProvider {
     }
 
     /// Returns the provider name as string
+    #[allow(dead_code)] // API surface for EmbeddingProvider
     pub fn name(&self) -> &'static str {
         match self {
             EmbeddingProvider::Mistral { .. } => "mistral",
@@ -227,6 +230,7 @@ impl EmbeddingProvider {
     }
 
     /// Returns the model name
+    #[allow(dead_code)] // API surface for EmbeddingProvider
     pub fn model(&self) -> &str {
         match self {
             EmbeddingProvider::Mistral { model, .. } => model,
@@ -241,6 +245,7 @@ impl EmbeddingProvider {
 
 /// Embedding configuration for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Config struct used by EmbeddingService configuration (test-only path)
 pub struct EmbeddingConfig {
     /// Provider name: "mistral" or "ollama"
     pub provider: String,
@@ -271,11 +276,13 @@ impl Default for EmbeddingConfig {
 
 impl EmbeddingConfig {
     /// Creates config for Mistral embed
+    #[allow(dead_code)] // Convenience constructor
     pub fn mistral() -> Self {
         Self::default()
     }
 
     /// Creates config for Ollama nomic-embed-text
+    #[allow(dead_code)] // Convenience constructor
     pub fn ollama_nomic() -> Self {
         Self {
             provider: "ollama".to_string(),
@@ -288,6 +295,7 @@ impl EmbeddingConfig {
     }
 
     /// Creates config for Ollama mxbai-embed-large
+    #[allow(dead_code)] // Convenience constructor
     pub fn ollama_mxbai() -> Self {
         Self {
             provider: "ollama".to_string(),
@@ -390,25 +398,31 @@ pub struct EmbeddingService {
     /// Expected embedding dimension
     dimension: Arc<RwLock<usize>>,
     /// Request timeout in milliseconds
+    #[allow(dead_code)] // Stored for potential future use (timeout reconfiguration)
     timeout_ms: u64,
 }
 
 impl EmbeddingService {
-    /// Creates a new unconfigured EmbeddingService
+    /// Creates a new unconfigured EmbeddingService (test-only).
     ///
     /// The service must be configured with a provider before use.
-    pub fn new() -> Self {
+    /// Production code should use `with_provider()` instead.
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client fails to initialize.
+    #[cfg(test)]
+    pub fn new() -> Result<Self, String> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        Self {
+        Ok(Self {
             client,
             provider: Arc::new(RwLock::new(None)),
             dimension: Arc::new(RwLock::new(MISTRAL_EMBED_DIMENSION)),
             timeout_ms: DEFAULT_TIMEOUT_MS,
-        }
+        })
     }
 
     /// Creates a new EmbeddingService with the specified provider
@@ -418,25 +432,29 @@ impl EmbeddingService {
     ///
     /// # Returns
     /// A configured EmbeddingService ready for use
-    pub fn with_provider(provider: EmbeddingProvider) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client fails to initialize.
+    pub fn with_provider(provider: EmbeddingProvider) -> Result<Self, String> {
         let dimension = provider.dimension();
         let client = Client::builder()
             .timeout(std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        Self {
+        Ok(Self {
             client,
             provider: Arc::new(RwLock::new(Some(provider))),
             dimension: Arc::new(RwLock::new(dimension)),
             timeout_ms: DEFAULT_TIMEOUT_MS,
-        }
+        })
     }
 
     /// Configures the service with a new provider
     ///
     /// # Arguments
     /// * `provider` - The new embedding provider configuration
+    #[allow(dead_code)] // API surface for runtime reconfiguration
     pub async fn configure(&self, provider: EmbeddingProvider) {
         let dimension = provider.dimension();
         *self.provider.write().await = Some(provider);
@@ -445,12 +463,14 @@ impl EmbeddingService {
     }
 
     /// Clears the provider configuration
+    #[allow(dead_code)] // API surface for runtime reconfiguration
     pub async fn clear(&self) {
         *self.provider.write().await = None;
         info!("Embedding service cleared");
     }
 
     /// Checks if the service is configured
+    #[allow(dead_code)] // API surface for service state inspection
     pub fn is_configured(&self) -> bool {
         self.provider
             .try_read()
@@ -459,6 +479,7 @@ impl EmbeddingService {
     }
 
     /// Returns the expected embedding dimension
+    #[allow(dead_code)] // API surface, used in tests
     pub async fn dimension(&self) -> usize {
         *self.dimension.read().await
     }
@@ -522,6 +543,7 @@ impl EmbeddingService {
     ///
     /// # Errors
     /// Returns an error if the batch is too large or any embedding fails
+    #[allow(dead_code)] // Batch embedding API, not yet called from production
     #[instrument(
         name = "embed_batch",
         skip(self, texts),
@@ -623,6 +645,7 @@ impl EmbeddingService {
     }
 
     /// Embeds batch using Mistral API (native batch support)
+    #[allow(dead_code)] // Called by embed_batch() which is not yet used in production
     async fn embed_batch_mistral(
         &self,
         texts: &[&str],
@@ -743,6 +766,7 @@ impl EmbeddingService {
     }
 
     /// Embeds batch using Ollama API (sequential, no native batch support)
+    #[allow(dead_code)] // Called by embed_batch() which is not yet used in production
     async fn embed_batch_ollama(
         &self,
         texts: &[&str],
@@ -771,6 +795,7 @@ impl EmbeddingService {
     ///
     /// # Returns
     /// Ok(dimension) if successful, Err if connection fails
+    #[allow(dead_code)] // Used by commands/embedding.rs test_embedding_connection (test-only path)
     pub async fn test_connection(&self) -> Result<usize, EmbeddingError> {
         let test_text = "test";
         let embedding = self.embed(test_text).await?;
@@ -779,12 +804,6 @@ impl EmbeddingService {
             "Embedding service test successful"
         );
         Ok(embedding.len())
-    }
-}
-
-impl Default for EmbeddingService {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -892,20 +911,20 @@ mod tests {
 
     #[test]
     fn test_embedding_service_new() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         assert!(!service.is_configured());
     }
 
     #[test]
     fn test_embedding_service_with_provider() {
         let provider = EmbeddingProvider::mistral("test-key");
-        let service = EmbeddingService::with_provider(provider);
+        let service = EmbeddingService::with_provider(provider).expect("test embedding service");
         assert!(service.is_configured());
     }
 
     #[tokio::test]
     async fn test_embedding_service_configure() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         assert!(!service.is_configured());
 
         let provider = EmbeddingProvider::mistral("test-key");
@@ -919,14 +938,14 @@ mod tests {
     #[tokio::test]
     async fn test_embedding_service_dimension() {
         let provider = EmbeddingProvider::mistral("test-key");
-        let service = EmbeddingService::with_provider(provider);
+        let service = EmbeddingService::with_provider(provider).expect("test embedding service");
         assert_eq!(service.dimension().await, MISTRAL_EMBED_DIMENSION);
     }
 
     #[tokio::test]
     async fn test_embedding_service_dimension_ollama() {
         let provider = EmbeddingProvider::ollama();
-        let service = EmbeddingService::with_provider(provider);
+        let service = EmbeddingService::with_provider(provider).expect("test embedding service");
         assert_eq!(service.dimension().await, OLLAMA_NOMIC_DIMENSION);
     }
 
@@ -936,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_validate_text_empty() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let result = service.validate_text("");
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -947,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_validate_text_too_long() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let long_text = "x".repeat(MAX_EMBEDDING_TEXT_LENGTH + 1);
         let result = service.validate_text(&long_text);
         assert!(result.is_err());
@@ -962,7 +981,7 @@ mod tests {
 
     #[test]
     fn test_validate_text_valid() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let result = service.validate_text("Hello, world!");
         assert!(result.is_ok());
     }
@@ -973,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_not_configured() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let result = service.embed("test").await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -984,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch_not_configured() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let result = service.embed_batch(&["test1", "test2"]).await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -995,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_batch_empty() {
-        let service = EmbeddingService::new();
+        let service = EmbeddingService::new().expect("test embedding service");
         let result = service.embed_batch(&[]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -1004,7 +1023,7 @@ mod tests {
     #[tokio::test]
     async fn test_embed_batch_too_large() {
         let provider = EmbeddingProvider::mistral("test-key");
-        let service = EmbeddingService::with_provider(provider);
+        let service = EmbeddingService::with_provider(provider).expect("test embedding service");
 
         let texts: Vec<&str> = (0..MAX_BATCH_SIZE + 1).map(|_| "test").collect();
         let result = service.embed_batch(&texts).await;

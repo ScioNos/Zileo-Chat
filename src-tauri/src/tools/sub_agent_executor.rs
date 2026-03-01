@@ -45,8 +45,8 @@
 //!     "Task prompt"
 //! ).await?;
 //!
-//! // Execute with metrics
-//! let result = executor.execute_with_metrics(&sub_agent_id, task).await;
+//! // Execute with retry and heartbeat monitoring
+//! let result = executor.execute_with_retry(&sub_agent_id, task, None).await;
 //!
 //! // Update record and emit events
 //! executor.update_execution_record(&execution_id, &result).await;
@@ -63,7 +63,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::agents::core::agent::Task;
+use crate::agents::core::agent::{ReasoningStepData, Task, ToolExecutionData};
 use crate::agents::core::orchestrator::AgentOrchestrator;
 use crate::db::DBClient;
 use crate::mcp::manager::MCPManager;
@@ -76,7 +76,8 @@ use crate::tools::constants::sub_agent::{
     MAX_RETRY_ATTEMPTS,
 };
 use crate::tools::sub_agent_circuit_breaker::SubAgentCircuitBreaker;
-use crate::tools::validation_helper::{safe_truncate, ValidationHelper};
+use crate::tools::utils::safe_truncate;
+use crate::tools::validation_helper::ValidationHelper;
 use crate::tools::{ToolError, ToolResult};
 
 /// Result of sub-agent execution with metrics.
@@ -90,6 +91,10 @@ pub struct ExecutionResult {
     pub metrics: SubAgentMetrics,
     /// Error message if failed
     pub error_message: Option<String>,
+    /// Internal tool executions from sub-agent (SA-014 P1)
+    pub tool_executions: Vec<ToolExecutionData>,
+    /// Internal reasoning steps from sub-agent (SA-014 P2)
+    pub reasoning_steps: Vec<ReasoningStepData>,
 }
 
 impl Default for ExecutionResult {
@@ -103,12 +108,14 @@ impl Default for ExecutionResult {
                 tokens_output: 0,
             },
             error_message: None,
+            tool_executions: Vec::new(),
+            reasoning_steps: Vec::new(),
         }
     }
 }
 
 // =============================================================================
-// OPT-SA-1: ActivityMonitor for Inactivity Timeout with Heartbeat
+// ActivityMonitor for Inactivity Timeout with Heartbeat
 // =============================================================================
 
 /// Callback type for activity notification.
@@ -210,13 +217,13 @@ impl Default for ActivityMonitor {
 /// Centralizes shared logic across SpawnAgentTool, DelegateTaskTool, and ParallelTasksTool
 /// to reduce code duplication and ensure consistent behavior.
 ///
-/// # Cancellation Support (OPT-SA-7)
+/// # Cancellation Support
 ///
 /// The executor supports graceful cancellation via `CancellationToken`. When a token
 /// is provided and cancelled, execution aborts immediately with a "cancelled" result.
 /// This enables users to cancel long-running workflows and have sub-agents respond.
 ///
-/// # Circuit Breaker Support (OPT-SA-8)
+/// # Circuit Breaker Support
 ///
 /// The executor supports circuit breaker protection via `SubAgentCircuitBreaker`.
 /// When provided, the executor will:
@@ -238,17 +245,16 @@ pub struct SubAgentExecutor {
     workflow_id: String,
     /// Parent agent ID (caller of sub-agent tools)
     parent_agent_id: String,
-    /// Optional cancellation token for graceful shutdown (OPT-SA-7)
+    /// Optional cancellation token for graceful shutdown
     cancellation_token: Option<CancellationToken>,
-    /// Optional circuit breaker for execution resilience (OPT-SA-8)
+    /// Optional circuit breaker for execution resilience
     circuit_breaker: Option<Arc<Mutex<SubAgentCircuitBreaker>>>,
 }
 
 impl SubAgentExecutor {
     /// Creates a new executor without cancellation token or circuit breaker.
     ///
-    /// For most use cases, prefer `with_resilience()` to support graceful shutdown
-    /// and circuit breaker protection.
+    /// For most use cases, prefer `with_cancellation()` to support graceful shutdown.
     ///
     /// # Arguments
     /// * `db` - Database client for persistence
@@ -278,10 +284,10 @@ impl SubAgentExecutor {
         }
     }
 
-    /// Creates a new executor with cancellation token support (OPT-SA-7).
+    /// Creates a new executor with cancellation token support.
     ///
-    /// Note: This constructor does not include circuit breaker. Use `with_resilience()`
-    /// for full resilience features including circuit breaker protection.
+    /// Circuit breaker can be configured separately via the `circuit_breaker` field
+    /// if needed after construction.
     ///
     /// # Arguments
     /// * `db` - Database client for persistence
@@ -318,55 +324,6 @@ impl SubAgentExecutor {
             parent_agent_id,
             cancellation_token,
             circuit_breaker: None,
-        }
-    }
-
-    /// Creates a new executor with full resilience features (OPT-SA-7, OPT-SA-8).
-    ///
-    /// This is the recommended constructor for production use as it supports:
-    /// - Graceful cancellation via CancellationToken
-    /// - Circuit breaker protection via SubAgentCircuitBreaker
-    ///
-    /// # Arguments
-    /// * `db` - Database client for persistence
-    /// * `orchestrator` - Agent orchestrator for execution
-    /// * `mcp_manager` - Optional MCP manager for tool routing
-    /// * `app_handle` - Optional app handle for event emission
-    /// * `workflow_id` - Workflow ID for scoping
-    /// * `parent_agent_id` - ID of parent agent calling sub-agent tools
-    /// * `cancellation_token` - Optional cancellation token for graceful shutdown (OPT-SA-7)
-    /// * `circuit_breaker` - Optional circuit breaker for execution resilience (OPT-SA-8)
-    ///
-    /// # Example
-    /// ```ignore
-    /// let executor = SubAgentExecutor::with_resilience(
-    ///     db, orchestrator, mcp_manager, app_handle,
-    ///     workflow_id, parent_agent_id,
-    ///     Some(cancellation_token),
-    ///     Some(circuit_breaker),
-    /// );
-    /// ```
-    #[allow(dead_code)] // Will be used when tools are updated to use resilience
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_resilience(
-        db: Arc<DBClient>,
-        orchestrator: Arc<AgentOrchestrator>,
-        mcp_manager: Option<Arc<MCPManager>>,
-        app_handle: Option<tauri::AppHandle>,
-        workflow_id: String,
-        parent_agent_id: String,
-        cancellation_token: Option<CancellationToken>,
-        circuit_breaker: Option<Arc<Mutex<SubAgentCircuitBreaker>>>,
-    ) -> Self {
-        Self {
-            db,
-            orchestrator,
-            mcp_manager,
-            app_handle,
-            workflow_id,
-            parent_agent_id,
-            cancellation_token,
-            circuit_breaker,
         }
     }
 
@@ -462,7 +419,7 @@ impl SubAgentExecutor {
             .await
     }
 
-    /// Creates an execution record with optional parent execution ID for hierarchical tracing (OPT-SA-11).
+    /// Creates an execution record with optional parent execution ID for hierarchical tracing.
     ///
     /// # Arguments
     /// * `child_agent_id` - Sub-agent ID
@@ -499,7 +456,7 @@ impl SubAgentExecutor {
                 ToolError::DatabaseError(format!("Failed to create execution record: {}", e))
             })?;
 
-        // OPT-SA-11: Log with parent_execution_id for hierarchical tracing
+        // Log with parent_execution_id for hierarchical tracing
         if let Some(ref parent_id) = parent_execution_id {
             debug!(
                 execution_id = %execution_id,
@@ -520,113 +477,115 @@ impl SubAgentExecutor {
         Ok(execution_id)
     }
 
-    /// Executes an agent and collects metrics (without heartbeat monitoring).
-    ///
-    /// This is the legacy method. For new code, prefer `execute_with_heartbeat_timeout`.
-    ///
-    /// # Arguments
-    /// * `agent_id` - Agent ID to execute
-    /// * `task` - Task to execute
-    ///
-    /// # Returns
-    /// * `ExecutionResult` - Result with success, report, metrics, and optional error
-    #[allow(dead_code)] // Kept for backward compatibility
-    pub async fn execute_with_metrics(&self, agent_id: &str, task: Task) -> ExecutionResult {
-        let start_time = Instant::now();
-
-        let result = self
-            .orchestrator
-            .execute_with_mcp(agent_id, task, self.mcp_manager.clone())
-            .await;
-
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-
-        match result {
-            Ok(report) => {
-                info!(
-                    agent_id = %agent_id,
-                    duration_ms = duration_ms,
-                    "Sub-agent execution completed successfully"
-                );
-                ExecutionResult {
-                    success: true,
-                    report: report.content,
-                    metrics: SubAgentMetrics {
-                        duration_ms,
-                        tokens_input: report.metrics.tokens_input as u64,
-                        tokens_output: report.metrics.tokens_output as u64,
-                    },
-                    error_message: None,
-                }
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                error!(
-                    agent_id = %agent_id,
-                    duration_ms = duration_ms,
-                    error = %error_msg,
-                    "Sub-agent execution failed"
-                );
-                ExecutionResult {
-                    success: false,
-                    report: format!("# Sub-Agent Error\n\nExecution failed: {}", error_msg),
-                    metrics: SubAgentMetrics {
-                        duration_ms,
-                        tokens_input: 0,
-                        tokens_output: 0,
-                    },
-                    error_message: Some(error_msg),
-                }
-            }
-        }
-    }
-
     /// Updates the execution record with the result.
     ///
     /// # Arguments
     /// * `execution_id` - Execution record ID
     /// * `result` - Execution result with success, report, metrics
     pub async fn update_execution_record(&self, execution_id: &str, result: &ExecutionResult) {
-        let status = if result.success {
-            "completed"
-        } else {
-            "failed"
-        };
-        let result_summary = safe_truncate(&result.report, 200, true);
-
-        let result_summary_json =
-            serde_json::to_string(&result_summary).unwrap_or_else(|_| "null".to_string());
-        let error_message_json = result
-            .error_message
-            .as_ref()
-            .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".to_string()))
-            .unwrap_or_else(|| "null".to_string());
+        let status = if result.success { "completed" } else { "error" };
+        let result_summary = safe_truncate(&result.report, 5000, true);
 
         let update_query = format!(
             "UPDATE sub_agent_execution:`{}` SET \
-             status = '{}', \
-             duration_ms = {}, \
-             tokens_input = {}, \
-             tokens_output = {}, \
-             result_summary = {}, \
-             error_message = {}, \
+             status = $status, \
+             duration_ms = $duration_ms, \
+             tokens_input = $tokens_input, \
+             tokens_output = $tokens_output, \
+             result_summary = $result_summary, \
+             error_message = $error_message, \
              completed_at = time::now()",
             execution_id,
-            status,
-            result.metrics.duration_ms,
-            result.metrics.tokens_input,
-            result.metrics.tokens_output,
-            result_summary_json,
-            error_message_json,
         );
 
-        if let Err(e) = self.db.execute(&update_query).await {
+        let error_message_value = result
+            .error_message
+            .as_ref()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .unwrap_or(serde_json::Value::Null);
+
+        if let Err(e) = self
+            .db
+            .execute_with_params(
+                &update_query,
+                vec![
+                    ("status".to_string(), serde_json::json!(status)),
+                    (
+                        "duration_ms".to_string(),
+                        serde_json::json!(result.metrics.duration_ms),
+                    ),
+                    (
+                        "tokens_input".to_string(),
+                        serde_json::json!(result.metrics.tokens_input),
+                    ),
+                    (
+                        "tokens_output".to_string(),
+                        serde_json::json!(result.metrics.tokens_output),
+                    ),
+                    (
+                        "result_summary".to_string(),
+                        serde_json::Value::String(result_summary),
+                    ),
+                    ("error_message".to_string(), error_message_value),
+                ],
+            )
+            .await
+        {
             warn!(
                 execution_id = %execution_id,
                 error = %e,
                 "Failed to update execution record"
             );
         }
+    }
+
+    /// Persists internal tool executions and reasoning steps from a sub-agent (SA-014 P1/P2).
+    ///
+    /// This captures data that was previously silently dropped in `execute_with_heartbeat_timeout`.
+    /// The data is saved to the same `tool_execution` and `thinking_step` tables as primary agent
+    /// data, but with the sub-agent's ID as `agent_id` for attribution.
+    ///
+    /// # Arguments
+    /// * `execution_id` - Sub-agent execution record ID (used as message_id for correlation)
+    /// * `agent_id` - Sub-agent ID
+    /// * `result` - Execution result containing tool_executions and reasoning_steps
+    pub async fn persist_sub_agent_internals(
+        &self,
+        execution_id: &str,
+        agent_id: &str,
+        result: &ExecutionResult,
+    ) {
+        if result.tool_executions.is_empty() && result.reasoning_steps.is_empty() {
+            return;
+        }
+
+        info!(
+            agent_id = %agent_id,
+            tool_executions = result.tool_executions.len(),
+            reasoning_steps = result.reasoning_steps.len(),
+            "Persisting sub-agent internal data"
+        );
+
+        // Use execution_id as message_id for correlation between sub-agent's
+        // tool executions and its sub_agent_execution record
+        crate::db::persist_tool_executions(
+            &self.db,
+            &result.tool_executions,
+            &self.workflow_id,
+            execution_id,
+            agent_id,
+        )
+        .await;
+
+        crate::db::persist_reasoning_steps(
+            &self.db,
+            &result.reasoning_steps,
+            &self.workflow_id,
+            execution_id,
+            agent_id,
+            0,
+        )
+        .await;
     }
 
     /// Emits a streaming event.
@@ -705,38 +664,8 @@ impl SubAgentExecutor {
         format!("sub_{}", Uuid::new_v4())
     }
 
-    /// Gets the workflow ID.
-    #[allow(dead_code)]
-    pub fn workflow_id(&self) -> &str {
-        &self.workflow_id
-    }
-
-    /// Gets the parent agent ID.
-    #[allow(dead_code)]
-    pub fn parent_agent_id(&self) -> &str {
-        &self.parent_agent_id
-    }
-
-    /// Gets the database client.
-    #[allow(dead_code)]
-    pub fn db(&self) -> &Arc<DBClient> {
-        &self.db
-    }
-
-    /// Gets the orchestrator.
-    #[allow(dead_code)]
-    pub fn orchestrator(&self) -> &Arc<AgentOrchestrator> {
-        &self.orchestrator
-    }
-
-    /// Gets the MCP manager.
-    #[allow(dead_code)]
-    pub fn mcp_manager(&self) -> &Option<Arc<MCPManager>> {
-        &self.mcp_manager
-    }
-
     // =========================================================================
-    // OPT-SA-8: Circuit Breaker Integration
+    // Circuit Breaker Integration
     // =========================================================================
 
     /// Checks if the circuit breaker allows execution.
@@ -783,14 +712,14 @@ impl SubAgentExecutor {
     }
 
     // =========================================================================
-    // OPT-SA-1: Execution with Heartbeat-based Inactivity Timeout
-    // OPT-SA-7: Cancellation Support
-    // OPT-SA-8: Circuit Breaker Protection
+    // Execution with Heartbeat-based Inactivity Timeout
+    // Cancellation Support
+    // Circuit Breaker Protection
     // =========================================================================
 
     /// Executes an agent with inactivity timeout monitoring, cancellation, and circuit breaker.
     ///
-    /// This method wraps `execute_with_metrics` with a monitoring loop that
+    /// Runs agent execution with a monitoring loop that
     /// detects genuine hangs by tracking activity. Unlike simple timeouts,
     /// this approach allows long-running but active executions to continue
     /// while catching agents that have truly stopped responding.
@@ -809,7 +738,7 @@ impl SubAgentExecutor {
     /// - Timeout threshold: 300 seconds / 5 minutes (INACTIVITY_TIMEOUT_SECS)
     /// - If no activity for 5 minutes, execution is aborted with an error
     ///
-    /// # Cancellation Behavior (OPT-SA-7)
+    /// # Cancellation Behavior
     ///
     /// If a cancellation token was provided when creating the executor (via
     /// `with_cancellation`), the execution will abort immediately when the
@@ -844,7 +773,7 @@ impl SubAgentExecutor {
         task: Task,
         on_activity: Option<ActivityCallback>,
     ) -> ExecutionResult {
-        // OPT-SA-8: Check circuit breaker before execution
+        // Check circuit breaker before execution
         if let Err(e) = self.check_circuit().await {
             warn!(
                 agent_id = %agent_id,
@@ -865,6 +794,8 @@ impl SubAgentExecutor {
                     tokens_output: 0,
                 },
                 error_message: Some(e.to_string()),
+                tool_executions: Vec::new(),
+                reasoning_steps: Vec::new(),
             };
         }
 
@@ -887,7 +818,7 @@ impl SubAgentExecutor {
             monitor_for_exec.record_activity();
 
             let result = orchestrator
-                .execute_with_mcp(&agent_id_owned, task, mcp_manager)
+                .execute_with_mcp(&agent_id_owned, task, mcp_manager, None)
                 .await;
 
             // Record activity at end
@@ -916,7 +847,7 @@ impl SubAgentExecutor {
         // Pin the future for use in select!
         tokio::pin!(execution_future);
 
-        // OPT-SA-7: Create cancellation future based on whether token is present
+        // Create cancellation future based on whether token is present
         // If no token, create a future that never completes
         let cancellation_future = async {
             if let Some(ref token) = self.cancellation_token {
@@ -936,12 +867,14 @@ impl SubAgentExecutor {
                     let duration_ms = start_time.elapsed().as_millis() as u64;
                     return match result {
                         Ok(report) => {
-                            // OPT-SA-8: Record success with circuit breaker
+                            // Record success with circuit breaker
                             self.record_success().await;
 
                             info!(
                                 agent_id = %agent_id,
                                 duration_ms = duration_ms,
+                                tool_executions = report.metrics.tool_executions.len(),
+                                reasoning_steps = report.metrics.reasoning_steps.len(),
                                 "Sub-agent execution completed successfully (with heartbeat monitoring)"
                             );
                             ExecutionResult {
@@ -953,10 +886,12 @@ impl SubAgentExecutor {
                                     tokens_output: report.metrics.tokens_output as u64,
                                 },
                                 error_message: None,
+                                tool_executions: report.metrics.tool_executions,
+                                reasoning_steps: report.metrics.reasoning_steps,
                             }
                         }
                         Err(e) => {
-                            // OPT-SA-8: Record failure with circuit breaker
+                            // Record failure with circuit breaker
                             self.record_failure().await;
 
                             let error_msg = e.to_string();
@@ -975,12 +910,14 @@ impl SubAgentExecutor {
                                     tokens_output: 0,
                                 },
                                 error_message: Some(error_msg),
+                                tool_executions: Vec::new(),
+                                reasoning_steps: Vec::new(),
                             }
                         }
                     };
                 }
 
-                // Branch 2: Cancellation requested (OPT-SA-7)
+                // Branch 2: Cancellation requested
                 // Note: Cancellation is user-initiated, not a system failure - don't record as failure
                 _ = &mut cancellation_future => {
                     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -1008,6 +945,8 @@ impl SubAgentExecutor {
                             tokens_output: 0,
                         },
                         error_message: Some("Execution cancelled by user".to_string()),
+                        tool_executions: Vec::new(),
+                        reasoning_steps: Vec::new(),
                     };
                 }
 
@@ -1025,7 +964,7 @@ impl SubAgentExecutor {
                     let inactive_secs = monitor.seconds_since_last_activity();
 
                     if inactive_secs > INACTIVITY_TIMEOUT_SECS {
-                        // OPT-SA-8: Record timeout as failure with circuit breaker
+                        // Record timeout as failure with circuit breaker
                         // Inactivity timeouts indicate system issues, so record as failure
                         self.record_failure().await;
 
@@ -1067,6 +1006,8 @@ impl SubAgentExecutor {
                                 inactive_secs,
                                 INACTIVITY_TIMEOUT_SECS
                             )),
+                            tool_executions: Vec::new(),
+                            reasoning_steps: Vec::new(),
                         };
                     }
 
@@ -1083,7 +1024,7 @@ impl SubAgentExecutor {
     }
 
     // =========================================================================
-    // OPT-SA-10: Retry with Exponential Backoff
+    // Retry with Exponential Backoff
     // =========================================================================
 
     /// Executes with automatic retry on transient errors using exponential backoff.
@@ -1324,7 +1265,7 @@ impl SubAgentExecutor {
 }
 
 // =============================================================================
-// OPT-SA-10: Retryable Error Helper (standalone function for external use)
+// Retryable Error Helper (standalone function for external use)
 // =============================================================================
 
 /// Checks if an error message indicates a retryable transient error.
@@ -1341,6 +1282,7 @@ pub fn is_retryable_error(error_message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::core::agent::ReasoningSource;
 
     #[test]
     fn test_check_primary_permission_allowed() {
@@ -1397,10 +1339,75 @@ mod tests {
         assert_eq!(result.metrics.duration_ms, 0);
         assert_eq!(result.metrics.tokens_input, 0);
         assert_eq!(result.metrics.tokens_output, 0);
+        // SA-014: New fields default to empty
+        assert!(result.tool_executions.is_empty());
+        assert!(result.reasoning_steps.is_empty());
+    }
+
+    #[test]
+    fn test_execution_result_preserves_tool_executions() {
+        let tool_exec = ToolExecutionData {
+            tool_type: "mcp".to_string(),
+            tool_name: "find_symbol".to_string(),
+            server_name: Some("serena".to_string()),
+            input_params: serde_json::json!({"name": "MyClass"}),
+            output_result: serde_json::json!({"found": true}),
+            success: true,
+            error_message: None,
+            duration_ms: 150,
+            iteration: 0,
+            sequence: 0,
+        };
+        let result = ExecutionResult {
+            success: true,
+            report: "Done".to_string(),
+            metrics: SubAgentMetrics {
+                duration_ms: 1000,
+                tokens_input: 500,
+                tokens_output: 200,
+            },
+            error_message: None,
+            tool_executions: vec![tool_exec],
+            reasoning_steps: Vec::new(),
+        };
+        assert_eq!(result.tool_executions.len(), 1);
+        assert_eq!(result.tool_executions[0].tool_name, "find_symbol");
+        assert_eq!(
+            result.tool_executions[0].server_name,
+            Some("serena".to_string())
+        );
+    }
+
+    #[test]
+    fn test_execution_result_preserves_reasoning_steps() {
+        let step = ReasoningStepData {
+            content: "Analyzing the codebase structure".to_string(),
+            duration_ms: 300,
+            sequence: 0,
+            source: ReasoningSource::AgentFlow,
+        };
+        let result = ExecutionResult {
+            success: true,
+            report: "Done".to_string(),
+            metrics: SubAgentMetrics {
+                duration_ms: 1000,
+                tokens_input: 500,
+                tokens_output: 200,
+            },
+            error_message: None,
+            tool_executions: Vec::new(),
+            reasoning_steps: vec![step],
+        };
+        assert_eq!(result.reasoning_steps.len(), 1);
+        assert_eq!(
+            result.reasoning_steps[0].content,
+            "Analyzing the codebase structure"
+        );
+        assert_eq!(result.reasoning_steps[0].duration_ms, 300);
     }
 
     // =========================================================================
-    // OPT-SA-1: ActivityMonitor Tests
+    // ActivityMonitor Tests
     // =========================================================================
 
     #[test]
@@ -1481,7 +1488,7 @@ mod tests {
     }
 
     // =========================================================================
-    // OPT-SA-7: CancellationToken Tests
+    // CancellationToken Tests
     // =========================================================================
 
     #[test]
@@ -1545,7 +1552,7 @@ mod tests {
     }
 
     // =========================================================================
-    // OPT-SA-10: Retry with Exponential Backoff Tests
+    // Retry with Exponential Backoff Tests
     // =========================================================================
 
     #[test]
@@ -1690,7 +1697,7 @@ mod tests {
     }
 
     // =========================================================================
-    // OPT-SA-11: Correlation ID (parent_execution_id) Tests
+    // Correlation ID (parent_execution_id) Tests
     // =========================================================================
 
     #[test]

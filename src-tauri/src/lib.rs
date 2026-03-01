@@ -47,6 +47,7 @@
 
 pub mod agents;
 pub mod commands;
+pub mod constants;
 pub mod db;
 pub mod llm;
 pub mod mcp;
@@ -54,6 +55,9 @@ pub mod models;
 pub mod security;
 pub mod state;
 pub mod tools;
+
+#[cfg(test)]
+pub mod test_utils;
 
 pub use commands::SecureKeyStore;
 pub use llm::ProviderManager;

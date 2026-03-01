@@ -27,7 +27,16 @@
 	import type { Workflow } from '$types/workflow';
 	import WorkflowItem from './WorkflowItem.svelte';
 	import WorkflowItemCompact from './WorkflowItemCompact.svelte';
+	import { AlertTriangle, RefreshCw } from '@lucide/svelte';
 	import { i18n } from '$lib/i18n';
+	import { groupByDate } from '$lib/utils/dateGrouping';
+
+	const DATE_GROUP_I18N: Record<string, string> = {
+		today: 'workflow_group_today',
+		yesterday: 'workflow_group_yesterday',
+		last_7_days: 'workflow_group_last_7_days',
+		older: 'workflow_group_older'
+	};
 
 	/**
 	 * WorkflowList props
@@ -39,12 +48,18 @@
 		selectedId?: string;
 		/** Whether to show compact view (collapsed sidebar) */
 		collapsed?: boolean;
+		/** Error message from loadWorkflows failure */
+		error?: string | null;
+		/** Whether workflows are currently loading */
+		loading?: boolean;
 		/** Selection handler */
 		onselect?: (workflow: Workflow) => void;
 		/** Delete handler */
 		ondelete?: (workflow: Workflow) => void;
 		/** Rename handler */
 		onrename?: (workflow: Workflow, newName: string) => void;
+		/** Retry handler for failed loads */
+		onretry?: () => void;
 		/** Set of workflow IDs currently running in the background */
 		runningWorkflowIds?: Set<string>;
 		/** Set of workflow IDs that recently completed */
@@ -57,9 +72,12 @@
 		workflows,
 		selectedId,
 		collapsed = false,
+		error = null,
+		loading = false,
 		onselect,
 		ondelete,
 		onrename,
+		onretry,
 		runningWorkflowIds = new Set<string>(),
 		recentlyCompletedIds = new Set<string>(),
 		questionPendingIds = new Set<string>()
@@ -79,10 +97,39 @@
 	const remainingWorkflows = $derived(
 		workflows.filter((w) => !runningWorkflowIds.has(w.id) && !recentlyCompletedIds.has(w.id))
 	);
+
+	/** Remaining workflows grouped by date (for expanded mode) */
+	const dateGroups = $derived(groupByDate(remainingWorkflows, 'updated_at'));
 </script>
 
 <div class="workflow-list" class:collapsed role="listbox" aria-label={$i18n('workflow_list_arialabel')}>
-	{#if workflows.length === 0}
+	{#if error && workflows.length === 0}
+		<div class="workflow-list-error" role="alert">
+			{#if collapsed}
+				<span class="error-icon" title={$i18n('workflow_load_error_short')}>
+					<AlertTriangle size={16} />
+				</span>
+			{:else}
+				<div class="error-icon-wrapper">
+					<AlertTriangle size={20} />
+				</div>
+				<p class="error-message">{$i18n('workflow_load_error')}</p>
+				<p class="error-detail">{error}</p>
+				{#if onretry}
+					<button
+						type="button"
+						class="retry-button"
+						onclick={onretry}
+						disabled={loading}
+						aria-busy={loading}
+					>
+						<RefreshCw size={14} class={loading ? 'spinning' : ''} />
+						{loading ? $i18n('workflow_load_retrying') : $i18n('workflow_load_retry')}
+					</button>
+				{/if}
+			{/if}
+		</div>
+	{:else if workflows.length === 0}
 		<div class="workflow-list-empty">
 			{#if collapsed}
 				<span class="empty-icon" title={$i18n('workflow_no_workflows_short')}>-</span>
@@ -147,20 +194,20 @@
 				/>
 			{/each}
 		{/if}
-		{#if remainingWorkflows.length > 0}
-			{#if runningWorkflows.length > 0 || completedWorkflows.length > 0}
+		{#each dateGroups as group (group.label)}
+			{#if runningWorkflows.length > 0 || completedWorkflows.length > 0 || dateGroups.indexOf(group) > 0}
 				<div class="section-divider"></div>
 			{/if}
-			<h3 class="section-header">{$i18n('workflow_section_workflows')}</h3>
-		{/if}
-		{#each remainingWorkflows as workflow (workflow.id)}
-			<WorkflowItem
-				{workflow}
-				active={workflow.id === selectedId}
-				{onselect}
-				{ondelete}
-				{onrename}
-			/>
+			<h3 class="section-header">{$i18n(DATE_GROUP_I18N[group.label])}</h3>
+			{#each group.items as workflow (workflow.id)}
+				<WorkflowItem
+					{workflow}
+					active={workflow.id === selectedId}
+					{onselect}
+					{ondelete}
+					{onrename}
+				/>
+			{/each}
 		{/each}
 	{/if}
 </div>
@@ -175,6 +222,83 @@
 	.workflow-list.collapsed {
 		gap: var(--spacing-sm);
 		align-items: center;
+	}
+
+	.workflow-list-error {
+		text-align: center;
+		padding: var(--spacing-xl) var(--spacing-md);
+		color: var(--color-text-secondary);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--spacing-sm);
+	}
+
+	.error-icon-wrapper {
+		color: var(--color-warning);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.error-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border-radius: var(--border-radius-md);
+		background: var(--color-bg-tertiary);
+		color: var(--color-warning);
+	}
+
+	.error-message {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		margin: 0;
+	}
+
+	.error-detail {
+		font-size: var(--font-size-xs);
+		color: var(--color-text-tertiary);
+		margin: 0;
+		word-break: break-word;
+	}
+
+	.retry-button {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--spacing-xs);
+		padding: var(--spacing-xs) var(--spacing-md);
+		font-size: var(--font-size-sm);
+		font-family: var(--font-family);
+		color: var(--color-accent);
+		background: transparent;
+		border: 1px solid var(--color-accent);
+		border-radius: var(--border-radius-md);
+		cursor: pointer;
+		transition:
+			background var(--transition-fast),
+			opacity var(--transition-fast);
+		margin-top: var(--spacing-xs);
+	}
+
+	.retry-button:hover:not(:disabled) {
+		background: var(--color-accent-light);
+	}
+
+	.retry-button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.retry-button :global(.spinning) {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
 	}
 
 	.workflow-list-empty {

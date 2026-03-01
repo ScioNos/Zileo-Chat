@@ -27,9 +27,7 @@ import {
 	error,
 	formMode,
 	editingAgent,
-	agentCount,
-	hasAgents,
-	createInitialAgentState
+	hasAgents
 } from '../agents';
 import type { AgentConfig, AgentSummary, AgentConfigCreate } from '$types/agent';
 
@@ -69,12 +67,14 @@ describe('Agent Store', () => {
 			provider: 'Mistral',
 			model: 'mistral-large-latest',
 			temperature: 0.7,
-			max_tokens: 4096
+			max_tokens: 4096,
+			is_reasoning: false
 		},
 		tools: ['MemoryTool', 'TodoTool'],
 		mcp_servers: ['serena'],
 		system_prompt: 'You are a helpful assistant.',
-		max_tool_iterations: 50
+		max_tool_iterations: 50,
+		enable_thinking: true
 	});
 
 	beforeEach(() => {
@@ -147,11 +147,14 @@ describe('Agent Store', () => {
 					provider: 'Mistral',
 					model: 'mistral-large-latest',
 					temperature: 0.7,
-					max_tokens: 4096
+					max_tokens: 4096,
+					is_reasoning: false
 				},
 				tools: ['MemoryTool'],
 				mcp_servers: [],
-				system_prompt: 'Test prompt'
+				system_prompt: 'Test prompt',
+				max_tool_iterations: 50,
+				enable_thinking: true
 			};
 
 			mockInvoke.mockResolvedValueOnce(newAgentId); // create_agent
@@ -172,11 +175,14 @@ describe('Agent Store', () => {
 					provider: 'Mistral',
 					model: 'mistral-large-latest',
 					temperature: 0.7,
-					max_tokens: 4096
+					max_tokens: 4096,
+					is_reasoning: false
 				},
 				tools: [],
 				mcp_servers: [],
-				system_prompt: ''
+				system_prompt: '',
+				max_tool_iterations: 50,
+				enable_thinking: true
 			};
 
 			mockInvoke.mockRejectedValueOnce(new Error('Validation failed'));
@@ -349,10 +355,6 @@ describe('Agent Store', () => {
 			expect(get(selectedAgent)).toBeNull();
 		});
 
-		it('agentCount should return correct count', () => {
-			expect(get(agentCount)).toBe(2);
-		});
-
 		it('hasAgents should return true when agents exist', () => {
 			expect(get(hasAgents)).toBe(true);
 		});
@@ -363,15 +365,4 @@ describe('Agent Store', () => {
 		});
 	});
 
-	describe('Legacy Functions', () => {
-		it('createInitialAgentState should return legacy state structure', () => {
-			const state = createInitialAgentState();
-
-			expect(state.agentIds).toEqual([]);
-			expect(state.configs).toBeInstanceOf(Map);
-			expect(state.selectedId).toBeNull();
-			expect(state.loading).toBe(false);
-			expect(state.error).toBeNull();
-		});
-	});
 });

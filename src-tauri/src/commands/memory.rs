@@ -21,9 +21,11 @@
 //! Full RAG with embeddings will be implemented in a future phase.
 
 use crate::{
+    constants::query_limits,
+    db::extract_count,
     models::{Memory, MemorySearchResult, MemoryType},
-    security::Validator,
-    tools::constants::{memory as memory_constants, query_limits},
+    security::{serialize_for_query, validate_uuid_field},
+    tools::constants::memory as memory_constants,
     tools::memory::{add_memory_core, search_memories_core, AddMemoryParams, SearchParams},
     AppState,
 };
@@ -130,8 +132,7 @@ pub async fn list_memories(
 
     // Type filter condition (use bind parameter)
     if let Some(ref mtype) = type_filter {
-        let type_str = serde_json::to_string(mtype)
-            .map_err(|e| format!("Failed to serialize memory type: {}", e))?
+        let type_str = serialize_for_query(mtype, "memory type")?
             .trim_matches('"')
             .to_string();
         conditions.push("type = $type".to_string());
@@ -153,7 +154,7 @@ pub async fn list_memories(
 
     // Use explicit field selection with meta::id(id) to avoid SurrealDB SDK
     // serialization issues with internal Thing type (see CLAUDE.md)
-    // Add LIMIT to prevent memory explosion (OPT-DB-8)
+    // Add LIMIT to prevent memory explosion
     let query = format!(
         "SELECT meta::id(id) AS id, type, content, workflow_id, metadata, created_at \
          FROM memory{} ORDER BY created_at DESC LIMIT {}",
@@ -199,11 +200,7 @@ pub async fn list_memories(
 pub async fn get_memory(memory_id: String, state: State<'_, AppState>) -> Result<Memory, String> {
     info!("Getting memory entry");
 
-    // Validate memory ID
-    let validated_id = Validator::validate_uuid(&memory_id).map_err(|e| {
-        warn!(error = %e, "Invalid memory_id");
-        format!("Invalid memory_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&memory_id, "memory_id")?;
 
     // Use explicit field selection with meta::id(id) to avoid SurrealDB SDK
     // serialization issues with internal Thing type (see CLAUDE.md)
@@ -235,11 +232,7 @@ pub async fn get_memory(memory_id: String, state: State<'_, AppState>) -> Result
 pub async fn delete_memory(memory_id: String, state: State<'_, AppState>) -> Result<(), String> {
     info!("Deleting memory entry");
 
-    // Validate memory ID
-    let validated_id = Validator::validate_uuid(&memory_id).map_err(|e| {
-        warn!(error = %e, "Invalid memory_id");
-        format!("Invalid memory_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&memory_id, "memory_id")?;
 
     // Use execute() with DELETE query to avoid SurrealDB SDK issues with delete() method
     let delete_query = format!("DELETE memory:`{}`", validated_id);
@@ -387,8 +380,7 @@ pub async fn clear_memories_by_type(
     info!("Clearing memories by type");
 
     // Convert MemoryType to string for bind parameter
-    let type_str = serde_json::to_string(&memory_type)
-        .map_err(|e| format!("Failed to serialize memory type: {}", e))?
+    let type_str = serialize_for_query(&memory_type, "memory type")?
         .trim_matches('"')
         .to_string();
 
@@ -405,11 +397,7 @@ pub async fn clear_memories_by_type(
             format!("Failed to count memories: {}", e)
         })?;
 
-    let count = count_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0) as usize;
+    let count = extract_count(&count_result) as usize;
 
     // Delete all memories of the specified type using parameterized query
     state
@@ -453,7 +441,7 @@ mod tests {
 
         let registry = Arc::new(AgentRegistry::new());
         let orchestrator = Arc::new(AgentOrchestrator::new(registry.clone()));
-        let llm_manager = Arc::new(ProviderManager::new());
+        let llm_manager = Arc::new(ProviderManager::new().expect("test provider manager"));
         let mcp_manager = Arc::new(
             crate::mcp::MCPManager::new(db.clone())
                 .await

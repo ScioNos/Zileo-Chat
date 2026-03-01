@@ -26,8 +26,9 @@
    */
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { Button } from '$lib/components/ui';
+  import { Button, ErrorBanner } from '$lib/components/ui';
   import { i18n } from '$lib/i18n';
+  import { getErrorMessage } from '$lib/utils/error';
   import {
     validationSettingsStore,
     settings,
@@ -35,6 +36,7 @@
     isSaving
   } from '$lib/stores/validation-settings';
   import { loadServers } from '$lib/stores/mcp';
+  import ValidationInfoCard from './ValidationInfoCard.svelte';
   import type {
     ValidationMode,
     UpdateValidationSettingsRequest,
@@ -58,7 +60,8 @@
   let loadingResources = $state(false);
 
   // UI state
-  let message = $state<{ type: 'success' | 'error'; text: string } | null>(null);
+  let errorMessage = $state<string | null>(null);
+  let successMessage = $state<string | null>(null);
   let hasChanges = $state(false);
 
   // Mode options for card selector (using translation keys)
@@ -86,15 +89,16 @@
   // Derived: sub-agent tools
   let subAgentTools = $derived(availableTools.filter(t => t.category === 'sub_agent'));
 
-  // Note: runningMcpServers could be used for filtering display if needed
-  // Currently we show all servers with status indicator
-
   // Load settings and resources on mount
   onMount(async () => {
-    await Promise.all([
-      validationSettingsStore.loadSettings(),
-      loadAvailableResources()
-    ]);
+    try {
+      await Promise.all([
+        validationSettingsStore.loadSettings(),
+        loadAvailableResources()
+      ]);
+    } catch (err) {
+      errorMessage = $i18n('validation_load_resources_failed').replace('{error}', getErrorMessage(err));
+    }
   });
 
   // Load available tools and MCP servers
@@ -108,7 +112,7 @@
       availableTools = tools;
       mcpServers = servers;
     } catch (err) {
-      console.error('Failed to load resources:', err);
+      errorMessage = $i18n('validation_load_resources_failed').replace('{error}', getErrorMessage(err));
     } finally {
       loadingResources = false;
     }
@@ -130,9 +134,7 @@
   // Track changes
   function markChanged(): void {
     hasChanges = true;
-    if (message?.type === 'success') {
-      message = null;
-    }
+    successMessage = null;
   }
 
   // Handle mode selection
@@ -143,7 +145,8 @@
 
   // Handle save
   async function handleSave(): Promise<void> {
-    message = null;
+    errorMessage = null;
+    successMessage = null;
     try {
       const updateRequest: UpdateValidationSettingsRequest = {
         mode: localMode,
@@ -157,33 +160,71 @@
         riskThresholds: localRiskThresholds
       };
       await validationSettingsStore.updateSettings(updateRequest);
-      message = { type: 'success', text: $i18n('validation_saved') };
+      successMessage = $i18n('validation_saved');
       hasChanges = false;
       setTimeout(() => {
-        if (message?.type === 'success') message = null;
+        successMessage = null;
       }, 3000);
     } catch (err) {
-      message = { type: 'error', text: $i18n('validation_save_failed').replace('{error}', String(err)) };
+      errorMessage = $i18n('validation_save_failed').replace('{error}', getErrorMessage(err));
     }
   }
 
   // Handle reset to defaults
   async function handleReset(): Promise<void> {
-    message = null;
+    errorMessage = null;
+    successMessage = null;
     try {
       await validationSettingsStore.resetToDefaults();
-      message = { type: 'success', text: $i18n('validation_reset_success') };
+      successMessage = $i18n('validation_reset_success');
       hasChanges = false;
       setTimeout(() => {
-        if (message?.type === 'success') message = null;
+        successMessage = null;
       }, 3000);
     } catch (err) {
-      message = { type: 'error', text: $i18n('validation_reset_failed').replace('{error}', String(err)) };
+      errorMessage = $i18n('validation_reset_failed').replace('{error}', getErrorMessage(err));
     }
   }
 </script>
 
+<!-- Shared snippet: renders a list of tool badges -->
+{#snippet toolBadgeList(tools: AvailableToolInfo[], badgeClass: string)}
+  {#if tools.length > 0}
+    <div class="item-list">
+      {#each tools as tool (tool.name)}
+        <span class="item-badge {badgeClass}">{tool.name}</span>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+<!-- Shared snippet: renders MCP server badges with loading/empty/status states -->
+{#snippet mcpBadgeList(badgeClass: string)}
+  {#if loadingResources}
+    <span class="loading-text">{$i18n('common_loading')}</span>
+  {:else if mcpServers.length > 0}
+    <div class="item-list">
+      {#each mcpServers as server (server.name)}
+        <span class="item-badge {badgeClass}" class:running={server.status === 'running'}>
+          {server.name}
+          {#if server.status === 'running'}
+            <span class="status-dot running"></span>
+          {:else}
+            <span class="status-dot stopped"></span>
+          {/if}
+        </span>
+      {/each}
+    </div>
+  {:else}
+    <span class="no-items">{$i18n('validation_no_mcp_servers')}</span>
+  {/if}
+{/snippet}
+
 <div class="validation-settings">
+  {#if errorMessage}
+    <ErrorBanner message={errorMessage} onDismiss={() => (errorMessage = null)} />
+  {/if}
+
   {#if $isLoading}
     <div class="loading-state">
       <span class="spinner"></span>
@@ -226,140 +267,30 @@
       {/if}
     </div>
 
-    <!-- Auto Mode Information -->
-    {#if localMode === 'auto'}
+    <!-- Auto/Manual Mode Information (merged - identical structure, different variant) -->
+    {#if localMode === 'auto' || localMode === 'manual'}
+      {@const variant = localMode === 'auto' ? 'approved' : 'validation-required'}
+      {@const icon = localMode === 'auto' ? '\u2713' : '\u26A0'}
+      {@const statusKey = localMode === 'auto' ? 'validation_auto_approved' : 'validation_requires_approval'}
+      {@const sectionTitleKey = localMode === 'auto' ? 'validation_auto_title' : 'validation_manual_title'}
+      {@const sectionHelpKey = localMode === 'auto' ? 'validation_auto_help' : 'validation_manual_help'}
+
       <div class="settings-section">
-        <h3 class="section-title">{$i18n('validation_auto_title')}</h3>
-        <p class="section-help">{$i18n('validation_auto_help')}</p>
+        <h3 class="section-title">{$i18n(sectionTitleKey)}</h3>
+        <p class="section-help">{$i18n(sectionHelpKey)}</p>
 
         <div class="info-cards">
-          <!-- Sub-Agents (auto-approved) -->
-          <div class="info-card approved">
-            <div class="info-card-header">
-              <span class="info-card-icon">✓</span>
-              <span class="info-card-title">{$i18n('validation_sub_agents')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_auto_approved')}</span>
-            {#if subAgentTools.length > 0}
-              <div class="item-list">
-                {#each subAgentTools as tool (tool.name)}
-                  <span class="item-badge approved">{tool.name}</span>
-                {/each}
-              </div>
-            {/if}
-          </div>
+          <ValidationInfoCard {variant} {icon} titleKey="validation_sub_agents" {statusKey}>
+            {@render toolBadgeList(subAgentTools, variant)}
+          </ValidationInfoCard>
 
-          <!-- Local Tools (auto-approved) -->
-          <div class="info-card approved">
-            <div class="info-card-header">
-              <span class="info-card-icon">✓</span>
-              <span class="info-card-title">{$i18n('validation_tools')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_auto_approved')}</span>
-            {#if basicTools.length > 0}
-              <div class="item-list">
-                {#each basicTools as tool (tool.name)}
-                  <span class="item-badge approved">{tool.name}</span>
-                {/each}
-              </div>
-            {/if}
-          </div>
+          <ValidationInfoCard {variant} {icon} titleKey="validation_tools" {statusKey}>
+            {@render toolBadgeList(basicTools, variant)}
+          </ValidationInfoCard>
 
-          <!-- MCP Servers (auto-approved) -->
-          <div class="info-card approved">
-            <div class="info-card-header">
-              <span class="info-card-icon">✓</span>
-              <span class="info-card-title">{$i18n('validation_mcp')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_auto_approved')}</span>
-            {#if loadingResources}
-              <span class="loading-text">{$i18n('common_loading')}</span>
-            {:else if mcpServers.length > 0}
-              <div class="item-list">
-                {#each mcpServers as server (server.name)}
-                  <span class="item-badge approved" class:running={server.status === 'running'}>
-                    {server.name}
-                    {#if server.status === 'running'}
-                      <span class="status-dot running"></span>
-                    {:else}
-                      <span class="status-dot stopped"></span>
-                    {/if}
-                  </span>
-                {/each}
-              </div>
-            {:else}
-              <span class="no-items">{$i18n('validation_no_mcp_servers')}</span>
-            {/if}
-          </div>
-        </div>
-      </div>
-    {/if}
-
-    <!-- Manual Mode Information -->
-    {#if localMode === 'manual'}
-      <div class="settings-section">
-        <h3 class="section-title">{$i18n('validation_manual_title')}</h3>
-        <p class="section-help">{$i18n('validation_manual_help')}</p>
-
-        <div class="info-cards">
-          <!-- Sub-Agents (requires validation) -->
-          <div class="info-card validation-required">
-            <div class="info-card-header">
-              <span class="info-card-icon">⚠</span>
-              <span class="info-card-title">{$i18n('validation_sub_agents')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_requires_approval')}</span>
-            {#if subAgentTools.length > 0}
-              <div class="item-list">
-                {#each subAgentTools as tool (tool.name)}
-                  <span class="item-badge validation-required">{tool.name}</span>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-          <!-- Local Tools (requires validation) -->
-          <div class="info-card validation-required">
-            <div class="info-card-header">
-              <span class="info-card-icon">⚠</span>
-              <span class="info-card-title">{$i18n('validation_tools')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_requires_approval')}</span>
-            {#if basicTools.length > 0}
-              <div class="item-list">
-                {#each basicTools as tool (tool.name)}
-                  <span class="item-badge validation-required">{tool.name}</span>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-          <!-- MCP Servers (requires validation) -->
-          <div class="info-card validation-required">
-            <div class="info-card-header">
-              <span class="info-card-icon">⚠</span>
-              <span class="info-card-title">{$i18n('validation_mcp')}</span>
-            </div>
-            <span class="info-card-status">{$i18n('validation_requires_approval')}</span>
-            {#if loadingResources}
-              <span class="loading-text">{$i18n('common_loading')}</span>
-            {:else if mcpServers.length > 0}
-              <div class="item-list">
-                {#each mcpServers as server (server.name)}
-                  <span class="item-badge validation-required" class:running={server.status === 'running'}>
-                    {server.name}
-                    {#if server.status === 'running'}
-                      <span class="status-dot running"></span>
-                    {:else}
-                      <span class="status-dot stopped"></span>
-                    {/if}
-                  </span>
-                {/each}
-              </div>
-            {:else}
-              <span class="no-items">{$i18n('validation_no_mcp_servers')}</span>
-            {/if}
-          </div>
+          <ValidationInfoCard {variant} {icon} titleKey="validation_mcp" {statusKey}>
+            {@render mcpBadgeList(variant)}
+          </ValidationInfoCard>
         </div>
       </div>
     {/if}
@@ -381,13 +312,7 @@
             <div class="checkbox-content">
               <span class="checkbox-label">{$i18n('validation_sub_agents')}</span>
               <span class="checkbox-description">{$i18n('validation_sub_agents_desc')}</span>
-              {#if subAgentTools.length > 0}
-                <div class="item-list">
-                  {#each subAgentTools as tool (tool.name)}
-                    <span class="item-badge" class:enabled={localSubAgentsValidation}>{tool.name}</span>
-                  {/each}
-                </div>
-              {/if}
+              {@render toolBadgeList(subAgentTools, localSubAgentsValidation ? 'enabled' : '')}
             </div>
           </label>
 
@@ -401,13 +326,7 @@
             <div class="checkbox-content">
               <span class="checkbox-label">{$i18n('validation_tools')}</span>
               <span class="checkbox-description">{$i18n('validation_tools_desc')}</span>
-              {#if basicTools.length > 0}
-                <div class="item-list">
-                  {#each basicTools as tool (tool.name)}
-                    <span class="item-badge" class:enabled={localToolsValidation}>{tool.name}</span>
-                  {/each}
-                </div>
-              {/if}
+              {@render toolBadgeList(basicTools, localToolsValidation ? 'enabled' : '')}
             </div>
           </label>
 
@@ -421,24 +340,7 @@
             <div class="checkbox-content">
               <span class="checkbox-label">{$i18n('validation_mcp')}</span>
               <span class="checkbox-description">{$i18n('validation_mcp_desc')}</span>
-              {#if loadingResources}
-                <span class="loading-text">{$i18n('common_loading')}</span>
-              {:else if mcpServers.length > 0}
-                <div class="item-list">
-                  {#each mcpServers as server (server.name)}
-                    <span class="item-badge" class:enabled={localMcpValidation} class:running={server.status === 'running'}>
-                      {server.name}
-                      {#if server.status === 'running'}
-                        <span class="status-dot running"></span>
-                      {:else}
-                        <span class="status-dot stopped"></span>
-                      {/if}
-                    </span>
-                  {/each}
-                </div>
-              {:else}
-                <span class="no-items">{$i18n('validation_no_mcp_servers')}</span>
-              {/if}
+              {@render mcpBadgeList(localMcpValidation ? 'enabled' : '')}
             </div>
           </label>
         </div>
@@ -474,10 +376,10 @@
       </div>
     </div>
 
-    <!-- Message -->
-    {#if message}
-      <div class="message" class:success={message.type === 'success'} class:error={message.type === 'error'}>
-        {message.text}
+    <!-- Success Message -->
+    {#if successMessage}
+      <div class="message success">
+        {successMessage}
       </div>
     {/if}
 
@@ -704,62 +606,14 @@
     color: var(--color-warning);
   }
 
-  /* Info Cards (for Auto/Manual modes) */
+  /* Info Cards container (for Auto/Manual modes) */
   .info-cards {
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md);
   }
 
-  .info-card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-    padding: var(--spacing-md);
-    border-radius: var(--border-radius-md);
-    border: 1px solid var(--color-border);
-    background: var(--color-bg-secondary);
-  }
-
-  .info-card.approved {
-    border-color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 5%, var(--color-bg-secondary));
-  }
-
-  .info-card.validation-required {
-    border-color: var(--color-warning);
-    background: color-mix(in srgb, var(--color-warning) 5%, var(--color-bg-secondary));
-  }
-
-  .info-card-header {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-  }
-
-  .info-card-icon {
-    font-size: var(--font-size-md);
-  }
-
-  .info-card.approved .info-card-icon {
-    color: var(--color-success);
-  }
-
-  .info-card.validation-required .info-card-icon {
-    color: var(--color-warning);
-  }
-
-  .info-card-title {
-    font-weight: var(--font-weight-semibold);
-    color: var(--color-text-primary);
-  }
-
-  .info-card-status {
-    font-size: var(--font-size-sm);
-    color: var(--color-text-secondary);
-  }
-
-  /* Item list (tools, MCP servers) */
+  /* Item list (tools, MCP servers) - used by snippets rendered in this component */
   .item-list {
     display: flex;
     flex-wrap: wrap;
@@ -818,23 +672,14 @@
     font-style: italic;
   }
 
-  /* Message */
-  .message {
+  /* Success Message */
+  .message.success {
     padding: var(--spacing-md);
     border-radius: var(--border-radius-md);
     font-size: var(--font-size-sm);
-  }
-
-  .message.success {
     background: color-mix(in srgb, var(--color-success) 15%, transparent);
     color: var(--color-success);
     border: 1px solid var(--color-success);
-  }
-
-  .message.error {
-    background: color-mix(in srgb, var(--color-error) 15%, transparent);
-    color: var(--color-error);
-    border: 1px solid var(--color-error);
   }
 
   /* Actions */

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Centralized constants for tools.
+//! Tool-specific constants.
+//!
+//! Application-wide constants (workflow, query_limits, commands) are in
+//! [`crate::constants`].
 
 // ===== Memory Tool =====
 pub mod memory {
@@ -56,7 +59,7 @@ pub mod todo {
     pub const PRIORITY_MAX: u8 = 5;
     pub const VALID_STATUSES: &[&str] = &["pending", "in_progress", "completed", "blocked"];
 
-    /// Standard SELECT fields for Task queries (OPT-TODO-9).
+    /// Standard SELECT fields for Task queries.
     /// Use this constant for consistent field selection in get_task() and similar queries.
     pub const TASK_SELECT_FIELDS: &str = "meta::id(id) AS id, workflow_id, name, description, agent_assigned, priority, status, dependencies, duration_ms, created_at, completed_at";
 }
@@ -74,12 +77,12 @@ pub mod user_question {
     pub const VALID_TYPES: &[&str] = &["checkbox", "text", "mixed"];
     pub const VALID_STATUSES: &[&str] = &["pending", "answered", "skipped", "timeout"];
 
-    // OPT-UQ-7: Configurable timeout for wait_for_response
+    // Configurable timeout for wait_for_response
     /// Default timeout (seconds) for waiting for user response.
     /// After this duration, the question status is set to "timeout" and an error is returned.
     pub const DEFAULT_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
-    // OPT-UQ-12: Circuit Breaker for UserQuestionTool
+    // Circuit Breaker for UserQuestionTool
     /// Number of consecutive timeouts before opening the circuit breaker.
     /// When reached, new questions are rejected until cooldown expires.
     pub const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
@@ -94,7 +97,7 @@ pub mod user_question {
 pub mod sub_agent {
     pub use crate::models::sub_agent::constants::MAX_SUB_AGENTS;
 
-    // OPT-SA-1: Inactivity Timeout with Heartbeat
+    // Inactivity Timeout with Heartbeat
     /// Timeout (seconds) without any activity before aborting sub-agent execution.
     /// Activity includes: LLM tokens received, tool calls started/completed, MCP responses.
     pub const INACTIVITY_TIMEOUT_SECS: u64 = 300; // 5 minutes
@@ -102,9 +105,9 @@ pub mod sub_agent {
     /// Interval (seconds) between activity checks in the monitoring loop.
     pub const ACTIVITY_CHECK_INTERVAL_SECS: u64 = 30;
 
-    // OPT-SA-3: Centralized Magic Numbers
+    // Centralized Magic Numbers
     /// Maximum characters for result summaries in sub-agent reports.
-    /// (Used in OPT-SA-4/5 when event emission is unified)
+    /// (Used when event emission is unified)
     #[allow(dead_code)]
     pub const RESULT_SUMMARY_MAX_CHARS: usize = 200;
 
@@ -117,7 +120,7 @@ pub mod sub_agent {
     /// Polling interval for checking validation status (milliseconds).
     pub const VALIDATION_POLL_MS: u64 = 500;
 
-    // OPT-SA-8: Circuit Breaker for Sub-Agent Execution
+    // Circuit Breaker for Sub-Agent Execution
     /// Number of consecutive failures before opening the circuit breaker.
     /// When reached, sub-agent executions are rejected until cooldown expires.
     pub const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
@@ -126,7 +129,7 @@ pub mod sub_agent {
     /// After this period, one execution is allowed to test if the system recovered.
     pub const CIRCUIT_COOLDOWN_SECS: u64 = 60;
 
-    // OPT-SA-10: Retry with Exponential Backoff
+    // Retry with Exponential Backoff
     /// Maximum number of retry attempts for transient errors.
     /// Set to 2 for a total of 3 attempts (initial + 2 retries).
     pub const MAX_RETRY_ATTEMPTS: u32 = 2;
@@ -160,100 +163,4 @@ pub mod calculator {
 
     /// Valid constant names
     pub const VALID_CONSTANTS: &[&str] = &["pi", "e", "tau", "sqrt2", "ln2", "ln10"];
-}
-
-// ===== Workflow Constants (OPT-WF-3, OPT-WF-9) =====
-/// Constants for workflow execution and streaming.
-#[allow(dead_code)]
-pub mod workflow {
-    /// Maximum number of messages to include in LLM context (OPT-WF-3).
-    /// Prevents context overflow while maintaining conversation coherence.
-    pub const MESSAGE_HISTORY_LIMIT: usize = 50;
-
-    // OPT-WF-9: Tokio Timeout Constants
-    /// Timeout (seconds) for LLM execution operations.
-    /// Default: 5 minutes - generous for complex reasoning tasks.
-    pub const LLM_EXECUTION_TIMEOUT_SECS: u64 = 300;
-
-    /// Timeout (seconds) for database operations (queries, updates).
-    /// Default: 30 seconds - should be sufficient for most queries.
-    pub const DB_OPERATION_TIMEOUT_SECS: u64 = 30;
-
-    /// Timeout (seconds) for loading workflow full state (multiple parallel queries).
-    /// Default: 60 seconds - accounts for multiple parallel queries.
-    pub const FULL_STATE_LOAD_TIMEOUT_SECS: u64 = 60;
-}
-
-// ===== Query Limits (OPT-DB-8) =====
-/// Default limits for database queries to prevent memory explosion.
-#[allow(dead_code)] // Some constants prepared for future use
-pub mod query_limits {
-    /// Default limit for list queries (e.g., list_memories, list_tasks)
-    pub const DEFAULT_LIST_LIMIT: usize = 1000;
-    /// Maximum allowed limit for list queries
-    pub const MAX_LIST_LIMIT: usize = 10_000;
-    /// Default limit for MCP call logs
-    pub const DEFAULT_MCP_LOGS_LIMIT: usize = 500;
-    /// Default limit for message history
-    pub const DEFAULT_MESSAGES_LIMIT: usize = 500;
-    /// Default limit for model list
-    pub const DEFAULT_MODELS_LIMIT: usize = 100;
-}
-
-// ===== Command Validation Constants (OPT-2) =====
-/// Centralized validation constants for Tauri commands.
-/// These constants define limits and valid values across the application.
-#[allow(dead_code)]
-pub mod commands {
-    // ----- Agent -----
-    /// Maximum length for agent names
-    pub const MAX_AGENT_NAME_LEN: usize = 64;
-    /// Maximum length for system prompts
-    pub const MAX_SYSTEM_PROMPT_LEN: usize = 10000;
-    /// Minimum temperature value for LLM
-    pub const MIN_TEMPERATURE: f32 = 0.0;
-    /// Maximum temperature value for LLM
-    pub const MAX_TEMPERATURE: f32 = 2.0;
-    /// Minimum max_tokens value
-    pub const MIN_MAX_TOKENS: usize = 256;
-    /// Maximum max_tokens value
-    pub const MAX_MAX_TOKENS: usize = 128000;
-    /// Valid lifecycle values
-    pub const VALID_LIFECYCLES: &[&str] = &["permanent", "temporary"];
-
-    // ----- MCP Server -----
-    /// Maximum length for MCP server names/IDs
-    pub const MAX_MCP_SERVER_NAME_LEN: usize = 64;
-    /// Maximum length for MCP server descriptions
-    pub const MAX_MCP_DESCRIPTION_LEN: usize = 1024;
-    /// Maximum number of command arguments
-    pub const MAX_MCP_ARGS_COUNT: usize = 50;
-    /// Maximum length for each command argument
-    pub const MAX_MCP_ARG_LEN: usize = 512;
-    /// Maximum number of environment variables
-    pub const MAX_MCP_ENV_COUNT: usize = 50;
-    /// Maximum length for environment variable names
-    pub const MAX_MCP_ENV_NAME_LEN: usize = 128;
-    /// Maximum length for environment variable values
-    pub const MAX_MCP_ENV_VALUE_LEN: usize = 4096;
-
-    // ----- Message -----
-    /// Maximum length for message content
-    pub const MAX_MESSAGE_CONTENT_LEN: usize = 100_000;
-
-    // ----- Tool Execution -----
-    /// Maximum length for tool names
-    pub const MAX_TOOL_NAME_LEN: usize = 128;
-    /// Maximum size for tool parameters (50KB)
-    pub const MAX_PARAMS_SIZE: usize = 50 * 1024;
-
-    // ----- Thinking -----
-    /// Maximum length for thinking content (50KB)
-    pub const MAX_THINKING_CONTENT_LEN: usize = 50 * 1024;
-
-    // ----- Models -----
-    /// Maximum length for model IDs
-    pub const MAX_MODEL_ID_LEN: usize = 128;
-    /// Valid model providers (lowercase)
-    pub const VALID_MODEL_PROVIDERS: &[&str] = &["mistral", "ollama"];
 }

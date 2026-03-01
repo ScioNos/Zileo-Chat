@@ -18,7 +18,7 @@
 //! captured during workflow execution. Thinking steps represent the agent's
 //! internal reasoning process before generating a response.
 //!
-//! Phase 4: Thinking Steps Persistence
+//! Provides persistence for thinking steps.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -47,8 +47,19 @@ pub struct ThinkingStep {
     /// Number of tokens in this step (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// Global ordering sequence within the execution (SA-019 P1/B8)
+    #[serde(default)]
+    pub sequence: u32,
+    /// Source of this reasoning step (SA-019 P1/B8): "agent_flow" or "model_thinking"
+    #[serde(default = "default_source")]
+    pub source: String,
     /// Timestamp when the step was recorded
     pub created_at: DateTime<Utc>,
+}
+
+/// Default source for backward compatibility with existing records
+fn default_source() -> String {
+    "agent_flow".to_string()
 }
 
 /// Payload for creating a new thinking step record.
@@ -72,6 +83,10 @@ pub struct ThinkingStepCreate {
     /// Token count (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// Global ordering sequence within the execution (SA-019 P1/B8)
+    pub sequence: u32,
+    /// Source of this reasoning step (SA-019 P1/B8): "agent_flow" or "model_thinking"
+    pub source: String,
 }
 
 impl ThinkingStepCreate {
@@ -99,6 +114,8 @@ impl ThinkingStepCreate {
             content,
             duration_ms: None,
             tokens: None,
+            sequence: 0,
+            source: "agent_flow".to_string(),
         }
     }
 
@@ -130,6 +147,8 @@ impl ThinkingStepCreate {
             content,
             duration_ms,
             tokens,
+            sequence: 0,
+            source: "agent_flow".to_string(),
         }
     }
 }
@@ -149,6 +168,8 @@ mod tests {
             content: "Analyzing the user request to understand the intent.".to_string(),
             duration_ms: Some(150),
             tokens: Some(20),
+            sequence: 0,
+            source: "agent_flow".to_string(),
             created_at: Utc::now(),
         };
 
@@ -170,6 +191,8 @@ mod tests {
             content: "Formulating a response based on available data.".to_string(),
             duration_ms: None,
             tokens: None,
+            sequence: 0,
+            source: "agent_flow".to_string(),
             created_at: Utc::now(),
         };
 

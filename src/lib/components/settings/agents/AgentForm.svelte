@@ -23,7 +23,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 -->
 
 <script lang="ts">
-	import { agentStore } from '$lib/stores/agents';
+	import { agentStore, agents } from '$lib/stores/agents';
 	import {
 		loadServers,
 		type MCPState,
@@ -39,12 +39,11 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		setProviderSettings
 	} from '$lib/stores/llm';
 	import type { ProviderType, LLMState } from '$types/llm';
-	import type { ProviderInfo } from '$types/customProvider';
+	import type { ProviderInfo } from '$types/custom-provider';
 	import type { AgentConfig, AgentConfigCreate, Lifecycle } from '$types/agent';
 	import { Button, Input, Textarea, Card, Badge } from '$lib/components/ui';
 	import { onMount } from 'svelte';
 	import { i18n, t } from '$lib/i18n';
-
 	/**
 	 * Component props
 	 */
@@ -65,6 +64,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	let provider = $state('mistral');
 	let model = $state('mistral-large-latest');
 	let maxToolIterations = $state(50);
+	let enableThinking = $state(true);
 	let selectedTools = $state<string[]>([]);
 	let selectedMcpServers = $state<string[]>([]);
 	let systemPrompt = $state('');
@@ -76,6 +76,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		provider = (agent?.llm.provider ?? 'mistral').toLowerCase();
 		model = agent?.llm.model ?? 'mistral-large-latest';
 		maxToolIterations = agent?.max_tool_iterations ?? 50;
+		enableThinking = agent?.enable_thinking ?? true;
 		selectedTools = agent?.tools ?? [];
 		selectedMcpServers = agent?.mcp_servers ?? [];
 		systemPrompt = agent?.system_prompt ?? '';
@@ -86,6 +87,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	/** UI state */
 	let saving = $state(false);
 	let errors = $state<Record<string, string>>({});
+	let loadWarnings = $state<string[]>([]);
 	let mcpState = $state<MCPState>(createInitialMCPState());
 	let llmState = $state<LLMState>(createInitialLLMState());
 	let providerList = $state<ProviderInfo[]>([]);
@@ -156,9 +158,8 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		try {
 			const servers = await loadServers();
 			mcpState = setServers(mcpState, servers);
-		} catch (err) {
-			console.warn('[AgentForm] Failed to load MCP servers:', err);
-			// MCP servers are optional - form still usable without them
+		} catch {
+			loadWarnings = [...loadWarnings, t('agents_mcp_load_failed')];
 		}
 
 		// Load LLM models and provider list
@@ -169,9 +170,8 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 				llmState = setProviderSettings(llmState, providerId, provSettings);
 			}
 			llmState = setModels(llmState, data.models);
-		} catch (err) {
-			console.warn('[AgentForm] Failed to load LLM models:', err);
-			// Will show empty model list - user will see no-models message
+		} catch {
+			loadWarnings = [...loadWarnings, t('agents_llm_load_failed')];
 		}
 	});
 
@@ -195,6 +195,14 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 
 		if (!name.trim() || name.length < 1 || name.length > 64) {
 			errors.name = t('agents_name_error');
+		} else {
+			const trimmedLower = name.trim().toLowerCase();
+			const isDuplicate = $agents.some(
+				(a) => a.name.toLowerCase() === trimmedLower && a.id !== agent?.id
+			);
+			if (isDuplicate) {
+				errors.name = t('agents_name_duplicate');
+			}
 		}
 
 		if (availableModels.length === 0) {
@@ -234,12 +242,14 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 				provider,
 				model,
 				temperature: selectedModel.temperature_default,
-				max_tokens: selectedModel.max_output_tokens
+				max_tokens: selectedModel.max_output_tokens,
+				is_reasoning: selectedModel.is_reasoning
 			},
 			tools: selectedTools,
 			mcp_servers: selectedMcpServers,
 			system_prompt: systemPrompt.trim(),
-			max_tool_iterations: maxToolIterations
+			max_tool_iterations: maxToolIterations,
+			enable_thinking: enableThinking
 		};
 
 		try {
@@ -311,6 +321,14 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 			<h3 class="form-title">
 				{mode === 'create' ? $i18n('agents_create_new') : $i18n('agents_edit')}
 			</h3>
+
+			{#if loadWarnings.length > 0}
+				<div class="load-warnings" role="status">
+					{#each loadWarnings as warning (warning)}
+						<p class="load-warning">{warning}</p>
+					{/each}
+				</div>
+			{/if}
 
 			<div class="form-grid">
 				<!-- Basic Information -->
@@ -510,6 +528,21 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		font-size: var(--font-size-lg);
 		font-weight: var(--font-weight-semibold);
 		margin: 0;
+	}
+
+	.load-warnings {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-xs);
+	}
+
+	.load-warning {
+		margin: 0;
+		padding: var(--spacing-xs) var(--spacing-sm);
+		font-size: var(--font-size-sm);
+		color: var(--color-warning);
+		background: var(--color-warning-bg, rgba(234, 179, 8, 0.1));
+		border-radius: var(--radius-sm);
 	}
 
 	.form-grid {

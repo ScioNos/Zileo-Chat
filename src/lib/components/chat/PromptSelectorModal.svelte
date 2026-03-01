@@ -44,6 +44,7 @@
 	import { PROMPT_CATEGORY_LABELS } from '$types/prompt';
 	import type { Prompt, PromptSummary, PromptCategory } from '$types/prompt';
 	import { i18n } from '$lib/i18n';
+	import { getErrorMessage } from '$lib/utils/error';
 
 	/**
 	 * PromptSelectorModal props
@@ -65,6 +66,7 @@
 	let selectedPrompt = $state<Prompt | null>(null);
 	let variableValues = $state<Record<string, string>>({});
 	let loadingPrompt = $state(false);
+	let promptLoadError = $state<string | null>(null);
 
 	// Category options for Select component (derived for i18n reactivity)
 	const categoryOptions = $derived([
@@ -121,16 +123,16 @@
 	 */
 	async function selectPromptFromList(summary: PromptSummary): Promise<void> {
 		loadingPrompt = true;
+		promptLoadError = null;
 		try {
 			const prompt = await promptStore.getPrompt(summary.id);
 			selectedPrompt = prompt;
-			// Initialize variable values with defaults or empty
 			variableValues = {};
 			for (const v of prompt.variables) {
 				variableValues[v.name] = v.defaultValue ?? '';
 			}
 		} catch (e) {
-			console.error('Failed to load prompt:', e);
+			promptLoadError = getErrorMessage(e);
 		} finally {
 			loadingPrompt = false;
 		}
@@ -162,6 +164,7 @@
 		variableValues = {};
 		searchQuery = '';
 		categoryFilter = '';
+		promptLoadError = null;
 		onclose?.();
 	}
 </script>
@@ -211,7 +214,11 @@
 					/>
 				</div>
 
-				{#if $promptLoading || loadingPrompt}
+				{#if promptLoadError}
+					<div class="empty-state">
+						<p>{promptLoadError}</p>
+					</div>
+				{:else if $promptLoading || loadingPrompt}
 					<div class="loading-state">
 						<Spinner />
 						<span>{$i18n('common_loading')}</span>

@@ -20,7 +20,9 @@
 //! - Command injection
 //! - Invalid data formats
 
+use serde::Serialize;
 use thiserror::Error;
+use tracing::warn;
 
 /// Maximum allowed length for workflow names
 pub const MAX_WORKFLOW_NAME_LEN: usize = 256;
@@ -319,9 +321,119 @@ impl Validator {
     }
 }
 
+/// Serializes a value to a JSON string for safe inclusion in SurrealDB queries.
+///
+/// Combines `serde_json::to_string()` with standardized warn logging
+/// and error formatting. Replaces the repeated serialize + map_err boilerplate.
+///
+/// # Arguments
+/// * `value` - The value to serialize (must implement Serialize)
+/// * `field_name` - The field name for error context (e.g. "name", "config")
+///
+/// # Returns
+/// The JSON-encoded string, or a formatted error string.
+pub fn serialize_for_query<T: Serialize + ?Sized>(
+    value: &T,
+    field_name: &str,
+) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| {
+        warn!(error = %e, "Failed to serialize {}", field_name);
+        format!("Failed to serialize {}: {}", field_name, e)
+    })
+}
+
+/// Validates a UUID and returns a formatted error with field context.
+///
+/// Combines `Validator::validate_uuid()` with standardized warn logging
+/// and error formatting. Replaces the repeated 4-line boilerplate pattern.
+///
+/// # Arguments
+/// * `value` - The UUID string to validate
+/// * `field_name` - The field name for error context (e.g. "workflow_id")
+///
+/// # Returns
+/// The validated UUID string, or a formatted error string.
+pub fn validate_uuid_field(value: &str, field_name: &str) -> Result<String, String> {
+    Validator::validate_uuid(value).map_err(|e| {
+        warn!(error = %e, "Invalid {}", field_name);
+        format!("Invalid {}: {}", field_name, e)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // serialize_for_query tests
+    #[test]
+    fn test_serialize_for_query_string() {
+        let result = serialize_for_query(&"hello world", "name");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "\"hello world\"");
+    }
+
+    #[test]
+    fn test_serialize_for_query_special_chars() {
+        let result = serialize_for_query(&"l'eau \"quoted\" back\\slash", "content");
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.starts_with('"'));
+        assert!(json.ends_with('"'));
+        // Verify it's valid JSON
+        let parsed: Result<String, _> = serde_json::from_str(&json);
+        assert!(parsed.is_ok());
+        assert_eq!(parsed.unwrap(), "l'eau \"quoted\" back\\slash");
+    }
+
+    #[test]
+    fn test_serialize_for_query_vec() {
+        let tools = vec!["tool_a", "tool_b"];
+        let result = serialize_for_query(&tools, "tools");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "[\"tool_a\",\"tool_b\"]");
+    }
+
+    #[test]
+    fn test_serialize_for_query_option_none() {
+        let value: Option<String> = None;
+        let result = serialize_for_query(&value, "optional_field");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "null");
+    }
+
+    // validate_uuid_field tests
+    #[test]
+    fn test_validate_uuid_field_valid() {
+        let result = validate_uuid_field("550e8400-e29b-41d4-a716-446655440000", "workflow_id");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_validate_uuid_field_invalid() {
+        let result = validate_uuid_field("not-a-uuid", "workflow_id");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Invalid workflow_id"),
+            "Error should contain field name: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_uuid_field_includes_field_name_in_error() {
+        let result = validate_uuid_field("bad", "task_id");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("task_id"));
+    }
+
+    #[test]
+    fn test_validate_uuid_field_trims_whitespace() {
+        let result = validate_uuid_field("  550e8400-e29b-41d4-a716-446655440000  ", "test_id");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+    }
 
     // Workflow name validation tests
     #[test]
@@ -475,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_validate_api_key_rejects_newlines() {
-        // OPT-4: Reject newlines (HTTP header injection prevention)
+        // Reject newlines (HTTP header injection prevention)
         let result = Validator::validate_api_key("sk-1234567890abcdef\nInjection");
         assert!(matches!(
             result,

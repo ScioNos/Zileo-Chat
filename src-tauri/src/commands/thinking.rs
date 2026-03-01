@@ -17,17 +17,17 @@
 //! Provides Tauri commands for saving and retrieving thinking step logs
 //! for workflow state recovery and agent reasoning transparency.
 //!
-//! Phase 4: Thinking Steps Persistence - Enables complete workflow state
-//! recovery with full reasoning history.
+//! Enables complete workflow state recovery with full reasoning history.
 
 use crate::{
+    constants::commands as cmd_const,
+    db::extract_count,
     models::{ThinkingStep, ThinkingStepCreate},
-    security::Validator,
-    tools::constants::commands as cmd_const,
+    security::validate_uuid_field,
     AppState,
 };
 use tauri::State;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument};
 use uuid::Uuid;
 
 /// Saves a new thinking step to the database.
@@ -66,23 +66,9 @@ pub async fn save_thinking_step(
 ) -> Result<String, String> {
     info!("Saving thinking step");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
-
-    // Validate message ID
-    let validated_message_id = Validator::validate_uuid(&message_id).map_err(|e| {
-        warn!(error = %e, "Invalid message_id");
-        format!("Invalid message_id: {}", e)
-    })?;
-
-    // Validate agent ID
-    let validated_agent_id = Validator::validate_uuid(&agent_id).map_err(|e| {
-        warn!(error = %e, "Invalid agent_id");
-        format!("Invalid agent_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
+    let validated_message_id = validate_uuid_field(&message_id, "message_id")?;
+    let validated_agent_id = validate_uuid_field(&agent_id, "agent_id")?;
 
     // Validate content
     if content.is_empty() {
@@ -106,6 +92,8 @@ pub async fn save_thinking_step(
         content,
         duration_ms,
         tokens,
+        sequence: 0,
+        source: "agent_flow".to_string(),
     };
 
     // Insert into database
@@ -137,11 +125,7 @@ pub async fn load_workflow_thinking_steps(
 ) -> Result<Vec<ThinkingStep>, String> {
     info!("Loading workflow thinking steps");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Use explicit field selection with meta::id(id) to avoid SurrealDB SDK
     // serialization issues with internal Thing type (see CLAUDE.md)
@@ -155,10 +139,12 @@ pub async fn load_workflow_thinking_steps(
             content,
             duration_ms,
             tokens,
+            sequence,
+            source,
             created_at
         FROM thinking_step
         WHERE workflow_id = '{}'
-        ORDER BY created_at ASC, step_number ASC"#,
+        ORDER BY sequence ASC, step_number ASC"#,
         validated_workflow_id
     );
 
@@ -198,11 +184,7 @@ pub async fn load_message_thinking_steps(
 ) -> Result<Vec<ThinkingStep>, String> {
     info!("Loading message thinking steps");
 
-    // Validate message ID
-    let validated_message_id = Validator::validate_uuid(&message_id).map_err(|e| {
-        warn!(error = %e, "Invalid message_id");
-        format!("Invalid message_id: {}", e)
-    })?;
+    let validated_message_id = validate_uuid_field(&message_id, "message_id")?;
 
     let query = format!(
         r#"SELECT
@@ -214,10 +196,12 @@ pub async fn load_message_thinking_steps(
             content,
             duration_ms,
             tokens,
+            sequence,
+            source,
             created_at
         FROM thinking_step
         WHERE message_id = '{}'
-        ORDER BY step_number ASC"#,
+        ORDER BY sequence ASC, step_number ASC"#,
         validated_message_id
     );
 
@@ -254,11 +238,7 @@ pub async fn delete_thinking_step(
 ) -> Result<(), String> {
     info!("Deleting thinking step");
 
-    // Validate step ID
-    let validated_id = Validator::validate_uuid(&step_id).map_err(|e| {
-        warn!(error = %e, "Invalid step ID");
-        format!("Invalid step ID: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&step_id, "step_id")?;
 
     // Use execute() with DELETE query to avoid SurrealDB SDK serialization issues
     state
@@ -289,11 +269,7 @@ pub async fn clear_workflow_thinking_steps(
 ) -> Result<u64, String> {
     info!("Clearing workflow thinking steps");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow ID");
-        format!("Invalid workflow ID: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // First count existing steps
     let count_query = format!(
@@ -303,11 +279,7 @@ pub async fn clear_workflow_thinking_steps(
     let count_result: Vec<serde_json::Value> =
         state.db.query(&count_query).await.unwrap_or_default();
 
-    let count = count_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0);
+    let count = extract_count(&count_result);
 
     // Delete all thinking steps for the workflow
     state

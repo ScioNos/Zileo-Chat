@@ -31,7 +31,7 @@
 		currentQuestion,
 		isSubmitting,
 		isModalOpen
-	} from '$lib/stores/userQuestion';
+	} from '$lib/stores/user-question';
 	import type { UserQuestionResponse } from '$types/user-question';
 
 	let selectedOptions = $state<string[]>([]);
@@ -85,7 +85,6 @@
 	 */
 	async function handleSubmit(): Promise<void> {
 		if (!$currentQuestion || !isValid()) {
-			console.warn('[UserQuestionModal] Submit blocked - invalid state');
 			return;
 		}
 
@@ -103,7 +102,6 @@
 	 */
 	async function handleSkip(): Promise<void> {
 		if (!$currentQuestion) {
-			console.warn('[UserQuestionModal] Skip blocked - no current question');
 			return;
 		}
 

@@ -29,7 +29,7 @@
 //! ```rust,ignore
 //! use zileo_chat::llm::{ProviderManager, ProviderType};
 //!
-//! let manager = ProviderManager::new();
+//! let manager = ProviderManager::new()?;
 //! manager.set_provider(ProviderType::Mistral, "api-key").await?;
 //! let response = manager.complete("Hello", "mistral-large").await?;
 //! ```
@@ -50,11 +50,11 @@ pub mod utils;
 pub use manager::ProviderManager;
 pub use provider::{LLMError, ProviderType};
 
-// Re-export retry utilities for external use (OPT-LLM-4)
+// Re-export retry utilities for external use
 #[allow(unused_imports)]
 pub use retry::{with_retry, RetryConfig};
 
-// Re-export circuit breaker utilities for external use (OPT-LLM-6)
+// Re-export circuit breaker utilities for external use
 #[allow(unused_imports)]
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 
@@ -63,10 +63,11 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use mistral::MistralProvider;
 #[allow(unused_imports)]
 pub use ollama::OllamaProvider;
+pub use ollama::DEFAULT_OLLAMA_URL;
 #[allow(unused_imports)]
 pub use provider::{LLMProvider, LLMResponse};
 
-// Embedding service exports (will be used by MemoryTool in Phase 3)
+// Embedding service exports
 #[allow(unused_imports)]
 pub use embedding::{
     EmbeddingConfig, EmbeddingError, EmbeddingProvider, EmbeddingService, MISTRAL_EMBED_DIMENSION,

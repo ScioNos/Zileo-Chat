@@ -17,13 +17,17 @@
 //! Provides Tauri commands for saving and retrieving conversation messages
 //! with associated metrics for workflow state recovery.
 //!
-//! Phase 6: Message Persistence - Enables complete workflow state recovery
-//! after application restart by persisting all messages to SurrealDB.
+//! Enables complete workflow state recovery after application restart
+//! by persisting all messages to SurrealDB.
 
 use crate::{
-    models::{Message, MessageCreate, PaginatedMessages},
-    security::Validator,
-    tools::constants::commands as cmd_const,
+    constants::commands as cmd_const,
+    db::extract_count,
+    models::{
+        merge_into_chat_blocks, ChatBlock, Message, MessageCreate, PaginatedMessages, ThinkingStep,
+        ToolExecution,
+    },
+    security::validate_uuid_field,
     AppState,
 };
 use tauri::State;
@@ -64,15 +68,12 @@ pub async fn save_message(
     model: Option<String>,
     provider: Option<String>,
     duration_ms: Option<u64>,
+    message_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     info!("Saving message");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Validate role
     let validated_role = match role.as_str() {
@@ -97,7 +98,11 @@ pub async fn save_message(
         ));
     }
 
-    let message_id = Uuid::new_v4().to_string();
+    // Use provided message_id (for block association) or generate new one
+    let message_id = match message_id {
+        Some(id) => validate_uuid_field(&id, "message_id")?,
+        None => Uuid::new_v4().to_string(),
+    };
 
     // Build MessageCreate payload
     let message = MessageCreate {
@@ -142,11 +147,7 @@ pub async fn load_workflow_messages(
 ) -> Result<Vec<Message>, String> {
     info!("Loading workflow messages");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // Use explicit field selection with meta::id(id) to avoid SurrealDB SDK
     // serialization issues with internal Thing type (see CLAUDE.md)
@@ -214,11 +215,7 @@ pub async fn load_workflow_messages_paginated(
 ) -> Result<PaginatedMessages, String> {
     info!("Loading paginated workflow messages");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     let limit = limit.unwrap_or(50).min(200); // Cap at 200 max
     let offset = offset.unwrap_or(0);
@@ -231,11 +228,7 @@ pub async fn load_workflow_messages_paginated(
     let count_result: Vec<serde_json::Value> =
         state.db.query(&count_query).await.unwrap_or_default();
 
-    let total = count_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0) as u32;
+    let total = extract_count(&count_result) as u32;
 
     // Load paginated messages
     let query = format!(
@@ -303,11 +296,7 @@ pub async fn load_workflow_messages_paginated(
 pub async fn delete_message(message_id: String, state: State<'_, AppState>) -> Result<(), String> {
     info!("Deleting message");
 
-    // Validate message ID
-    let validated_id = Validator::validate_uuid(&message_id).map_err(|e| {
-        warn!(error = %e, "Invalid message_id");
-        format!("Invalid message_id: {}", e)
-    })?;
+    let validated_id = validate_uuid_field(&message_id, "message_id")?;
 
     // Use execute() with DELETE query to avoid SurrealDB SDK serialization issues
     // (see CLAUDE.md - db.delete() has issues with table:id format)
@@ -339,11 +328,7 @@ pub async fn clear_workflow_messages(
 ) -> Result<u64, String> {
     info!("Clearing workflow messages");
 
-    // Validate workflow ID
-    let validated_workflow_id = Validator::validate_uuid(&workflow_id).map_err(|e| {
-        warn!(error = %e, "Invalid workflow_id");
-        format!("Invalid workflow_id: {}", e)
-    })?;
+    let validated_workflow_id = validate_uuid_field(&workflow_id, "workflow_id")?;
 
     // First count existing messages
     let count_query = format!(
@@ -353,11 +338,7 @@ pub async fn clear_workflow_messages(
     let count_result: Vec<serde_json::Value> =
         state.db.query(&count_query).await.unwrap_or_default();
 
-    let count = count_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0);
+    let count = extract_count(&count_result);
 
     // Delete all messages for the workflow
     state
@@ -374,6 +355,115 @@ pub async fn clear_workflow_messages(
 
     info!(count = count, "Workflow messages cleared");
     Ok(count)
+}
+
+/// Loads execution blocks (thinking steps + tool calls) for a message,
+/// merged and sorted by sequence for chronological display.
+///
+/// Queries both `tool_execution` and `thinking_step` tables for the given
+/// message_id, then merges them into a unified ordered stream of ChatBlocks.
+///
+/// # Arguments
+/// * `message_id` - The message ID to load blocks for
+///
+/// # Returns
+/// Vector of ChatBlocks sorted by sequence number
+#[tauri::command]
+#[instrument(name = "load_message_blocks", skip(state), fields(message_id = %message_id))]
+pub async fn load_message_blocks(
+    message_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ChatBlock>, String> {
+    info!("Loading message blocks");
+
+    let validated_message_id = validate_uuid_field(&message_id, "message_id")?;
+
+    // Query tool executions for this message
+    let tool_query = format!(
+        r#"SELECT
+            meta::id(id) AS id,
+            workflow_id,
+            message_id,
+            agent_id,
+            tool_type,
+            tool_name,
+            server_name,
+            input_params,
+            output_result,
+            success,
+            error_message,
+            duration_ms,
+            iteration,
+            sequence,
+            created_at
+        FROM tool_execution
+        WHERE message_id = '{}'
+        ORDER BY sequence ASC, created_at ASC"#,
+        validated_message_id
+    );
+
+    // Query thinking steps for this message
+    let thinking_query = format!(
+        r#"SELECT
+            meta::id(id) AS id,
+            workflow_id,
+            message_id,
+            agent_id,
+            step_number,
+            content,
+            duration_ms,
+            tokens,
+            sequence,
+            source,
+            created_at
+        FROM thinking_step
+        WHERE message_id = '{}'
+        ORDER BY sequence ASC, step_number ASC"#,
+        validated_message_id
+    );
+
+    // Execute both queries
+    let tool_json = state.db.query_json(&tool_query).await.map_err(|e| {
+        error!(error = %e, "Failed to load tool executions for blocks");
+        format!("Failed to load tool executions: {}", e)
+    })?;
+
+    let thinking_json = state.db.query_json(&thinking_query).await.map_err(|e| {
+        error!(error = %e, "Failed to load thinking steps for blocks");
+        format!("Failed to load thinking steps: {}", e)
+    })?;
+
+    // Deserialize tool executions
+    let tool_executions: Vec<ToolExecution> = tool_json
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<ToolExecution>, _>>()
+        .map_err(|e| {
+            error!(error = %e, "Failed to deserialize tool executions");
+            format!("Failed to deserialize tool executions: {}", e)
+        })?;
+
+    // Deserialize thinking steps
+    let thinking_steps: Vec<ThinkingStep> = thinking_json
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<ThinkingStep>, _>>()
+        .map_err(|e| {
+            error!(error = %e, "Failed to deserialize thinking steps");
+            format!("Failed to deserialize thinking steps: {}", e)
+        })?;
+
+    // Merge into unified ChatBlocks sorted by sequence
+    let blocks = merge_into_chat_blocks(&tool_executions, &thinking_steps);
+
+    info!(
+        tool_count = tool_executions.len(),
+        thinking_count = thinking_steps.len(),
+        total_blocks = blocks.len(),
+        "Message blocks loaded"
+    );
+
+    Ok(blocks)
 }
 
 #[cfg(test)]

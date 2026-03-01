@@ -19,11 +19,13 @@
 
 use crate::{
     commands::SecureKeyStore,
+    db::extract_count,
     llm::embedding::{EmbeddingProvider, EmbeddingService},
     models::{
         CategoryTokenStats, EmbeddingConfigSettings, EmbeddingTestResult, ExportFormat,
         ImportResult, Memory, MemoryStats, MemoryTokenStats, RegenerateResult,
     },
+    security::{serialize_for_query, validate_uuid_field},
     AppState,
 };
 use serde_json::json;
@@ -109,10 +111,7 @@ pub async fn save_embedding_config(
     // Serialize config to JSON string for embedding in query
     // Note: Using raw query instead of query_with_params due to SurrealDB SDK 2.x
     // serialization issues with complex types (see CLAUDE.md SurrealDB patterns)
-    let config_json_str = serde_json::to_string(&config).map_err(|e| {
-        error!(error = %e, "Failed to serialize embedding config");
-        format!("Failed to serialize config: {}", e)
-    })?;
+    let config_json_str = serialize_for_query(&config, "config")?;
 
     // Upsert configuration using raw query with embedded JSON
     // Use execute() to avoid SurrealDB SDK serialization issues with UPSERT return type
@@ -169,10 +168,16 @@ async fn update_embedding_service_internal(
     };
 
     if let Some(provider) = provider {
-        let service = EmbeddingService::with_provider(provider);
-        let mut guard = state.embedding_service.write().await;
-        *guard = Some(Arc::new(service));
-        info!("Embedding service updated successfully");
+        match EmbeddingService::with_provider(provider) {
+            Ok(service) => {
+                let mut guard = state.embedding_service.write().await;
+                *guard = Some(Arc::new(service));
+                info!("Embedding service updated successfully");
+            }
+            Err(e) => {
+                error!("Failed to create embedding service: {}", e);
+            }
+        }
     }
 }
 
@@ -189,11 +194,7 @@ pub async fn get_memory_stats(state: State<'_, AppState>) -> Result<MemoryStats,
         format!("Failed to get memory count: {}", e)
     })?;
 
-    let total = total_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0) as usize;
+    let total = extract_count(&total_result) as usize;
 
     // Get count with embeddings
     let with_embeddings_query =
@@ -204,11 +205,7 @@ pub async fn get_memory_stats(state: State<'_, AppState>) -> Result<MemoryStats,
         .await
         .unwrap_or_default();
 
-    let with_embeddings = with_result
-        .first()
-        .and_then(|v| v.get("count"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0) as usize;
+    let with_embeddings = extract_count(&with_result) as usize;
 
     // Get count by type
     let by_type_query = "SELECT type, count() AS count FROM memory GROUP BY type";
@@ -274,10 +271,7 @@ pub async fn update_memory(
 ) -> Result<Memory, String> {
     info!(memory_id = %memory_id, "Updating memory entry");
 
-    // Validate memory ID format
-    if memory_id.is_empty() {
-        return Err("Memory ID cannot be empty".to_string());
-    }
+    let memory_id = validate_uuid_field(&memory_id, "memory_id")?;
 
     // Build update fields
     let mut updates = Vec::new();
@@ -291,13 +285,12 @@ pub async fn update_memory(
             return Err("Content exceeds maximum length".to_string());
         }
         // Use JSON string encoding to properly escape all special characters
-        let content_json =
-            serde_json::to_string(trimmed).map_err(|e| format!("Invalid content: {}", e))?;
+        let content_json = serialize_for_query(trimmed, "content")?;
         updates.push(format!("content = {}", content_json));
     }
 
     if let Some(ref m) = metadata {
-        let meta_str = serde_json::to_string(m).map_err(|e| format!("Invalid metadata: {}", e))?;
+        let meta_str = serialize_for_query(m, "metadata")?;
         updates.push(format!("metadata = {}", meta_str));
     }
 
@@ -440,19 +433,27 @@ pub async fn import_memories(
 
         let metadata = mem.get("metadata").cloned().unwrap_or_else(|| json!({}));
 
-        // Create memory
-        // Sanitize content: remove null chars (SurrealDB panics on \0) and escape quotes
+        // Create memory using bind parameters to prevent injection
         let memory_id = uuid::Uuid::new_v4().to_string();
-        let sanitized_content = content.replace('\0', "").replace('\'', "''");
+        // Sanitize content: remove null chars (SurrealDB panics on \0)
+        let sanitized_content = content.replace('\0', "");
         let create_query = format!(
-            "CREATE memory:`{}` CONTENT {{ type: '{}', content: '{}', metadata: {} }}",
-            memory_id,
-            memory_type,
-            sanitized_content,
-            serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string())
+            "CREATE memory:`{}` CONTENT {{ type: $mtype, content: $content, metadata: $metadata }}",
+            memory_id
         );
 
-        match state.db.query::<serde_json::Value>(&create_query).await {
+        match state
+            .db
+            .execute_with_params(
+                &create_query,
+                vec![
+                    ("mtype".to_string(), serde_json::json!(memory_type)),
+                    ("content".to_string(), serde_json::json!(sanitized_content)),
+                    ("metadata".to_string(), metadata.clone()),
+                ],
+            )
+            .await
+        {
             Ok(_) => imported += 1,
             Err(e) => {
                 failed += 1;
@@ -496,15 +497,24 @@ pub async fn regenerate_embeddings(
     drop(service_guard);
 
     // Load memories (no ORDER BY needed for regeneration, just need id and content)
-    let query = match type_filter {
-        Some(ref mtype) => format!(
-            "SELECT meta::id(id) AS id, content FROM memory WHERE type = '{}'",
-            mtype
-        ),
-        None => "SELECT meta::id(id) AS id, content FROM memory".to_string(),
-    };
-
-    let memories: Vec<serde_json::Value> = state.db.query(&query).await.map_err(|e| {
+    let memories: Vec<serde_json::Value> = match type_filter {
+        Some(ref mtype) => {
+            state
+                .db
+                .query_json_with_params(
+                    "SELECT meta::id(id) AS id, content FROM memory WHERE type = $mtype",
+                    vec![("mtype".to_string(), serde_json::json!(mtype))],
+                )
+                .await
+        }
+        None => {
+            state
+                .db
+                .query_json("SELECT meta::id(id) AS id, content FROM memory")
+                .await
+        }
+    }
+    .map_err(|e| {
         error!(error = %e, "Failed to load memories for regeneration");
         format!("Failed to load memories: {}", e)
     })?;
@@ -688,31 +698,28 @@ pub async fn get_memory_token_stats(
 ) -> Result<MemoryTokenStats, String> {
     info!(type_filter = ?type_filter, "Getting memory token statistics");
 
-    // Build query with optional filter
-    let query = if let Some(ref mem_type) = type_filter {
-        format!(
-            r#"SELECT
-                type,
-                count() AS count,
-                math::sum(string::len(content)) AS total_chars,
-                count(embedding != NONE) AS with_embeddings
-            FROM memory
-            WHERE type = '{}'
-            GROUP BY type"#,
-            mem_type
-        )
-    } else {
-        r#"SELECT
+    // Build query with optional filter using bind parameters
+    let base_query = r#"SELECT
             type,
             count() AS count,
             math::sum(string::len(content)) AS total_chars,
             count(embedding != NONE) AS with_embeddings
-        FROM memory
-        GROUP BY type"#
-            .to_string()
-    };
+        FROM memory"#;
 
-    let results: Vec<serde_json::Value> = state.db.query_json(&query).await.map_err(|e| {
+    let results: Vec<serde_json::Value> = if let Some(ref mem_type) = type_filter {
+        let query = format!("{} WHERE type = $mtype GROUP BY type", base_query);
+        state
+            .db
+            .query_json_with_params(
+                &query,
+                vec![("mtype".to_string(), serde_json::json!(mem_type))],
+            )
+            .await
+    } else {
+        let query = format!("{} GROUP BY type", base_query);
+        state.db.query_json(&query).await
+    }
+    .map_err(|e| {
         error!(error = %e, "Failed to get token stats");
         format!("Failed to get token statistics: {}", e)
     })?;
@@ -789,5 +796,72 @@ mod tests {
 
         assert_eq!(serde_json::to_string(&json).unwrap(), "\"json\"");
         assert_eq!(serde_json::to_string(&csv).unwrap(), "\"csv\"");
+    }
+
+    #[tokio::test]
+    async fn test_import_memory_injection_safe() {
+        let state = crate::test_utils::setup_test_state().await;
+        // First seed a legitimate memory
+        crate::test_utils::seed_test_memory(&state.db).await;
+
+        // Attempt injection via memory content
+        let memory_id = uuid::Uuid::new_v4().to_string();
+        let injection_content = "Normal text'; DELETE memory WHERE '1'='1; --";
+        let sanitized = injection_content.replace('\0', "");
+        let create_query = format!(
+            "CREATE memory:`{}` CONTENT {{ type: $mtype, content: $content, metadata: $metadata }}",
+            memory_id
+        );
+        state
+            .db
+            .execute_with_params(
+                &create_query,
+                vec![
+                    ("mtype".to_string(), serde_json::json!("knowledge")),
+                    ("content".to_string(), serde_json::json!(sanitized)),
+                    ("metadata".to_string(), serde_json::json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // Verify the original memory still exists
+        let all: Vec<serde_json::Value> = state
+            .db
+            .query_json("SELECT meta::id(id) AS id FROM memory")
+            .await
+            .unwrap();
+        assert!(
+            all.len() >= 2,
+            "Both memories should exist (original + injected content)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_regenerate_type_filter_injection_safe() {
+        let state = crate::test_utils::setup_test_state().await;
+        crate::test_utils::seed_test_memory(&state.db).await;
+
+        // Attempt injection via type_filter parameter
+        let results: Vec<serde_json::Value> = state
+            .db
+            .query_json_with_params(
+                "SELECT meta::id(id) AS id, content FROM memory WHERE type = $mtype",
+                vec![(
+                    "mtype".to_string(),
+                    serde_json::json!("'; DROP TABLE memory; --"),
+                )],
+            )
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "Injection string should match nothing");
+
+        // Verify data is intact
+        let all: Vec<serde_json::Value> = state
+            .db
+            .query_json("SELECT meta::id(id) AS id FROM memory")
+            .await
+            .unwrap();
+        assert!(!all.is_empty(), "Memory data should be preserved");
     }
 }

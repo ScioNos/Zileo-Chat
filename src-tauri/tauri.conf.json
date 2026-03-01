@@ -1,6 +1,6 @@
 {
   "productName": "Zileo-Chat",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "identifier": "com.zileo.chat",
   "build": {
     "frontendDist": "../build",
@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
+      "csp": "default-src 'self' blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {

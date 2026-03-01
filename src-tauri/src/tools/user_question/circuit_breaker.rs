@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Circuit Breaker for UserQuestionTool Timeout Resilience (OPT-UQ-12)
+//! Circuit Breaker for UserQuestionTool Timeout Resilience
 //!
 //! Implements the circuit breaker pattern to prevent repeated questions when
 //! users are unresponsive. Opens after 3 consecutive timeouts, preventing
@@ -213,12 +213,6 @@ impl UserQuestionCircuitBreaker {
     /// Returns the current timeout count.
     pub fn timeout_count(&self) -> u32 {
         self.timeout_count
-    }
-
-    /// Returns the configured timeout threshold.
-    #[allow(dead_code)]
-    pub fn timeout_threshold(&self) -> u32 {
-        self.timeout_threshold
     }
 
     /// Returns the configured cooldown duration.

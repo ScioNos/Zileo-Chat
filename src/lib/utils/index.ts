@@ -21,16 +21,7 @@
  * Utility functions barrel export
  */
 export { debounce, throttle } from './debounce';
-export {
-	activeToolToActivity,
-	activeSubAgentToActivity,
-	activeReasoningToActivity,
-	formatActivityTime,
-	formatActivityDuration,
-	combineActivities,
-	filterActivities,
-	countActivitiesByType
-} from './activity';
+export { formatTokenCount } from './activity';
 export { getErrorMessage, isTauriError, formatErrorForDisplay } from './error';
 export {
 	createAsyncHandler,
@@ -39,3 +30,22 @@ export {
 	type AsyncHandlerOptions
 } from './async';
 export { createModalController, type ModalController, type ModalMode } from './modal.svelte';
+export { formatDuration } from './duration';
+export { groupByDate, type DateGroupLabel, type DateGroup } from './dateGrouping';
+export { isAllowedScheme } from './url';
+export {
+	ProviderTypeSchema,
+	LLMConfigSchema,
+	LLMModelSchema,
+	ProviderSettingsSchema,
+	LifecycleSchema,
+	AgentConfigSchema,
+	AgentSummarySchema,
+	MemoryTypeSchema,
+	MemorySchema,
+	type ValidatedLLMConfig,
+	type ValidatedAgentConfig,
+	type ValidatedAgentSummary,
+	type ValidatedMemory
+} from './validation-schemas';
+export { invokeValidated, createValidatedInvoke } from './validation-invoke';

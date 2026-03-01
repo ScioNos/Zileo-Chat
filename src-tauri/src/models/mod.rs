@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod agent;
+pub mod chat_block;
 pub mod custom_provider;
 pub mod embedding;
 pub mod function_calling;
@@ -40,14 +41,13 @@ pub use workflow::{
     WorkflowToolExecution,
 };
 
-// Re-export types for Phase 5 implementation
 #[allow(unused_imports)]
 pub use memory::{Memory, MemoryCreate, MemoryDescribeResult, MemorySearchResult, MemoryType};
-// Re-export types for Memory Tool Phase 3 implementation (currently unused)
+// Re-export memory types with embedding support
 #[allow(unused_imports)]
 pub use memory::MemoryCreateWithEmbedding;
 pub use streaming::{StreamChunk, WorkflowComplete};
-// Re-export task types for Phase 2 Commands implementation (currently unused)
+// Re-export task types
 #[allow(unused_imports)]
 pub use task::{Task, TaskCreate, TaskPriority, TaskStatus, TaskUpdate};
 // ValidationMode and TimeoutBehavior are used by frontend via UpdateValidationSettingsRequest
@@ -59,61 +59,66 @@ pub use validation::{
     ValidationSettings, ValidationStatus, ValidationType,
 };
 
-// Re-export types for future RAG/streaming phases (currently unused)
+// Re-export RAG/streaming types
 #[allow(unused_imports)]
 pub use memory::MemoryWithEmbedding;
 #[allow(unused_imports)]
 pub use streaming::{ChunkType, CompletionStatus};
 
-// Re-export MCP types for future phases (Phase 2: MCP Client, Phase 3: Commands)
+// Re-export MCP types
 #[allow(unused_imports)]
 pub use mcp::{
     MCPCallLog, MCPDeploymentMethod, MCPResource, MCPServer, MCPServerConfig, MCPServerCreate,
     MCPServerStatus, MCPTestResult, MCPTool, MCPToolCallRequest, MCPToolCallResult,
 };
 
-// Re-export types for future phases
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentStatus};
 
-// Re-export message types for Phase 6 Message Persistence
+// Re-export message types
 pub use message::{Message, MessageCreate, PaginatedMessages};
 // Re-export MessageRole for future use (currently used in commands/message.rs validation)
 #[allow(unused_imports)]
 pub use message::MessageRole;
 
-// Re-export tool execution types for Phase 3 Tool Execution Persistence
+// Re-export tool execution types
 pub use tool_execution::{ToolExecution, ToolExecutionCreate};
 // Re-export ToolType for future use (currently unused in commands)
 #[allow(unused_imports)]
 pub use tool_execution::ToolType;
 
-// Re-export thinking step types for Phase 4 Thinking Steps Persistence
+// Re-export thinking step types
 pub use thinking_step::{ThinkingStep, ThinkingStepCreate};
 
-// Re-export sub-agent types for Phase 6A Sub-Agent System Infrastructure
-// These will be used in Phase B/C/D when tools are implemented
+// Re-export chat block types
+pub use chat_block::{merge_into_chat_blocks, ChatBlock};
+// ChatBlockType is used by frontend via IPC
+#[allow(unused_imports)]
+pub use chat_block::ChatBlockType;
+
+// Re-export sub-agent types
 #[allow(unused_imports)]
 pub use sub_agent::{
     DelegateResult, ParallelBatchResult, ParallelTaskResult, SubAgentExecution,
     SubAgentExecutionComplete, SubAgentExecutionCreate, SubAgentMetrics, SubAgentSpawnResult,
     SubAgentStatus,
 };
-// Re-export sub-agent constants (for Phase B/C/D)
+// Re-export sub-agent constants
 #[allow(unused_imports)]
 pub use sub_agent::constants;
 
-// Re-export LLM model types for CRUD operations (Phase 2 will use these)
+// Re-export LLM model types for CRUD operations
+#[allow(unused_imports)]
+pub use llm_models::get_all_builtin_models;
 #[allow(unused_imports)]
 pub use llm_models::{
-    BuiltinModelParams, ConnectionTestResult, CreateModelRequest, LLMModel, ProviderSettings,
-    ProviderType, UpdateModelRequest,
+    ConnectionTestResult, CreateModelRequest, LLMModel, ProviderSettings, UpdateModelRequest,
 };
-// Re-export builtin model data (Phase 2 will use these for seeding)
+// ProviderType canonical location: llm/provider.rs (SA-023/P1)
 #[allow(unused_imports)]
-pub use llm_models::{get_all_builtin_models, MISTRAL_BUILTIN_MODELS, OLLAMA_BUILTIN_MODELS};
+pub use crate::llm::ProviderType;
 
-// Re-export embedding settings types for Phase 5 implementation
+// Re-export embedding settings types
 pub use embedding::{
     CategoryTokenStats, EmbeddingConfigSettings, EmbeddingTestResult, ExportFormat, ImportResult,
     MemoryStats, MemoryTokenStats, RegenerateResult,

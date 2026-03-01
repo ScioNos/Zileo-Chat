@@ -19,17 +19,15 @@
 //! that requires custom HTTP handling.
 
 use super::provider::{LLMError, LLMProvider, LLMResponse, ProviderType};
-use super::utils::simulate_streaming;
 use async_trait::async_trait;
 use rig::completion::Prompt;
 use rig::providers::mistral;
 use serde::{Deserialize, Serialize};
 
-// Import trait to bring completion_model method into scope
-#[allow(unused_imports)]
+// Trait required for .agent() method on rig::client::Client
 use rig::client::CompletionClient;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
 // ============================================================================
@@ -70,6 +68,15 @@ struct MistralChoice {
     finish_reason: Option<String>,
 }
 
+/// Parsed content from Mistral API response, separating text from thinking blocks
+#[derive(Debug, Clone)]
+pub struct ParsedContent {
+    /// The text content (final answer)
+    pub text: String,
+    /// Thinking content from reasoning models (if present)
+    pub thinking: Option<String>,
+}
+
 /// Response message - content can be string or array of content blocks
 #[derive(Debug, Deserialize)]
 struct MistralResponseMessage {
@@ -77,7 +84,7 @@ struct MistralResponseMessage {
     role: String,
     /// Content can be a simple string or an array of content blocks (reasoning models)
     #[serde(deserialize_with = "deserialize_content")]
-    content: String,
+    content: ParsedContent,
 }
 
 /// Content block for reasoning models (thinking or text)
@@ -164,8 +171,9 @@ struct MistralToolResponseMessage {
     tool_calls: Option<Vec<serde_json::Value>>,
 }
 
-/// Custom deserializer for content field that handles both string and array formats
-fn deserialize_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+/// Custom deserializer for content field that handles both string and array formats.
+/// Returns ParsedContent with separated text and thinking content.
+fn deserialize_content<'de, D>(deserializer: D) -> Result<ParsedContent, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -174,7 +182,7 @@ where
     struct ContentVisitor;
 
     impl<'de> Visitor<'de> for ContentVisitor {
-        type Value = String;
+        type Value = ParsedContent;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a string or an array of content blocks")
@@ -185,14 +193,20 @@ where
         where
             E: de::Error,
         {
-            Ok(value.to_string())
+            Ok(ParsedContent {
+                text: value.to_string(),
+                thinking: None,
+            })
         }
 
         fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
         where
             E: de::Error,
         {
-            Ok(value)
+            Ok(ParsedContent {
+                text: value,
+                thinking: None,
+            })
         }
 
         // Reasoning models: content is an array of blocks
@@ -200,46 +214,42 @@ where
         where
             A: de::SeqAccess<'de>,
         {
-            let mut result = String::new();
+            let mut text_parts = String::new();
+            let mut thinking_parts = String::new();
 
             while let Some(block) = seq.next_element::<ContentBlock>()? {
                 match block {
                     ContentBlock::Thinking { thinking } => {
-                        // Optionally include thinking content (could be configurable)
-                        // For now, we skip thinking and only return the final answer
+                        for tb in &thinking {
+                            if !thinking_parts.is_empty() {
+                                thinking_parts.push('\n');
+                            }
+                            thinking_parts.push_str(&tb.text);
+                        }
                         debug!("Reasoning model thinking blocks: {} items", thinking.len());
                     }
                     ContentBlock::Text { text } => {
-                        if !result.is_empty() {
-                            result.push('\n');
+                        if !text_parts.is_empty() {
+                            text_parts.push('\n');
                         }
-                        result.push_str(&text);
+                        text_parts.push_str(&text);
                     }
                 }
             }
 
-            Ok(result)
+            Ok(ParsedContent {
+                text: text_parts,
+                thinking: if thinking_parts.is_empty() {
+                    None
+                } else {
+                    Some(thinking_parts)
+                },
+            })
         }
     }
 
     deserializer.deserialize_any(ContentVisitor)
 }
-
-/// Available Mistral models
-pub const MISTRAL_MODELS: &[&str] = &[
-    "mistral-large-latest",
-    "mistral-medium-latest",
-    "mistral-small-latest",
-    "magistral-small-latest",
-    "magistral-medium-latest",
-    "open-mistral-7b",
-    "open-mixtral-8x7b",
-    "open-mixtral-8x22b",
-    "codestral-latest",
-];
-
-/// Default Mistral model
-pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-large-latest";
 
 /// Mistral AI provider implementation
 pub struct MistralProvider {
@@ -254,15 +264,12 @@ pub struct MistralProvider {
 /// Mistral API base URL
 const MISTRAL_API_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 
-/// Models that are reasoning models and require custom HTTP handling
-const REASONING_MODELS: &[&str] = &["magistral-small-latest", "magistral-medium-latest"];
-
 #[allow(dead_code)]
 impl MistralProvider {
     /// Creates a new unconfigured Mistral provider with a shared HTTP client.
     ///
     /// The HTTP client is used for direct API calls (reasoning models, tool calls)
-    /// and provides connection pooling for better performance (OPT-LLM-2).
+    /// and provides connection pooling for better performance.
     pub fn new(http_client: Arc<reqwest::Client>) -> Self {
         Self {
             client: Arc::new(RwLock::new(None)),
@@ -315,13 +322,6 @@ impl MistralProvider {
     /// Gets the API key if configured
     pub async fn get_api_key(&self) -> Option<String> {
         self.api_key.read().await.clone()
-    }
-
-    /// Checks if a model is a reasoning model (Magistral)
-    fn is_reasoning_model(model: &str) -> bool {
-        REASONING_MODELS
-            .iter()
-            .any(|m| model.contains(m) || m.contains(model))
     }
 
     /// Makes a direct HTTP call to Mistral API
@@ -417,7 +417,9 @@ impl MistralProvider {
             .next()
             .ok_or_else(|| LLMError::RequestFailed("No choices in response".to_string()))?;
 
-        let content = choice.message.content;
+        let parsed = choice.message.content;
+        let content = parsed.text;
+        let thinking_content = parsed.thinking;
         let finish_reason = choice.finish_reason;
 
         // Get token counts from usage if available, otherwise estimate
@@ -432,12 +434,22 @@ impl MistralProvider {
             (estimate(prompt) + estimate(system_text), estimate(&content))
         };
 
-        info!(
-            tokens_input = tokens_input,
-            tokens_output = tokens_output,
-            response_len = content.len(),
-            "Mistral reasoning model completion successful"
-        );
+        if thinking_content.is_some() {
+            info!(
+                tokens_input = tokens_input,
+                tokens_output = tokens_output,
+                response_len = content.len(),
+                thinking_len = thinking_content.as_ref().map_or(0, |t| t.len()),
+                "Mistral reasoning model completion with thinking"
+            );
+        } else {
+            info!(
+                tokens_input = tokens_input,
+                tokens_output = tokens_output,
+                response_len = content.len(),
+                "Mistral reasoning model completion successful"
+            );
+        }
 
         Ok(LLMResponse {
             content,
@@ -446,6 +458,7 @@ impl MistralProvider {
             model: model.to_string(),
             provider: ProviderType::Mistral,
             finish_reason,
+            thinking_content,
         })
     }
 
@@ -470,8 +483,8 @@ impl MistralProvider {
     )]
     pub async fn complete_with_tools(
         &self,
-        messages: Vec<serde_json::Value>,
-        tools: Vec<serde_json::Value>,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
         tool_choice: Option<serde_json::Value>,
         model: &str,
         temperature: f32,
@@ -486,10 +499,14 @@ impl MistralProvider {
 
         let request_body = MistralToolChatRequest {
             model: model.to_string(),
-            messages,
+            messages: messages.to_vec(),
             temperature: Some(temperature),
             max_tokens: Some(max_tokens),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: if tools.is_empty() {
+                None
+            } else {
+                Some(tools.to_vec())
+            },
             tool_choice,
         };
 
@@ -563,22 +580,6 @@ impl MistralProvider {
     }
 }
 
-impl Default for MistralProvider {
-    /// Creates a default MistralProvider with a new HTTP client.
-    ///
-    /// Note: For production use, prefer using `new()` with a shared HTTP client
-    /// from ProviderManager to benefit from connection pooling.
-    fn default() -> Self {
-        let http_client = Arc::new(
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .build()
-                .expect("Failed to create HTTP client"),
-        );
-        Self::new(http_client)
-    }
-}
-
 #[async_trait]
 impl LLMProvider for MistralProvider {
     fn provider_type(&self) -> ProviderType {
@@ -586,11 +587,11 @@ impl LLMProvider for MistralProvider {
     }
 
     fn available_models(&self) -> Vec<String> {
-        MISTRAL_MODELS.iter().map(|s| s.to_string()).collect()
+        Vec::new()
     }
 
     fn default_model(&self) -> String {
-        DEFAULT_MISTRAL_MODEL.to_string()
+        String::new()
     }
 
     fn is_configured(&self) -> bool {
@@ -606,7 +607,7 @@ impl LLMProvider for MistralProvider {
         skip(self, prompt, system_prompt),
         fields(
             provider = "mistral",
-            model = %model.unwrap_or(DEFAULT_MISTRAL_MODEL),
+            model = %model.unwrap_or("unknown"),
             prompt_len = prompt.len()
         )
     )]
@@ -617,12 +618,14 @@ impl LLMProvider for MistralProvider {
         model: Option<&str>,
         temperature: f32,
         max_tokens: usize,
+        is_reasoning: bool,
     ) -> Result<LLMResponse, LLMError> {
-        let model_name = model.unwrap_or(DEFAULT_MISTRAL_MODEL);
+        let model_name = model.unwrap_or("mistral-large-latest");
 
-        // Use custom HTTP client for reasoning models (Magistral)
-        // because rig-core doesn't support their response format
-        if Self::is_reasoning_model(model_name) {
+        // Use custom HTTP client for reasoning models (e.g. Magistral)
+        // because rig-core doesn't support their response format.
+        // is_reasoning comes from the DB (set by user when creating the model).
+        if is_reasoning {
             debug!(
                 model = model_name,
                 "Using custom HTTP client for reasoning model"
@@ -681,32 +684,8 @@ impl LLMProvider for MistralProvider {
             model: model_name.to_string(),
             provider: ProviderType::Mistral,
             finish_reason: Some("stop".to_string()),
+            thinking_content: None,
         })
-    }
-
-    #[instrument(
-        name = "mistral_complete_stream",
-        skip(self, prompt, system_prompt),
-        fields(
-            provider = "mistral",
-            model = %model.unwrap_or(DEFAULT_MISTRAL_MODEL)
-        )
-    )]
-    async fn complete_stream(
-        &self,
-        prompt: &str,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        temperature: f32,
-        max_tokens: usize,
-    ) -> Result<mpsc::Receiver<Result<String, LLMError>>, LLMError> {
-        // For now, we'll simulate streaming by chunking the non-streaming response
-        // True streaming will require updates to rig-core's streaming API
-        let response = self
-            .complete(prompt, system_prompt, model, temperature, max_tokens)
-            .await?;
-
-        Ok(simulate_streaming(response.content, None, None))
     }
 }
 
@@ -714,37 +693,41 @@ impl LLMProvider for MistralProvider {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mistral_models() {
-        assert!(MISTRAL_MODELS.contains(&"mistral-large-latest"));
-        assert!(MISTRAL_MODELS.contains(&"mistral-small-latest"));
-        assert!(MISTRAL_MODELS.len() >= 5);
+    /// Creates a MistralProvider with a test HTTP client.
+    fn test_mistral_provider() -> MistralProvider {
+        let http_client = Arc::new(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("test HTTP client"),
+        );
+        MistralProvider::new(http_client)
     }
 
     #[test]
     fn test_mistral_provider_new() {
-        let provider = MistralProvider::default();
-        assert_eq!(provider.provider_type(), ProviderType::Mistral);
-        assert_eq!(provider.default_model(), DEFAULT_MISTRAL_MODEL);
-    }
-
-    #[test]
-    fn test_mistral_provider_default() {
-        let provider = MistralProvider::default();
+        let provider = test_mistral_provider();
         assert_eq!(provider.provider_type(), ProviderType::Mistral);
     }
 
     #[test]
-    fn test_mistral_available_models() {
-        let provider = MistralProvider::default();
+    fn test_mistral_available_models_empty() {
+        // Models are now managed in DB, not hardcoded
+        let provider = test_mistral_provider();
         let models = provider.available_models();
-        assert!(!models.is_empty());
-        assert!(models.contains(&"mistral-large-latest".to_string()));
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_mistral_default_model_empty() {
+        // Default model is now managed in DB, not hardcoded
+        let provider = test_mistral_provider();
+        assert!(provider.default_model().is_empty());
     }
 
     #[tokio::test]
     async fn test_mistral_provider_configure() {
-        let provider = MistralProvider::default();
+        let provider = test_mistral_provider();
 
         // Initially not configured
         assert!(!provider.is_configured());
@@ -763,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mistral_provider_get_api_key() {
-        let provider = MistralProvider::default();
+        let provider = test_mistral_provider();
 
         // Initially no key
         assert!(provider.get_api_key().await.is_none());
@@ -778,9 +761,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_mistral_provider_complete_not_configured() {
-        let provider = MistralProvider::default();
+        let provider = test_mistral_provider();
 
-        let result = provider.complete("Hello", None, None, 0.7, 1000).await;
+        let result = provider
+            .complete("Hello", None, None, 0.7, 1000, false)
+            .await;
 
         assert!(result.is_err());
         match result {
@@ -790,33 +775,17 @@ mod tests {
     }
 
     #[test]
-    fn test_is_reasoning_model() {
-        // Reasoning models (Magistral)
-        assert!(MistralProvider::is_reasoning_model(
-            "magistral-small-latest"
-        ));
-        assert!(MistralProvider::is_reasoning_model(
-            "magistral-medium-latest"
-        ));
-
-        // Standard models
-        assert!(!MistralProvider::is_reasoning_model("mistral-large-latest"));
-        assert!(!MistralProvider::is_reasoning_model("mistral-small-latest"));
-        assert!(!MistralProvider::is_reasoning_model("codestral-latest"));
-        assert!(!MistralProvider::is_reasoning_model("open-mistral-7b"));
-    }
-
-    #[test]
     fn test_deserialize_standard_content() {
-        // Test standard string content
+        // Test standard string content - no thinking
         let json = r#"{"role": "assistant", "content": "Hello world"}"#;
         let msg: MistralResponseMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.content, "Hello world");
+        assert_eq!(msg.content.text, "Hello world");
+        assert!(msg.content.thinking.is_none());
     }
 
     #[test]
-    fn test_deserialize_reasoning_content() {
-        // Test reasoning model content (array format)
+    fn test_deserialize_reasoning_content_extracts_thinking() {
+        // Test reasoning model content (array format) - thinking is now captured
         let json = r#"{
             "role": "assistant",
             "content": [
@@ -825,12 +794,32 @@ mod tests {
             ]
         }"#;
         let msg: MistralResponseMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.content, "The answer is 42");
+        assert_eq!(msg.content.text, "The answer is 42");
+        assert_eq!(msg.content.thinking, Some("Let me think...".to_string()));
+    }
+
+    #[test]
+    fn test_deserialize_reasoning_multiple_thinking_blocks() {
+        // Test reasoning model with multiple thinking blocks concatenated
+        let json = r#"{
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": [{"type": "text", "text": "Step 1: analyze"}]},
+                {"type": "thinking", "thinking": [{"type": "text", "text": "Step 2: compute"}]},
+                {"type": "text", "text": "The result is 7"}
+            ]
+        }"#;
+        let msg: MistralResponseMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.text, "The result is 7");
+        assert_eq!(
+            msg.content.thinking,
+            Some("Step 1: analyze\nStep 2: compute".to_string())
+        );
     }
 
     #[test]
     fn test_deserialize_reasoning_multiple_text_blocks() {
-        // Test reasoning model with multiple text blocks
+        // Test reasoning model with multiple text blocks, no thinking
         let json = r#"{
             "role": "assistant",
             "content": [
@@ -839,6 +828,28 @@ mod tests {
             ]
         }"#;
         let msg: MistralResponseMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.content, "First part\nSecond part");
+        assert_eq!(msg.content.text, "First part\nSecond part");
+        assert!(msg.content.thinking.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_thinking_with_multiple_sub_blocks() {
+        // Test thinking block with multiple text sub-blocks
+        let json = r#"{
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": [
+                    {"type": "text", "text": "First thought"},
+                    {"type": "text", "text": "Second thought"}
+                ]},
+                {"type": "text", "text": "Final answer"}
+            ]
+        }"#;
+        let msg: MistralResponseMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.text, "Final answer");
+        assert_eq!(
+            msg.content.thinking,
+            Some("First thought\nSecond thought".to_string())
+        );
     }
 }

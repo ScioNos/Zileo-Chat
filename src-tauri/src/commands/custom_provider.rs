@@ -18,7 +18,10 @@
 
 use crate::commands::SecureKeyStore;
 use crate::llm::openai_compatible::OpenAiCompatibleProvider;
-use crate::models::custom_provider::{CustomProvider, ProviderInfo};
+use crate::models::custom_provider::{
+    check_http_warning, CustomProvider, CustomProviderResponse, ProviderInfo,
+};
+use crate::security::serialize_for_query;
 use crate::state::AppState;
 use std::sync::Arc;
 use tauri::State;
@@ -108,6 +111,9 @@ pub async fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderIn
 ///
 /// Stores metadata in DB, API key in SecureKeyStore, and registers
 /// the provider in ProviderManager's HashMap.
+///
+/// Returns `CustomProviderResponse` which includes the provider info
+/// and an optional security warning (e.g., HTTP without TLS).
 #[tauri::command]
 #[instrument(name = "create_custom_provider", skip(state, keystore, api_key))]
 pub async fn create_custom_provider(
@@ -117,7 +123,7 @@ pub async fn create_custom_provider(
     api_key: String,
     state: State<'_, AppState>,
     keystore: State<'_, SecureKeyStore>,
-) -> Result<ProviderInfo, String> {
+) -> Result<CustomProviderResponse, String> {
     // Validate inputs
     validate_provider_name(&name)?;
 
@@ -178,21 +184,98 @@ pub async fn create_custom_provider(
         .register_custom_provider(&name, provider)
         .await;
 
+    // Check for HTTP security warning on non-localhost URLs
+    let warning = check_http_warning(&normalized_url);
+    if warning.is_some() {
+        warn!(
+            name = %name,
+            url = %normalized_url,
+            "Custom provider created with insecure HTTP URL"
+        );
+    }
+
     info!(name = %name, display_name = %display_name, "Custom provider created");
 
-    Ok(ProviderInfo {
-        id: name,
-        display_name,
-        is_builtin: false,
-        is_cloud: true,
-        requires_api_key: true,
-        has_base_url: true,
-        base_url: Some(normalized_url),
-        enabled: true,
+    Ok(CustomProviderResponse {
+        provider: ProviderInfo {
+            id: name,
+            display_name,
+            is_builtin: false,
+            is_cloud: true,
+            requires_api_key: true,
+            has_base_url: true,
+            base_url: Some(normalized_url),
+            enabled: true,
+        },
+        warning,
     })
 }
 
+/// Validates and builds SET clauses for provider update fields.
+fn build_provider_update_clauses(
+    display_name: &Option<String>,
+    base_url: &Option<String>,
+    enabled: Option<bool>,
+) -> Result<Vec<String>, String> {
+    let mut set_parts: Vec<String> = Vec::new();
+
+    if let Some(ref dn) = display_name {
+        if dn.trim().is_empty() || dn.len() > 128 {
+            return Err("Display name must be 1-128 characters".into());
+        }
+        set_parts.push(format!(
+            "display_name = {}",
+            serialize_for_query(dn, "display_name")?
+        ));
+    }
+    if let Some(ref url) = base_url {
+        if url.trim().is_empty() || url.len() > 512 {
+            return Err("Base URL must be 1-512 characters".into());
+        }
+        let normalized = url.trim_end_matches('/');
+        set_parts.push(format!(
+            "base_url = {}",
+            serialize_for_query(normalized, "base_url")?
+        ));
+    }
+    if let Some(en) = enabled {
+        set_parts.push(format!("enabled = {}", en));
+    }
+
+    if !set_parts.is_empty() {
+        set_parts.push("updated_at = time::now()".to_string());
+    }
+
+    Ok(set_parts)
+}
+
+/// Reconfigures a running provider if URL or API key changed.
+async fn reconfigure_provider_runtime(
+    provider: &Arc<OpenAiCompatibleProvider>,
+    name: &str,
+    api_key: &Option<String>,
+    base_url: &Option<String>,
+    keystore: &SecureKeyStore,
+) {
+    let current_key = if let Some(ref key) = api_key {
+        key.clone()
+    } else {
+        keystore.get_key(name).unwrap_or_default()
+    };
+    let current_url = if let Some(ref url) = base_url {
+        url.trim_end_matches('/').to_string()
+    } else {
+        provider.get_base_url().await.unwrap_or_default()
+    };
+    if let Err(e) = provider.configure(&current_key, &current_url).await {
+        warn!(name = %name, error = %e, "Failed to reconfigure custom provider");
+    }
+}
+
 /// Updates an existing custom provider.
+///
+/// Returns `CustomProviderResponse` which includes the provider info
+/// and an optional security warning (e.g., HTTP without TLS).
 #[tauri::command]
 #[instrument(name = "update_custom_provider", skip(state, keystore, api_key))]
 pub async fn update_custom_provider(
@@ -203,39 +286,14 @@ pub async fn update_custom_provider(
     enabled: Option<bool>,
     state: State<'_, AppState>,
     keystore: State<'_, SecureKeyStore>,
-) -> Result<ProviderInfo, String> {
+) -> Result<CustomProviderResponse, String> {
     validate_provider_name(&name)?;
 
     let db = &state.db;
 
-    // Build SET clauses dynamically
-    let mut set_parts: Vec<String> = Vec::new();
-
-    if let Some(ref dn) = display_name {
-        if dn.trim().is_empty() || dn.len() > 128 {
-            return Err("Display name must be 1-128 characters".into());
-        }
-        set_parts.push(format!(
-            "display_name = {}",
-            serde_json::to_string(dn).map_err(|e| e.to_string())?
-        ));
-    }
-    if let Some(ref url) = base_url {
-        if url.trim().is_empty() || url.len() > 512 {
-            return Err("Base URL must be 1-512 characters".into());
-        }
-        let normalized = url.trim_end_matches('/');
-        set_parts.push(format!(
-            "base_url = {}",
-            serde_json::to_string(normalized).map_err(|e| e.to_string())?
-        ));
-    }
-    if let Some(en) = enabled {
-        set_parts.push(format!("enabled = {}", en));
-    }
-
+    // Build and execute SET clauses
+    let set_parts = build_provider_update_clauses(&display_name, &base_url, enabled)?;
     if !set_parts.is_empty() {
-        set_parts.push("updated_at = time::now()".to_string());
         let update_query = format!(
             "UPDATE custom_provider:`{}` SET {}",
             name,
@@ -259,19 +317,7 @@ pub async fn update_custom_provider(
     // Reconfigure provider in manager if URL or key changed
     if api_key.is_some() || base_url.is_some() {
         if let Some(provider) = state.llm_manager.get_custom_provider(&name).await {
-            let current_key = if let Some(ref key) = api_key {
-                key.clone()
-            } else {
-                keystore.get_key(&name).unwrap_or_default()
-            };
-            let current_url = if let Some(ref url) = base_url {
-                url.trim_end_matches('/').to_string()
-            } else {
-                provider.get_base_url().await.unwrap_or_default()
-            };
-            if let Err(e) = provider.configure(&current_key, &current_url).await {
-                warn!(name = %name, error = %e, "Failed to reconfigure custom provider");
-            }
+            reconfigure_provider_runtime(&provider, &name, &api_key, &base_url, &keystore).await;
         }
     }
 
@@ -290,17 +336,30 @@ pub async fn update_custom_provider(
         .and_then(|v| serde_json::from_value(v).ok())
         .ok_or_else(|| format!("Provider '{}' not found after update", name))?;
 
+    // Check for HTTP security warning on the current base URL
+    let warning = check_http_warning(&cp.base_url);
+    if warning.is_some() {
+        warn!(
+            name = %name,
+            url = %cp.base_url,
+            "Custom provider updated with insecure HTTP URL"
+        );
+    }
+
     info!(name = %name, "Custom provider updated");
 
-    Ok(ProviderInfo {
-        id: cp.name,
-        display_name: cp.display_name,
-        is_builtin: false,
-        is_cloud: true,
-        requires_api_key: true,
-        has_base_url: true,
-        base_url: Some(cp.base_url),
-        enabled: cp.enabled,
+    Ok(CustomProviderResponse {
+        provider: ProviderInfo {
+            id: cp.name,
+            display_name: cp.display_name,
+            is_builtin: false,
+            is_cloud: true,
+            requires_api_key: true,
+            has_base_url: true,
+            base_url: Some(cp.base_url),
+            enabled: cp.enabled,
+        },
+        warning,
     })
 }
 
