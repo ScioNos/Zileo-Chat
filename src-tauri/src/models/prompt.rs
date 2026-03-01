@@ -20,12 +20,18 @@
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// Regex pattern for detecting `{{variable_name}}` placeholders in prompt templates.
 static VARIABLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}").expect("Invalid regex pattern")
+});
+
+/// Regex pattern for detecting `{{skill:skill_name}}` references in prompt templates.
+/// Separate from VARIABLE_PATTERN because `:` is not matched by the variable regex.
+static SKILL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{\{skill:([a-zA-Z0-9_-]+)\}\}").expect("Invalid skill regex pattern")
 });
 
 // ===== Enums =====
@@ -149,29 +155,18 @@ impl Prompt {
         variables
     }
 
-    /// Interpolate variables into content
+    /// Interpolate skill references in content.
     ///
-    /// Variables not found in the values map are left unchanged.
-    ///
-    /// # Example
-    /// ```
-    /// use zileo_chat::models::Prompt;
-    /// use std::collections::HashMap;
-    /// let content = "Hello {{name}}!";
-    /// let mut values = HashMap::new();
-    /// values.insert("name".to_string(), "Alice".to_string());
-    /// let result = Prompt::interpolate(content, &values);
-    /// assert_eq!(result, "Hello Alice!");
-    /// ```
-    #[allow(dead_code)]
-    pub fn interpolate(content: &str, values: &HashMap<String, String>) -> String {
-        VARIABLE_PATTERN
+    /// Replaces `{{skill:name}}` with an instruction for the LLM to read the skill.
+    /// Called in the streaming pipeline after variable interpolation.
+    pub fn interpolate_skills(content: &str) -> String {
+        SKILL_PATTERN
             .replace_all(content, |caps: &regex::Captures| {
-                let key = &caps[1];
-                values
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| format!("{{{{{}}}}}", key))
+                let name = &caps[1];
+                format!(
+                    "[Skill: {}]\nBefore proceeding, read the skill \"{}\" using the ReadSkill tool and follow its instructions.",
+                    name, name
+                )
             })
             .into_owned()
     }
@@ -250,43 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn test_interpolate_basic() {
-        let content = "Hello {{name}}!";
-        let mut values = HashMap::new();
-        values.insert("name".to_string(), "Alice".to_string());
-        let result = Prompt::interpolate(content, &values);
-        assert_eq!(result, "Hello Alice!");
-    }
-
-    #[test]
-    fn test_interpolate_multiple() {
-        let content = "{{greeting}} {{name}}, welcome to {{place}}!";
-        let mut values = HashMap::new();
-        values.insert("greeting".to_string(), "Hello".to_string());
-        values.insert("name".to_string(), "Bob".to_string());
-        values.insert("place".to_string(), "Paris".to_string());
-        let result = Prompt::interpolate(content, &values);
-        assert_eq!(result, "Hello Bob, welcome to Paris!");
-    }
-
-    #[test]
-    fn test_interpolate_missing_var() {
-        let content = "Hello {{name}}!";
-        let values = HashMap::new();
-        let result = Prompt::interpolate(content, &values);
-        assert_eq!(result, "Hello {{name}}!");
-    }
-
-    #[test]
-    fn test_interpolate_partial() {
-        let content = "Hello {{name}}, task: {{task}}";
-        let mut values = HashMap::new();
-        values.insert("name".to_string(), "Charlie".to_string());
-        let result = Prompt::interpolate(content, &values);
-        assert_eq!(result, "Hello Charlie, task: {{task}}");
-    }
-
-    #[test]
     fn test_category_display() {
         assert_eq!(PromptCategory::System.to_string(), "system");
         assert_eq!(PromptCategory::User.to_string(), "user");
@@ -316,5 +274,31 @@ mod tests {
         assert_eq!(summary.id, "test-id");
         assert_eq!(summary.name, "Test Prompt");
         assert_eq!(summary.variables_count, 1);
+    }
+
+    // ===== Skill Interpolation Tests =====
+
+    #[test]
+    fn test_interpolate_skills_basic() {
+        let content = "Start: {{skill:my_skill}}";
+        let result = Prompt::interpolate_skills(content);
+        assert!(result.contains("[Skill: my_skill]"));
+        assert!(result.contains("read the skill \"my_skill\""));
+        assert!(!result.contains("{{skill:my_skill}}"));
+    }
+
+    #[test]
+    fn test_interpolate_skills_preserves_variables() {
+        let content = "{{name}} with {{skill:helper}}";
+        let result = Prompt::interpolate_skills(content);
+        assert!(result.contains("{{name}}"));
+        assert!(result.contains("[Skill: helper]"));
+    }
+
+    #[test]
+    fn test_interpolate_skills_no_skills() {
+        let content = "Hello {{name}}, plain text";
+        let result = Prompt::interpolate_skills(content);
+        assert_eq!(result, content);
     }
 }
