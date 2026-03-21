@@ -80,7 +80,7 @@ export interface WorkflowResult {
   mcp_calls: string[];
   /** Detailed tool execution data for persistence and display */
   tool_executions: WorkflowToolExecution[];
-  /** Pre-generated message ID for block association (SA-019 P5) */
+  /** Pre-generated message ID for block association */
   message_id: string;
 }
 
@@ -198,4 +198,8 @@ export interface TokenDisplayData {
   speed_tks?: number;
   /** Whether currently streaming */
   is_streaming: boolean;
+  /** Current context window usage (last API call input tokens) */
+  context_used: number;
+  /** Cache hit rate percentage (cached_tokens / tokens_input * 100), null if no caching */
+  cache_hit_rate: number | null;
 }

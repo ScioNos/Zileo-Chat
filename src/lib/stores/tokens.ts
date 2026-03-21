@@ -52,6 +52,8 @@ interface TokenState {
 		input: number;
 		output: number;
 	};
+	/** Current context window usage (last API call input tokens) */
+	contextUsed: number;
 	/** Model context window size */
 	contextMax: number;
 	/** Input token price (per million tokens) */
@@ -77,6 +79,7 @@ const initialState: TokenState = {
 	streaming: { input: 0, output: 0, cached: null, cacheWrite: null, speed: null },
 	cumulative: { input: 0, output: 0, cost: 0, cached: null, cacheWrite: null },
 	subAgent: { input: 0, output: 0 },
+	contextUsed: 0,
 	contextMax: 128000,
 	inputPrice: 0,
 	outputPrice: 0,
@@ -121,7 +124,8 @@ export const tokenStore = {
 			subAgent: {
 				input: workflow.sub_agent_tokens_input ?? 0,
 				output: workflow.sub_agent_tokens_output ?? 0
-			}
+			},
+			contextUsed: workflow.current_context_tokens ?? 0
 		}));
 	},
 
@@ -159,7 +163,7 @@ export const tokenStore = {
 	/**
 	 * Set session tokens from a response_block event.
 	 * Sets both input and output tokens at once without speed calculation.
-	 * Used with the new block-by-block execution model (SA-019).
+	 * Used with the block-by-block execution model.
 	 *
 	 * @param tokensIn - Input tokens consumed
 	 * @param tokensOut - Output tokens generated
@@ -175,7 +179,8 @@ export const tokenStore = {
 				cached: cachedTokens ?? null,
 				cacheWrite: cacheWriteTokens ?? null,
 				speed: null
-			}
+			},
+			contextUsed: tokensIn
 		}));
 	},
 
@@ -258,7 +263,12 @@ export const tokenDisplayData = derived(store, ($s): TokenDisplayData => {
 		cumulative_cache_write: $s.cumulative.cacheWrite ?? undefined,
 		workflow_total_cost: $s.cumulative.cost + subAgentCost,
 		speed_tks: $s.streaming.speed ?? undefined,
-		is_streaming: $s.isStreaming
+		is_streaming: $s.isStreaming,
+		context_used: $s.contextUsed,
+		cache_hit_rate:
+			$s.streaming.cached && $s.streaming.input > 0
+				? Math.round(($s.streaming.cached / $s.streaming.input) * 100)
+				: null
 	};
 });
 
