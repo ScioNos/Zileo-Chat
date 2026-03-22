@@ -1146,5 +1146,40 @@
 
   "privacy_update_title": "Mise a jour",
   "privacy_update_content": "Cette politique de confidentialite peut etre mise a jour. La date de derniere modification est indiquee ci-dessous.",
-  "privacy_last_updated": "Derniere mise a jour : janvier 2026"
+  "privacy_last_updated": "Derniere mise a jour : janvier 2026",
+
+  "sidebar_filter_all": "Tous",
+  "sidebar_filter_running": "En cours",
+  "sidebar_filter_completed": "Termines",
+  "sidebar_filter_error": "Erreur",
+  "sidebar_filter_idle": "Inactifs",
+
+  "sidebar_context_actions": "Actions",
+  "sidebar_context_rename": "Renommer",
+  "sidebar_context_pin": "Epingler en haut",
+  "sidebar_context_unpin": "Desepingler",
+  "sidebar_context_delete": "Supprimer",
+
+  "sidebar_selection_toggle": "Mode selection",
+  "sidebar_selection_cancel": "Annuler",
+  "sidebar_selection_delete": "Supprimer ({count})",
+  "sidebar_selection_delete_title": "Supprimer les workflows",
+  "sidebar_selection_delete_confirm": "Voulez-vous vraiment supprimer {count} workflow(s) ?",
+  "sidebar_selection_delete_warning": "Cette action est irreversible. Tous les messages et donnees associes seront supprimes.",
+  "sidebar_selection_running_skipped": "{count} workflow(s) en cours ont ete ignores",
+
+  "sidebar_folder_create": "Nouveau dossier",
+  "sidebar_folder_create_title": "Creer un dossier",
+  "sidebar_folder_name_placeholder": "Nom du dossier",
+  "sidebar_folder_rename": "Renommer le dossier",
+  "sidebar_folder_delete": "Supprimer le dossier",
+  "sidebar_folder_delete_confirm": "Supprimer ce dossier ? Les workflows a l'interieur deviendront non classes.",
+  "sidebar_folder_uncategorized": "Non classes",
+  "sidebar_folder_empty": "Aucun workflow dans ce dossier",
+  "sidebar_folder_move_to": "Deplacer vers",
+  "sidebar_folder_remove_from": "Retirer du dossier",
+  "sidebar_pin_section_title": "Epingles",
+
+  "sidebar_drag_drop_hint": "Deposer ici pour deplacer dans ce dossier",
+  "sidebar_drag_drop_uncategorized": "Deposer ici pour retirer du dossier"
 }

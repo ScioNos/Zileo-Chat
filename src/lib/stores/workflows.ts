@@ -24,6 +24,7 @@
  */
 
 import type { Workflow } from '$types/workflow';
+import type { StatusFilter } from '$types/sidebar';
 
 import { writable, derived, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
@@ -43,6 +44,8 @@ export interface WorkflowState {
 	error: string | null;
 	/** Search filter text */
 	searchFilter: string;
+	/** Active status filter */
+	statusFilter: StatusFilter;
 }
 
 /**
@@ -53,7 +56,8 @@ const initialStoreState: WorkflowState = {
 	selectedId: null,
 	loading: false,
 	error: null,
-	searchFilter: ''
+	searchFilter: '',
+	statusFilter: 'all'
 };
 
 /**
@@ -114,6 +118,86 @@ export const workflowStore = {
 	},
 
 	/**
+	 * Set the active status filter.
+	 *
+	 * @param filter - Status filter value
+	 */
+	setStatusFilter(filter: StatusFilter): void {
+		workflowWritable.update((s) => ({ ...s, statusFilter: filter }));
+	},
+
+	/**
+	 * Batch delete multiple workflows.
+	 * Calls the backend command and removes deleted workflows from state.
+	 *
+	 * @param ids - Array of workflow IDs to delete
+	 * @returns Result with deleted count and skipped running IDs
+	 */
+	async deleteBatch(ids: string[]): Promise<{ deleted: number; skipped_running: string[] }> {
+		const result = await invoke<{ deleted: number; skipped_running: string[] }>(
+			'delete_workflows_batch',
+			{ workflowIds: ids }
+		);
+		workflowWritable.update((s) => ({
+			...s,
+			workflows: s.workflows.filter((w) => !ids.includes(w.id) || result.skipped_running.includes(w.id)),
+			selectedId: ids.includes(s.selectedId ?? '') ? null : s.selectedId
+		}));
+		return result;
+	},
+
+	/**
+	 * Move a single workflow to a folder (or remove from folder).
+	 *
+	 * @param workflowId - The workflow ID to move
+	 * @param folderId - Target folder ID, or null to remove from folder
+	 */
+	async moveToFolder(workflowId: string, folderId: string | null): Promise<void> {
+		const updated = await invoke<Workflow>('move_workflow_to_folder', {
+			workflowId,
+			folderId
+		});
+		workflowWritable.update((s) => ({
+			...s,
+			workflows: s.workflows.map((w) => (w.id === updated.id ? updated : w))
+		}));
+	},
+
+	/**
+	 * Move multiple workflows to a folder (or remove from folder).
+	 *
+	 * @param workflowIds - Array of workflow IDs to move
+	 * @param folderId - Target folder ID, or null to remove from folder
+	 * @returns Number of workflows moved
+	 */
+	async moveBatchToFolder(workflowIds: string[], folderId: string | null): Promise<number> {
+		const moved = await invoke<number>('move_workflows_to_folder', {
+			workflowIds,
+			folderId
+		});
+		workflowWritable.update((s) => ({
+			...s,
+			workflows: s.workflows.map((w) =>
+				workflowIds.includes(w.id) ? { ...w, folder_id: folderId ?? undefined } : w
+			)
+		}));
+		return moved;
+	},
+
+	/**
+	 * Toggle the pinned state of a workflow.
+	 *
+	 * @param workflowId - The workflow ID to toggle
+	 */
+	async togglePinned(workflowId: string): Promise<void> {
+		const updated = await invoke<Workflow>('toggle_workflow_pinned', { workflowId });
+		workflowWritable.update((s) => ({
+			...s,
+			workflows: s.workflows.map((w) => (w.id === updated.id ? updated : w))
+		}));
+	},
+
+	/**
 	 * Reset store to initial state.
 	 */
 	reset(): void {
@@ -155,10 +239,48 @@ export const selectedWorkflow = derived(
 );
 
 /**
- * Derived store: workflows filtered by search text
+ * Derived store: active status filter
+ */
+export const statusFilter = derived(workflowWritable, ($s) => $s.statusFilter);
+
+/**
+ * Derived store: workflow count per status (includes 'all')
+ */
+export const statusCounts = derived(workflowWritable, ($s) => {
+	const counts: Record<StatusFilter, number> = {
+		all: $s.workflows.length,
+		idle: 0,
+		running: 0,
+		completed: 0,
+		error: 0
+	};
+	for (const w of $s.workflows) {
+		counts[w.status]++;
+	}
+	return counts;
+});
+
+/**
+ * Derived store: pinned workflows
+ */
+export const pinnedWorkflows = derived(workflowWritable, ($s) =>
+	$s.workflows.filter((w) => w.pinned)
+);
+
+/**
+ * Derived store: workflows filtered by search text and status filter
  */
 export const filteredWorkflows = derived(workflowWritable, ($s) => {
-	if (!$s.searchFilter) return $s.workflows;
-	const filter = $s.searchFilter.toLowerCase();
-	return $s.workflows.filter((w) => w.name.toLowerCase().includes(filter));
+	let result = $s.workflows;
+
+	if ($s.statusFilter !== 'all') {
+		result = result.filter((w) => w.status === $s.statusFilter);
+	}
+
+	if ($s.searchFilter) {
+		const filter = $s.searchFilter.toLowerCase();
+		result = result.filter((w) => w.name.toLowerCase().includes(filter));
+	}
+
+	return result;
 });

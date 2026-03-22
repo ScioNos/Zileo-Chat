@@ -25,6 +25,15 @@ use std::sync::Arc;
 use tauri::State;
 use tracing::{error, info, instrument, warn};
 
+/// Batch delete result containing the count of deleted workflows
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BatchDeleteResult {
+    /// Number of workflows successfully deleted
+    pub deleted: u64,
+    /// IDs of workflows that were skipped (running status)
+    pub skipped_running: Vec<String>,
+}
+
 /// Creates a new workflow
 #[tauri::command]
 #[instrument(
@@ -83,7 +92,7 @@ pub async fn load_workflows(state: State<'_, AppState>) -> Result<Vec<Workflow>,
     info!("Loading workflows");
 
     // Use centralized query constant
-    let query = wf_queries::SELECT_LIST;
+    let query = &*wf_queries::SELECT_LIST;
 
     let json_results = state.db.query_json(query).await.map_err(|e| {
         error!(error = %e, "Failed to load workflows");
@@ -130,8 +139,10 @@ pub async fn rename_workflow(
     let name_json = crate::security::serialize_for_query(&validated_name, "name")?;
 
     let query = format!(
-        "UPDATE workflow:`{}` SET name = {} RETURN meta::id(id) AS id, name, agent_id, status, created_at, updated_at, total_tokens_input, total_tokens_output, total_cost_usd",
-        validated_id, name_json
+        "UPDATE workflow:`{}` SET name = {}, updated_at = time::now() RETURN {}",
+        validated_id,
+        name_json,
+        wf_queries::RETURN_FIELDS
     );
 
     let json_results = state.db.query_json(&query).await.map_err(|e| {
@@ -222,7 +233,7 @@ pub async fn load_workflow_full_state(
     // Build query strings for all 4 parallel queries
     let wf_query = format!(
         "{} WHERE meta::id(id) = '{}'",
-        wf_queries::SELECT_BASE,
+        &*wf_queries::SELECT_BASE,
         validated_id
     );
     let msg_query = format!(
@@ -295,6 +306,261 @@ pub async fn load_workflow_full_state(
     );
 
     Ok(full_state)
+}
+
+/// Deletes multiple workflows in a single batch operation.
+///
+/// Validates all IDs, rejects workflows with 'running' status,
+/// and performs cascade delete for each valid workflow in sequence.
+///
+/// # Arguments
+/// * `workflow_ids` - List of workflow IDs to delete
+///
+/// # Returns
+/// BatchDeleteResult with count of deleted and list of skipped running IDs
+///
+/// # Errors
+/// Returns error if all IDs are invalid or if a database error occurs
+#[tauri::command]
+#[instrument(name = "delete_workflows_batch", skip(state), fields(count = workflow_ids.len()))]
+pub async fn delete_workflows_batch(
+    workflow_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<BatchDeleteResult, String> {
+    info!(count = workflow_ids.len(), "Batch deleting workflows");
+
+    if workflow_ids.is_empty() {
+        return Ok(BatchDeleteResult {
+            deleted: 0,
+            skipped_running: vec![],
+        });
+    }
+
+    // Validate all UUIDs
+    let mut validated_ids = Vec::with_capacity(workflow_ids.len());
+    for id in &workflow_ids {
+        let validated = validate_uuid_field(id, "workflow_id")?;
+        validated_ids.push(validated);
+    }
+
+    // Check status for all workflows in a single query - reject running ones
+    let mut to_delete = Vec::new();
+    let mut skipped_running = Vec::new();
+
+    let record_ids: Vec<String> = validated_ids
+        .iter()
+        .map(|id| format!("workflow:`{}`", id))
+        .collect();
+    let in_clause = record_ids.join(", ");
+    let query = format!(
+        "SELECT meta::id(id) AS id, status FROM workflow WHERE id IN [{}]",
+        in_clause
+    );
+
+    let json_results = state.db.query_json(&query).await.map_err(|e| {
+        error!(error = %e, "Failed to check workflow statuses for batch delete");
+        format!("Failed to check workflow statuses: {}", e)
+    })?;
+
+    // Build a set of found IDs and their statuses
+    for row in json_results {
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let status_str = row
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        if status_str == "running" {
+            warn!(workflow_id = %id, "Skipping running workflow in batch delete");
+            skipped_running.push(id);
+        } else {
+            to_delete.push(id);
+        }
+    }
+    // Workflows not found in results are silently skipped (already deleted)
+
+    // Cascade delete each valid workflow
+    let mut deleted: u64 = 0;
+    for id in &to_delete {
+        cascade::delete_workflow_related(&state.db, id).await;
+
+        state
+            .db
+            .delete(&format!("workflow:{}", id))
+            .await
+            .map_err(|e| {
+                error!(error = %e, workflow_id = %id, "Failed to delete workflow in batch");
+                format!("Failed to delete workflow {}: {}", id, e)
+            })?;
+
+        deleted += 1;
+    }
+
+    info!(
+        deleted = deleted,
+        skipped_running = skipped_running.len(),
+        "Batch delete completed"
+    );
+
+    Ok(BatchDeleteResult {
+        deleted,
+        skipped_running,
+    })
+}
+
+/// Moves a single workflow to a folder (or removes from folder).
+///
+/// # Arguments
+/// * `workflow_id` - The workflow ID to move
+/// * `folder_id` - Target folder ID, or None to remove from folder
+///
+/// # Returns
+/// The updated Workflow entity
+#[tauri::command]
+#[instrument(name = "move_workflow_to_folder", skip(state), fields(workflow_id = %workflow_id))]
+pub async fn move_workflow_to_folder(
+    workflow_id: String,
+    folder_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Workflow, String> {
+    info!("Moving workflow to folder");
+
+    let validated_wf_id = validate_uuid_field(&workflow_id, "workflow_id")?;
+
+    let folder_clause = match &folder_id {
+        Some(fid) => {
+            let validated_fid = validate_uuid_field(fid, "folder_id")?;
+            let fid_json = crate::security::serialize_for_query(&validated_fid, "folder_id")?;
+            format!("folder_id = {}", fid_json)
+        }
+        None => "folder_id = NONE".to_string(),
+    };
+
+    let query = format!(
+        "UPDATE workflow:`{}` SET {}, updated_at = time::now() RETURN {}",
+        validated_wf_id,
+        folder_clause,
+        wf_queries::RETURN_FIELDS
+    );
+
+    let json_results = state.db.query_json(&query).await.map_err(|e| {
+        error!(error = %e, "Failed to move workflow to folder");
+        format!("Failed to move workflow to folder: {}", e)
+    })?;
+
+    let workflow: Workflow = json_results
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Workflow not found".to_string())
+        .and_then(|v| {
+            serde_json::from_value(v).map_err(|e| format!("Failed to deserialize workflow: {}", e))
+        })?;
+
+    info!(folder_id = ?folder_id, "Workflow moved to folder");
+    Ok(workflow)
+}
+
+/// Moves multiple workflows to a folder (or removes from folder).
+///
+/// # Arguments
+/// * `workflow_ids` - List of workflow IDs to move
+/// * `folder_id` - Target folder ID, or None to remove from folder
+///
+/// # Returns
+/// Number of workflows moved
+#[tauri::command]
+#[instrument(name = "move_workflows_to_folder", skip(state), fields(count = workflow_ids.len()))]
+pub async fn move_workflows_to_folder(
+    workflow_ids: Vec<String>,
+    folder_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    info!(
+        count = workflow_ids.len(),
+        "Batch moving workflows to folder"
+    );
+
+    if workflow_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Validate all IDs
+    let mut validated_ids = Vec::with_capacity(workflow_ids.len());
+    for id in &workflow_ids {
+        validated_ids.push(validate_uuid_field(id, "workflow_id")?);
+    }
+
+    let folder_clause = match &folder_id {
+        Some(fid) => {
+            let validated_fid = validate_uuid_field(fid, "folder_id")?;
+            let fid_json = crate::security::serialize_for_query(&validated_fid, "folder_id")?;
+            format!("folder_id = {}", fid_json)
+        }
+        None => "folder_id = NONE".to_string(),
+    };
+
+    let record_ids: Vec<String> = validated_ids
+        .iter()
+        .map(|id| format!("workflow:`{}`", id))
+        .collect();
+    let in_clause = record_ids.join(", ");
+    let query = format!(
+        "UPDATE workflow SET {}, updated_at = time::now() WHERE id IN [{}]",
+        folder_clause, in_clause
+    );
+
+    state.db.execute(&query).await.map_err(|e| {
+        error!(error = %e, "Failed to batch move workflows to folder");
+        format!("Failed to batch move workflows: {}", e)
+    })?;
+
+    let moved = validated_ids.len() as u64;
+    info!(moved = moved, "Workflows moved to folder");
+    Ok(moved)
+}
+
+/// Toggles the pinned state of a workflow.
+///
+/// # Arguments
+/// * `workflow_id` - The workflow ID to toggle
+///
+/// # Returns
+/// The updated Workflow entity
+#[tauri::command]
+#[instrument(name = "toggle_workflow_pinned", skip(state), fields(workflow_id = %workflow_id))]
+pub async fn toggle_workflow_pinned(
+    workflow_id: String,
+    state: State<'_, AppState>,
+) -> Result<Workflow, String> {
+    info!("Toggling workflow pinned state");
+
+    let validated_id = validate_uuid_field(&workflow_id, "workflow_id")?;
+
+    let query = format!(
+        "UPDATE workflow:`{}` SET pinned = !pinned, updated_at = time::now() RETURN {}",
+        validated_id,
+        wf_queries::RETURN_FIELDS
+    );
+
+    let json_results = state.db.query_json(&query).await.map_err(|e| {
+        error!(error = %e, "Failed to toggle workflow pinned");
+        format!("Failed to toggle workflow pinned: {}", e)
+    })?;
+
+    let workflow: Workflow = json_results
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Workflow not found".to_string())
+        .and_then(|v| {
+            serde_json::from_value(v).map_err(|e| format!("Failed to deserialize workflow: {}", e))
+        })?;
+
+    info!(pinned = workflow.pinned, "Workflow pinned state toggled");
+    Ok(workflow)
 }
 
 // ============================================================================
@@ -502,6 +768,83 @@ mod tests {
             .execute_with_mcp("nonexistent_agent", task, None, None)
             .await;
         assert!(result.is_err(), "Should fail for nonexistent agent");
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete_result_serialization() {
+        let result = super::BatchDeleteResult {
+            deleted: 3,
+            skipped_running: vec!["id-1".to_string(), "id-2".to_string()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"deleted\":3"));
+        assert!(json.contains("\"skipped_running\""));
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["deleted"], 3);
+        assert_eq!(parsed["skipped_running"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete_empty_ids() {
+        // BatchDeleteResult with 0 deleted for empty input
+        let result = super::BatchDeleteResult {
+            deleted: 0,
+            skipped_running: vec![],
+        };
+        assert_eq!(result.deleted, 0);
+        assert!(result.skipped_running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_toggle_workflow_pinned() {
+        let state = crate::test_utils::setup_test_state().await;
+
+        // Seed a workflow
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let wf_json = serde_json::json!({
+            "name": "Pin Test Workflow",
+            "status": "idle",
+            "agent_id": "test-agent",
+            "pinned": false,
+        });
+        state
+            .db
+            .execute_with_params(
+                &format!("CREATE workflow:`{}` CONTENT $data", workflow_id),
+                vec![("data".to_string(), wf_json)],
+            )
+            .await
+            .expect("Failed to create test workflow");
+
+        // Toggle pin ON
+        let query_on = format!(
+            "UPDATE workflow:`{}` SET pinned = !pinned, updated_at = time::now() RETURN {}",
+            workflow_id,
+            wf_queries::RETURN_FIELDS
+        );
+        let results_on = state
+            .db
+            .query_json(&query_on)
+            .await
+            .expect("Toggle ON failed");
+        let wf_on: Workflow =
+            serde_json::from_value(results_on.into_iter().next().unwrap()).unwrap();
+        assert!(wf_on.pinned, "Workflow should be pinned after first toggle");
+
+        // Toggle pin OFF
+        let query_off = query_on.clone();
+        let results_off = state
+            .db
+            .query_json(&query_off)
+            .await
+            .expect("Toggle OFF failed");
+        let wf_off: Workflow =
+            serde_json::from_value(results_off.into_iter().next().unwrap()).unwrap();
+        assert!(
+            !wf_off.pinned,
+            "Workflow should be unpinned after second toggle"
+        );
     }
 
     #[tokio::test]

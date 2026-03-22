@@ -1146,5 +1146,40 @@
 
   "privacy_update_title": "Updates",
   "privacy_update_content": "This privacy policy may be updated. The last modification date is indicated below.",
-  "privacy_last_updated": "Last updated: January 2026"
+  "privacy_last_updated": "Last updated: January 2026",
+
+  "sidebar_filter_all": "All",
+  "sidebar_filter_running": "Running",
+  "sidebar_filter_completed": "Completed",
+  "sidebar_filter_error": "Error",
+  "sidebar_filter_idle": "Idle",
+
+  "sidebar_context_actions": "Actions",
+  "sidebar_context_rename": "Rename",
+  "sidebar_context_pin": "Pin to top",
+  "sidebar_context_unpin": "Unpin",
+  "sidebar_context_delete": "Delete",
+
+  "sidebar_selection_toggle": "Selection mode",
+  "sidebar_selection_cancel": "Cancel",
+  "sidebar_selection_delete": "Delete ({count})",
+  "sidebar_selection_delete_title": "Delete workflows",
+  "sidebar_selection_delete_confirm": "Are you sure you want to delete {count} workflow(s)?",
+  "sidebar_selection_delete_warning": "This action is irreversible. All associated messages and data will be deleted.",
+  "sidebar_selection_running_skipped": "{count} running workflow(s) were skipped",
+
+  "sidebar_folder_create": "New folder",
+  "sidebar_folder_create_title": "Create folder",
+  "sidebar_folder_name_placeholder": "Folder name",
+  "sidebar_folder_rename": "Rename folder",
+  "sidebar_folder_delete": "Delete folder",
+  "sidebar_folder_delete_confirm": "Delete this folder? Workflows inside will become uncategorized.",
+  "sidebar_folder_uncategorized": "Uncategorized",
+  "sidebar_folder_empty": "No workflows in this folder",
+  "sidebar_folder_move_to": "Move to",
+  "sidebar_folder_remove_from": "Remove from folder",
+  "sidebar_pin_section_title": "Pinned",
+
+  "sidebar_drag_drop_hint": "Drop here to move to this folder",
+  "sidebar_drag_drop_uncategorized": "Drop here to remove from folder"
 }

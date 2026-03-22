@@ -54,7 +54,9 @@ Uses extracted components, services, and stores for clean architecture.
 		filteredWorkflows,
 		workflowSearchFilter,
 		workflowsError,
-		workflowsLoading
+		workflowsLoading,
+		statusFilter as statusFilter$,
+		statusCounts as statusCounts$
 	} from '$lib/stores/workflows';
 	import {
 		tokenStore,
@@ -83,7 +85,14 @@ Uses extracted components, services, and stores for clean architecture.
 	import { toastStore, navigationTarget } from '$lib/stores/toast';
 	import { fetchModelByApiName } from '$lib/stores/llm';
 	import { locale } from '$lib/stores/locale';
+	import {
+		folderStore,
+		folders as folders$,
+		expandedFolderIds as expandedFolderIds$
+	} from '$lib/stores/folders';
+	import { withToastError } from '$lib/utils/async';
 	import { getErrorMessage } from '$lib/utils/error';
+	import type { Workflow, WorkflowFolder } from '$types/workflow';
 	import type { ProviderType } from '$types/llm';
 
 	// ============================================================================
@@ -117,7 +126,7 @@ Uses extracted components, services, and stores for clean architecture.
 
 	/** Initial page state with localStorage restoration */
 	const initialPageState: PageState = {
-		leftSidebarCollapsed: false,
+		leftSidebarCollapsed: LocalStorage.get(STORAGE_KEYS.LEFT_SIDEBAR_COLLAPSED, false),
 		selectedWorkflowId: null,
 		selectedAgentId: null,
 		currentMaxIterations: 50,
@@ -139,10 +148,10 @@ Uses extracted components, services, and stores for clean architecture.
 	/** Aggregated page state */
 	let pageState = $state<PageState>(initialPageState);
 
-	/** Persisted blocks per message (SA-019 P3) */
+	/** Persisted blocks per message */
 	let messageBlocks = new SvelteMap<string, ChatBlock[]>();
 
-	/** Persisted tasks for the current workflow (SA-019 P6) */
+	/** Persisted tasks for the current workflow */
 	let persistedTasks = $state<TodoTaskDisplay[]>([]);
 
 	/** Resolved tasks: real-time store during execution of THIS workflow, persisted otherwise.
@@ -219,7 +228,7 @@ Uses extracted components, services, and stores for clean architecture.
 				});
 			}
 
-			// Load persisted execution blocks for all messages (SA-019 P3)
+			// Load persisted execution blocks for all messages
 			messageBlocks.clear();
 			try {
 				const blocks = await BlockService.loadForMessages(result.messages);
@@ -233,7 +242,7 @@ Uses extracted components, services, and stores for clean architecture.
 			// Rebuild sub-agent blocks from executions (not in tool_execution/thinking_step tables)
 			appendSubAgentBlocks(result.messages, result.executions);
 
-			// Load persisted tasks for this workflow (SA-019 P6)
+			// Load persisted tasks for this workflow
 			persistedTasks = [];
 			try {
 				const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
@@ -327,14 +336,13 @@ Uses extracted components, services, and stores for clean architecture.
 			await WorkflowService.delete(workflowId);
 			await workflowStore.loadWorkflows();
 
-			// Clear selection if deleted workflow was selected
 			if (pageState.selectedWorkflowId === workflowId) {
 				pageState.selectedWorkflowId = null;
 				pageState.messages = [];
 			}
 
 			modalState = { type: 'none' };
-		} catch (err) {
+		} catch (err: unknown) {
 			toastStore.add({
 				type: 'error',
 				title: getErrorMessage(err),
@@ -348,22 +356,94 @@ Uses extracted components, services, and stores for clean architecture.
 	}
 
 	/**
-	 * Rename a workflow.
+	 * Batch delete workflows.
+	 * Shows a toast if some workflows were skipped due to running status.
+	 *
+	 * @param ids - Array of workflow IDs to delete
+	 * @returns Result with deleted count and skipped running IDs
 	 */
-	async function handleRename(workflowId: string, newName: string): Promise<void> {
-		try {
-			await WorkflowService.rename(workflowId, newName);
-			await workflowStore.loadWorkflows();
-		} catch (err) {
+	async function handleBatchDelete(ids: string[]): Promise<{ deleted: number; skipped_running: string[] }> {
+		const result = await workflowStore.deleteBatch(ids);
+
+		if (result.skipped_running.length > 0) {
 			toastStore.add({
-				type: 'error',
-				title: getErrorMessage(err),
+				type: 'warning',
+				title: $i18n('sidebar_selection_running_skipped', { count: result.skipped_running.length }),
 				message: '',
 				persistent: false,
 				duration: 5000
 			});
 		}
+
+		// Clear selection if current workflow was deleted
+		if (pageState.selectedWorkflowId && ids.includes(pageState.selectedWorkflowId) && !result.skipped_running.includes(pageState.selectedWorkflowId)) {
+			pageState.selectedWorkflowId = null;
+			pageState.messages = [];
+		}
+
+		return result;
 	}
+
+	/**
+	 * Rename a workflow.
+	 */
+	const handleRename = withToastError(async (workflowId: string, newName: string) => {
+		await WorkflowService.rename(workflowId, newName);
+		await workflowStore.loadWorkflows();
+	});
+
+	// ============================================================================
+	// Folder Management Functions
+	// ============================================================================
+
+	/**
+	 * Create a new folder with a default name and color.
+	 */
+	const handleCreateFolder = withToastError(async () => {
+		const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+		const color = colors[($folders$).length % colors.length];
+		await folderStore.createFolder($i18n('sidebar_folder_create'), color);
+	});
+
+	/**
+	 * Rename a folder.
+	 */
+	const handleRenameFolder = withToastError(async (folder: WorkflowFolder, name: string) => {
+		await folderStore.renameFolder(folder.id, name);
+	});
+
+	/**
+	 * Delete a folder (workflows become uncategorized).
+	 */
+	const handleDeleteFolder = withToastError(async (folder: WorkflowFolder) => {
+		await folderStore.deleteFolder(folder.id);
+		await workflowStore.loadWorkflows();
+	});
+
+	/**
+	 * Toggle pinned state for a workflow.
+	 */
+	const handleTogglePin = withToastError(async (workflow: Workflow) => {
+		await workflowStore.togglePinned(workflow.id);
+	});
+
+	/**
+	 * Move a workflow to a folder (or remove from folder).
+	 */
+	const handleMoveToFolder = withToastError(async (workflow: Workflow, folderId: string | null) => {
+		await workflowStore.moveToFolder(workflow.id, folderId);
+	});
+
+	/**
+	 * Move multiple workflows to a folder via drag & drop.
+	 */
+	const handleWorkflowMove = withToastError(async (workflowIds: string[], folderId: string | null) => {
+		if (workflowIds.length === 1) {
+			await workflowStore.moveToFolder(workflowIds[0], folderId);
+		} else {
+			await workflowStore.moveBatchToFolder(workflowIds, folderId);
+		}
+	});
 
 	// ============================================================================
 	// Agent Management Functions
@@ -445,14 +525,14 @@ Uses extracted components, services, and stores for clean architecture.
 			}
 		);
 
-		// Transfer execution blocks to persisted messageBlocks (SA-019 P5)
+		// Transfer execution blocks to persisted messageBlocks
 		// Blocks snapshot is captured in execute() before the store reset.
 		// No ID patching needed: createAssistantMessage uses result.message_id directly.
 		if (result.success && result.assistantMessageId && result.blocks && result.blocks.length > 0) {
 			messageBlocks.set(result.assistantMessageId, result.blocks);
 		}
 
-		// Reload persisted tasks from DB after execution completes (SA-019 P6)
+		// Reload persisted tasks from DB after execution completes
 		// executionBlocksStore.reset() clears real-time tasks, so resolvedTasks
 		// switches to persistedTasks which must be fresh from DB.
 		if (pageState.selectedWorkflowId) {
@@ -515,8 +595,9 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Initialize component on mount.
 	 */
 	onMount(async () => {
-		// Load workflows and agents
+		// Load workflows, folders, and agents
 		await workflowStore.loadWorkflows();
+		await folderStore.loadFolders();
 		await agentStore.loadAgents();
 
 		// Load validation settings (needed for concurrent workflow limits)
@@ -535,6 +616,12 @@ Uses extracted components, services, and stores for clean architecture.
 			},
 			(payload, workflowId, isViewed) => userQuestionStore.handleQuestionForWorkflow(payload, workflowId, isViewed)
 		);
+
+		// Restore status filter from localStorage
+		const savedFilter = LocalStorage.get(STORAGE_KEYS.STATUS_FILTER, 'all');
+		if (savedFilter !== 'all') {
+			workflowStore.setStatusFilter(savedFilter);
+		}
 
 		// Restore last selected workflow from localStorage
 		const lastWorkflowId = LocalStorage.get(STORAGE_KEYS.SELECTED_WORKFLOW_ID, null);
@@ -555,6 +642,21 @@ Uses extracted components, services, and stores for clean architecture.
 		streamingStore.cleanup();
 		validationStore.cleanup();
 		userQuestionStore.cleanup();
+	});
+
+	/**
+	 * Persist sidebar collapsed state to localStorage.
+	 */
+	$effect(() => {
+		LocalStorage.set(STORAGE_KEYS.LEFT_SIDEBAR_COLLAPSED, pageState.leftSidebarCollapsed);
+	});
+
+	/**
+	 * Persist status filter to localStorage and sync to store.
+	 */
+	$effect(() => {
+		const filter = $statusFilter$;
+		LocalStorage.set(STORAGE_KEYS.STATUS_FILTER, filter);
 	});
 
 	/**
@@ -590,15 +692,28 @@ Uses extracted components, services, and stores for clean architecture.
 		searchFilter={$workflowSearchFilter}
 		error={$workflowsError}
 		loading={$workflowsLoading}
+		activeStatusFilter={$statusFilter$}
+		statusCounts={$statusCounts$}
+		folders={$folders$}
+		expandedFolderIds={$expandedFolderIds$}
 		runningWorkflowIds={$runningWorkflowIds$}
 		recentlyCompletedIds={$recentlyCompletedIds$}
 		questionPendingIds={$questionPendingIds$}
 		onsearchchange={(v) => workflowStore.setSearchFilter(v)}
+		onstatusfilterchange={(f) => workflowStore.setStatusFilter(f)}
 		onselect={(w) => selectWorkflow(w.id)}
 		oncreate={() => modalState = { type: 'new-workflow' }}
 		ondelete={(w) => modalState = { type: 'delete-workflow', workflowId: w.id }}
 		onrename={(w, name) => handleRename(w.id, name)}
 		onretry={() => workflowStore.loadWorkflows()}
+		onbatchdelete={handleBatchDelete}
+		onfoldertoggle={(id) => folderStore.toggleExpanded(id)}
+		onfoldercreate={handleCreateFolder}
+		onfolderrename={handleRenameFolder}
+		onfolderdelete={handleDeleteFolder}
+		ontogglepin={handleTogglePin}
+		onmoveto={handleMoveToFolder}
+		onworkflowmove={handleWorkflowMove}
 	/>
 
 	<!-- Main Content -->

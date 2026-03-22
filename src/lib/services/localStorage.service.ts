@@ -23,7 +23,9 @@
 
 const KEYS = {
 	LEFT_SIDEBAR_COLLAPSED: 'zileo_left_sidebar_collapsed',
-	SELECTED_WORKFLOW_ID: 'zileo_last_workflow_id'
+	SELECTED_WORKFLOW_ID: 'zileo_last_workflow_id',
+	STATUS_FILTER: 'zileo_sidebar_status_filter',
+	EXPANDED_FOLDER_IDS: 'zileo_expanded_folder_ids'
 } as const;
 
 type StorageKey = (typeof KEYS)[keyof typeof KEYS];
