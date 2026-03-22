@@ -34,7 +34,7 @@ use crate::agents::core::agent::{
 use crate::db::DBClient;
 use crate::llm::adapters::{MistralToolAdapter, OllamaToolAdapter, OpenAiToolAdapter};
 use crate::llm::tool_adapter::ProviderToolAdapter;
-use crate::llm::{LLMError, ProviderManager, ProviderType};
+use crate::llm::{CompletionParams, LLMError, ProviderManager, ProviderType, ToolCompletionParams};
 use crate::mcp::MCPManager;
 use crate::models::function_calling::{FunctionCall, FunctionCallResult, ToolChoiceMode};
 use crate::models::mcp::MCPTool;
@@ -905,16 +905,27 @@ impl Agent for LLMAgent {
             .provider_manager
             .complete_with_provider(
                 provider_type.clone(),
-                &prompt,
-                Some(&self.config.system_prompt),
-                Some(&self.config.llm.model),
-                self.config.llm.temperature,
-                self.config.llm.max_tokens,
-                reasoning_effort,
+                CompletionParams {
+                    prompt: prompt.clone(),
+                    system_prompt: Some(self.config.system_prompt.clone()),
+                    model: Some(self.config.llm.model.clone()),
+                    temperature: self.config.llm.temperature,
+                    max_tokens: self.config.llm.max_tokens,
+                    reasoning_effort,
+                    context_window: self.config.llm.context_window,
+                },
             )
             .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Extract workflow_id for event emission (same pattern as execute_with_mcp)
+        let event_workflow_id = task
+            .context
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| task.id.clone());
 
         match llm_result {
             Ok(response) => {
@@ -926,6 +937,23 @@ impl Agent for LLMAgent {
                     duration_ms = duration_ms,
                     "LLM Agent task execution completed successfully"
                 );
+
+                // Emit thinking block if reasoning content is present
+                let mut reasoning_steps = vec![];
+                if let Some(ref thinking) = response.thinking_content {
+                    if !thinking.trim().is_empty() {
+                        self.emit_progress(StreamChunk::thinking_block(
+                            event_workflow_id.clone(),
+                            thinking.clone(),
+                        ));
+                        reasoning_steps.push(ReasoningStepData {
+                            content: thinking.clone(),
+                            duration_ms,
+                            sequence: 1,
+                            source: ReasoningSource::ModelThinking,
+                        });
+                    }
+                }
 
                 let content = format!(
                     "# Agent Report: {}\n\n**Task**: {}\n\n**Status**: Success\n\n## Response\n\n{}\n\n## Metrics\n- Provider: {}\n- Model: {}\n- Tokens (input/output): {}/{}\n- Duration: {}ms",
@@ -955,7 +983,7 @@ impl Agent for LLMAgent {
                         tools_used: vec![],
                         mcp_calls: vec![],
                         tool_executions: vec![],
-                        reasoning_steps: vec![],
+                        reasoning_steps,
                         iteration_metrics: vec![],
                     },
                     system_prompt: None,
@@ -1335,12 +1363,20 @@ impl Agent for LLMAgent {
                 .provider_manager
                 .complete_with_tools(
                     provider_type.clone(),
-                    &messages,
-                    &tools_json,
-                    Some(adapter.get_tool_choice(ToolChoiceMode::Auto)),
-                    &self.config.llm.model,
-                    self.config.llm.temperature,
-                    self.config.llm.max_tokens,
+                    ToolCompletionParams {
+                        messages: messages.clone(),
+                        tools: tools_json.clone(),
+                        tool_choice: Some(adapter.get_tool_choice(ToolChoiceMode::Auto)),
+                        model: self.config.llm.model.clone(),
+                        temperature: self.config.llm.temperature,
+                        max_tokens: self.config.llm.max_tokens,
+                        context_window: self.config.llm.context_window,
+                        reasoning_effort: if self.config.llm.is_reasoning {
+                            self.config.reasoning_effort.clone()
+                        } else {
+                            None
+                        },
+                    },
                 )
                 .await
             {
@@ -1654,12 +1690,20 @@ impl Agent for LLMAgent {
                     .provider_manager
                     .complete_with_tools(
                         provider_type.clone(),
-                        &messages,
-                        &empty_tools,
-                        None,
-                        &self.config.llm.model,
-                        self.config.llm.temperature,
-                        self.config.llm.max_tokens,
+                        ToolCompletionParams {
+                            messages: messages.clone(),
+                            tools: empty_tools.clone(),
+                            tool_choice: None,
+                            model: self.config.llm.model.clone(),
+                            temperature: self.config.llm.temperature,
+                            max_tokens: self.config.llm.max_tokens,
+                            context_window: self.config.llm.context_window,
+                            reasoning_effort: if self.config.llm.is_reasoning {
+                                self.config.reasoning_effort.clone()
+                            } else {
+                                None
+                            },
+                        },
                     )
                     .await
                 {
@@ -1856,6 +1900,7 @@ mod tests {
                 temperature: 0.7,
                 max_tokens: 2000,
                 is_reasoning: false,
+                context_window: None,
             },
             tools: vec!["tool1".to_string()],
             mcp_servers: vec![],

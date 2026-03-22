@@ -18,14 +18,15 @@ use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use super::mistral::MistralProvider;
 use super::ollama::OllamaProvider;
 use super::openai_compatible::OpenAiCompatibleProvider;
-use super::provider::{LLMError, LLMProvider, LLMResponse, ProviderType};
+use super::provider::{
+    CompletionParams, LLMError, LLMProvider, LLMResponse, ProviderType, ToolCompletionParams,
+};
 use super::retry::{with_retry, RetryConfig};
-use crate::models::agent::ReasoningEffort;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
 /// Provider configuration state
 #[derive(Debug, Clone)]
@@ -304,46 +305,22 @@ impl ProviderManager {
     ///
     /// This method wraps the provider completion with retry logic
     /// and circuit breaker protection.
-    #[allow(clippy::too_many_arguments)]
     pub async fn complete_with_provider(
         &self,
         provider: ProviderType,
-        prompt: &str,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        temperature: f32,
-        max_tokens: usize,
-        reasoning_effort: Option<ReasoningEffort>,
+        params: CompletionParams,
     ) -> Result<LLMResponse, LLMError> {
         // Check circuit breaker before making request
         self.check_circuit_breaker(provider.clone()).await?;
-
-        // Clone values for the retry closure
-        let prompt_owned = prompt.to_string();
-        let system_prompt_owned = system_prompt.map(|s| s.to_string());
-        let model_owned = model.map(|s| s.to_string());
 
         let result = match &provider {
             ProviderType::Mistral => {
                 let mistral = self.mistral.clone();
                 with_retry(
                     || {
-                        let p = prompt_owned.clone();
-                        let sp = system_prompt_owned.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = mistral.clone();
-                        let effort = reasoning_effort.clone();
-                        async move {
-                            prov.complete(
-                                &p,
-                                sp.as_deref(),
-                                m.as_deref(),
-                                temperature,
-                                max_tokens,
-                                effort,
-                            )
-                            .await
-                        }
+                        async move { prov.complete(p).await }
                     },
                     &self.retry_config,
                 )
@@ -353,22 +330,9 @@ impl ProviderManager {
                 let ollama = self.ollama.clone();
                 with_retry(
                     || {
-                        let p = prompt_owned.clone();
-                        let sp = system_prompt_owned.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = ollama.clone();
-                        let effort = reasoning_effort.clone();
-                        async move {
-                            prov.complete(
-                                &p,
-                                sp.as_deref(),
-                                m.as_deref(),
-                                temperature,
-                                max_tokens,
-                                effort,
-                            )
-                            .await
-                        }
+                        async move { prov.complete(p).await }
                     },
                     &self.retry_config,
                 )
@@ -384,23 +348,9 @@ impl ProviderManager {
                     .ok_or_else(|| LLMError::NotConfigured(name.clone()))?;
                 with_retry(
                     || {
-                        let p = prompt_owned.clone();
-                        let sp = system_prompt_owned.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = custom.clone();
-                        let effort = reasoning_effort.clone();
-                        async move {
-                            let model_str = m.unwrap_or_default();
-                            prov.complete(
-                                &p,
-                                sp.as_deref(),
-                                &model_str,
-                                temperature,
-                                max_tokens,
-                                effort,
-                            )
-                            .await
-                        }
+                        async move { prov.complete(p).await }
                     },
                     &self.retry_config,
                 )
@@ -423,69 +373,38 @@ impl ProviderManager {
     /// Includes retry logic with exponential backoff and circuit
     /// breaker protection.
     ///
-    /// Note: This method intentionally does not accept `reasoning_effort`.
-    /// Most LLM providers do not support simultaneous tool calling and
-    /// extended thinking. The initial completion (before the tool loop)
-    /// uses `reasoning_effort` via `complete_with_provider()`.
+    /// `ToolCompletionParams` includes `reasoning_effort` for providers that support
+    /// simultaneous tool calling and extended thinking (e.g. Mistral, OpenAI-compatible).
     ///
     /// # Arguments
     /// * `provider` - Which provider to use
-    /// * `messages` - Conversation history as JSON messages
-    /// * `tools` - Tool definitions in OpenAI format
-    /// * `tool_choice` - How the model should use tools (provider-specific)
-    /// * `model` - Model to use
-    /// * `temperature` - Sampling temperature
-    /// * `max_tokens` - Maximum tokens to generate
+    /// * `params` - Tool completion parameters (messages, tools, model, etc.)
     ///
     /// # Returns
     /// Raw JSON response from the API (caller should use adapter to parse)
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(
-        name = "manager_complete_with_tools",
-        skip(self, messages, tools, tool_choice),
-        fields(provider = ?provider, tools_count = tools.len())
-    )]
     pub async fn complete_with_tools(
         &self,
         provider: ProviderType,
-        messages: &[serde_json::Value],
-        tools: &[serde_json::Value],
-        tool_choice: Option<serde_json::Value>,
-        model: &str,
-        temperature: f32,
-        max_tokens: usize,
+        params: ToolCompletionParams,
     ) -> Result<serde_json::Value, LLMError> {
         // Check circuit breaker before making request
         self.check_circuit_breaker(provider.clone()).await?;
 
         debug!(
             ?provider,
-            model = model,
-            tools_count = tools.len(),
+            model = %params.model,
+            tools_count = params.tools.len(),
             "Executing completion with tools via manager"
         );
-
-        // Clone values for the retry closure
-        let model_owned = model.to_string();
-
-        // Clone messages/tools once for the retry closure (only cloned per-retry, not per-call)
-        let messages_owned = messages.to_vec();
-        let tools_owned = tools.to_vec();
 
         let result = match &provider {
             ProviderType::Mistral => {
                 let mistral = self.mistral.clone();
                 with_retry(
                     || {
-                        let msgs = messages_owned.clone();
-                        let tls = tools_owned.clone();
-                        let tc = tool_choice.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = mistral.clone();
-                        async move {
-                            prov.complete_with_tools(&msgs, &tls, tc, &m, temperature, max_tokens)
-                                .await
-                        }
+                        async move { prov.complete_with_tools(&p).await }
                     },
                     &self.retry_config,
                 )
@@ -493,17 +412,11 @@ impl ProviderManager {
             }
             ProviderType::Ollama => {
                 let ollama = self.ollama.clone();
-                // Ollama doesn't use tool_choice, so we ignore it
                 with_retry(
                     || {
-                        let msgs = messages_owned.clone();
-                        let tls = tools_owned.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = ollama.clone();
-                        async move {
-                            prov.complete_with_tools(&msgs, &tls, &m, temperature, max_tokens)
-                                .await
-                        }
+                        async move { prov.complete_with_tools(&p).await }
                     },
                     &self.retry_config,
                 )
@@ -519,15 +432,9 @@ impl ProviderManager {
                     .ok_or_else(|| LLMError::NotConfigured(name.clone()))?;
                 with_retry(
                     || {
-                        let msgs = messages_owned.clone();
-                        let tls = tools_owned.clone();
-                        let tc = tool_choice.clone();
-                        let m = model_owned.clone();
+                        let p = params.clone();
                         let prov = custom.clone();
-                        async move {
-                            prov.complete_with_tools(&msgs, &tls, tc, &m, temperature, max_tokens)
-                                .await
-                        }
+                        async move { prov.complete_with_tools(&p).await }
                     },
                     &self.retry_config,
                 )
@@ -742,7 +649,18 @@ mod tests {
         let manager = ProviderManager::new().expect("test provider manager");
 
         let result = manager
-            .complete_with_provider(ProviderType::Mistral, "Hello", None, None, 0.7, 1000, None)
+            .complete_with_provider(
+                ProviderType::Mistral,
+                CompletionParams {
+                    prompt: "Hello".to_string(),
+                    system_prompt: None,
+                    model: None,
+                    temperature: 0.7,
+                    max_tokens: 1000,
+                    reasoning_effort: None,
+                    context_window: None,
+                },
+            )
             .await;
 
         assert!(result.is_err());

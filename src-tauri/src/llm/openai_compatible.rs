@@ -21,8 +21,9 @@
 //! Handles both standard and reasoning model response formats via
 //! a polymorphic content deserializer (string or array of content blocks).
 
-use super::provider::{LLMError, LLMResponse, ProviderType};
-use crate::models::agent::ReasoningEffort;
+use super::provider::{
+    CompletionParams, LLMError, LLMResponse, ProviderType, ToolCompletionParams,
+};
 use crate::tools::utils::safe_truncate;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -143,6 +144,8 @@ struct ToolChatRequest {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 // ============================================================================
@@ -401,22 +404,12 @@ impl OpenAiCompatibleProvider {
     /// Makes a completion request to the API.
     #[instrument(
         name = "openai_compat_complete",
-        skip(self, prompt, system_prompt),
+        skip(self, params),
         fields(
             provider = %self.provider_name,
-            model = %model,
-            prompt_len = prompt.len()
         )
     )]
-    pub async fn complete(
-        &self,
-        prompt: &str,
-        system_prompt: Option<&str>,
-        model: &str,
-        temperature: f32,
-        max_tokens: usize,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Result<LLMResponse, LLMError> {
+    pub async fn complete(&self, params: CompletionParams) -> Result<LLMResponse, LLMError> {
         let api_key = self
             .api_key
             .read()
@@ -428,7 +421,11 @@ impl OpenAiCompatibleProvider {
             LLMError::NotConfigured(format!("Base URL not set for {}", self.provider_name))
         })?;
 
-        let system_text = system_prompt.unwrap_or("You are a helpful assistant.");
+        let model = params.model.as_deref().unwrap_or("default");
+        let system_text = params
+            .system_prompt
+            .as_deref()
+            .unwrap_or("You are a helpful assistant.");
 
         let messages = vec![
             ChatMessage {
@@ -437,24 +434,24 @@ impl OpenAiCompatibleProvider {
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: prompt.to_string(),
+                content: params.prompt.clone(),
             },
         ];
 
         let request_body = ChatRequest {
             model: model.to_string(),
             messages,
-            temperature: Some(temperature),
-            max_tokens: Some(max_tokens),
-            reasoning_effort: reasoning_effort.map(|e| e.as_str().to_string()),
+            temperature: Some(params.temperature),
+            max_tokens: Some(params.max_tokens),
+            reasoning_effort: params.reasoning_effort.map(|e| e.as_str().to_string()),
         };
 
         let url = format!("{}/chat/completions", base_url);
 
         debug!(
             model = model,
-            temperature = temperature,
-            max_tokens = max_tokens,
+            temperature = params.temperature,
+            max_tokens = params.max_tokens,
             url = %url,
             "Making request to OpenAI-compatible API"
         );
@@ -524,7 +521,10 @@ impl OpenAiCompatibleProvider {
                 let word_count = text.split_whitespace().count();
                 ((word_count as f64) * 1.5).ceil() as usize
             };
-            (estimate(prompt) + estimate(system_text), estimate(&content))
+            (
+                estimate(&params.prompt) + estimate(system_text),
+                estimate(&content),
+            )
         };
 
         info!(
@@ -553,17 +553,12 @@ impl OpenAiCompatibleProvider {
     /// Makes a completion request with function calling support.
     #[instrument(
         name = "openai_compat_complete_with_tools",
-        skip(self, messages, tools, tool_choice),
-        fields(provider = %self.provider_name, model = %model, tools_count = tools.len())
+        skip(self, params),
+        fields(provider = %self.provider_name, model = %params.model, tools_count = params.tools.len())
     )]
     pub async fn complete_with_tools(
         &self,
-        messages: &[serde_json::Value],
-        tools: &[serde_json::Value],
-        tool_choice: Option<serde_json::Value>,
-        model: &str,
-        temperature: f32,
-        max_tokens: usize,
+        params: &ToolCompletionParams,
     ) -> Result<serde_json::Value, LLMError> {
         let api_key = self
             .api_key
@@ -578,27 +573,33 @@ impl OpenAiCompatibleProvider {
 
         // Apply prompt cache control to system message for providers that support it
         // (required for Anthropic Claude, harmlessly ignored by others)
-        let cached_messages = apply_prompt_cache_control(messages);
+        let cached_messages = apply_prompt_cache_control(&params.messages);
 
         let request_body = ToolChatRequest {
-            model: model.to_string(),
+            model: params.model.clone(),
             messages: cached_messages,
-            temperature: Some(temperature),
-            max_tokens: Some(max_tokens),
-            tools: if tools.is_empty() {
+            temperature: Some(params.temperature),
+            max_tokens: Some(params.max_tokens),
+            tools: if params.tools.is_empty() {
                 None
             } else {
-                Some(tools.to_vec())
+                Some(params.tools.clone())
             },
-            tool_choice,
+            tool_choice: params.tool_choice.clone(),
+            reasoning_effort: params
+                .reasoning_effort
+                .as_ref()
+                .map(|e| e.as_str().to_string()),
         };
 
         let url = format!("{}/chat/completions", base_url);
 
         debug!(
-            model = model,
-            temperature = temperature,
-            max_tokens = max_tokens,
+            model = %params.model,
+            temperature = params.temperature,
+            max_tokens = params.max_tokens,
+            context_window = ?params.context_window,
+            reasoning_effort = ?params.reasoning_effort,
             tools_count = request_body.tools.as_ref().map(|t| t.len()).unwrap_or(0),
             "Making request with tools to OpenAI-compatible API"
         );
