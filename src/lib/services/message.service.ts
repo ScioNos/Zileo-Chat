@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * @fileoverview Message service for encapsulating message-related Tauri IPC calls.
@@ -154,6 +152,7 @@ export const MessageService = {
 			provider: params.metrics?.provider ?? null,
 			durationMs: params.metrics?.duration_ms ?? null,
 			thinkingTokens: params.metrics?.thinking_tokens ?? null,
+			costUsd: params.metrics?.cost_usd ?? null,
 			messageId: params.messageId ?? null
 		});
 	},

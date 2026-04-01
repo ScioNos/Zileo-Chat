@@ -1,6 +1,6 @@
 [package]
 name = "zileo-chat"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Assistance Micro Design <assistance-micro-design@pm.me>"]
@@ -65,6 +65,7 @@ keyring = { version = "3.6", features = [
     "sync-secret-service",    # Linux Secret Service (Gnome Keyring/KWallet)
 ] }
 aes-gcm = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3.24"

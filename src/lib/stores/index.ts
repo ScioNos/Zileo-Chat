@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Store exports for Zileo-Chat-3 frontend state management.
@@ -46,3 +44,5 @@ export {
 export * from './background-workflows';
 export * from './execution-blocks';
 export * from './toast';
+export * from './folders';
+export * from './skills';

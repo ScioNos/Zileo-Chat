@@ -21,10 +21,6 @@ use crate::llm::{ProviderType, DEFAULT_OLLAMA_URL};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// LLM Model
-// ============================================================================
-
 /// LLM model definition (builtin or custom).
 ///
 /// Models can be either builtin (shipped with the application and immutable)
@@ -55,7 +51,7 @@ pub struct LLMModel {
     /// Maximum generation length in tokens
     pub max_output_tokens: usize,
     /// Default sampling temperature (0.0 - 2.0)
-    pub temperature_default: f32,
+    pub temperature_default: f64,
     /// Whether this is a builtin model (cannot be deleted)
     pub is_builtin: bool,
     /// Whether this is a reasoning/thinking model (enables thinking output)
@@ -111,10 +107,6 @@ impl LLMModel {
     }
 }
 
-// ============================================================================
-// Create Model Request
-// ============================================================================
-
 /// Request payload for creating a new custom model.
 ///
 /// All fields except `temperature_default` and `is_reasoning` are required.
@@ -134,7 +126,7 @@ pub struct CreateModelRequest {
     pub max_output_tokens: usize,
     /// Default sampling temperature (0.0 - 2.0, defaults to 0.7)
     #[serde(default = "default_temperature")]
-    pub temperature_default: f32,
+    pub temperature_default: f64,
     /// Whether this is a reasoning/thinking model (defaults to false)
     #[serde(default)]
     pub is_reasoning: bool,
@@ -153,7 +145,7 @@ pub struct CreateModelRequest {
 }
 
 /// Default temperature value for new models.
-fn default_temperature() -> f32 {
+fn default_temperature() -> f64 {
     0.7
 }
 
@@ -223,10 +215,6 @@ impl CreateModelRequest {
     }
 }
 
-// ============================================================================
-// Update Model Request
-// ============================================================================
-
 /// Request payload for updating an existing model.
 ///
 /// All fields are optional. Only provided fields will be updated.
@@ -242,7 +230,7 @@ pub struct UpdateModelRequest {
     /// New max output tokens (256 - 128,000)
     pub max_output_tokens: Option<usize>,
     /// New default temperature (0.0 - 2.0)
-    pub temperature_default: Option<f32>,
+    pub temperature_default: Option<f64>,
     /// Whether this is a reasoning/thinking model
     pub is_reasoning: Option<bool>,
     /// New price per million input tokens (USD)
@@ -374,10 +362,6 @@ impl UpdateModelRequest {
     }
 }
 
-// ============================================================================
-// Provider Settings
-// ============================================================================
-
 /// Configuration settings for a provider.
 ///
 /// Stores per-provider settings including enabled state, default model,
@@ -426,10 +410,6 @@ impl ProviderSettings {
     }
 }
 
-// ============================================================================
-// Connection Test Result
-// ============================================================================
-
 /// Result of a provider connection test.
 ///
 /// Contains success status, latency measurement, and any error details.
@@ -476,10 +456,6 @@ impl ConnectionTestResult {
 pub fn get_all_builtin_models() -> Vec<LLMModel> {
     Vec::new()
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

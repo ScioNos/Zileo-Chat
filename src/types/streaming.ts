@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * @fileoverview Streaming event types for real-time workflow execution.
@@ -109,6 +107,10 @@ export interface StreamChunk {
   tokens_delta?: number;
   /** Cumulative token count (running total) */
   tokens_total?: number;
+  /** Tool type: "local" or "mcp" (for tool_call_complete) */
+  tool_type?: 'local' | 'mcp';
+  /** MCP server name (for tool_call_complete, only for MCP tools) */
+  server_name?: string;
   /** Tool input parameters as JSON string (for tool_call_complete) */
   tool_input?: string;
   /** Tool output result as JSON string (for tool_call_complete) */

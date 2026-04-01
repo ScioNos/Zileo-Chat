@@ -14,12 +14,41 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 import type { Message } from './message';
 import type { ThinkingStep } from './thinking';
 import type { ToolExecution, WorkflowToolExecution } from './tool';
+
+/**
+ * Task as returned by Rust task commands (snake_case fields).
+ *
+ * Synchronized with Rust `Task` model (src-tauri/src/models/task.rs).
+ * Crosses IPC via: get_task, list_workflow_tasks, list_tasks_by_status, update_task.
+ */
+export interface PersistedTask {
+  /** Task unique identifier */
+  id: string;
+  /** Associated workflow ID */
+  workflow_id: string;
+  /** Task name (max 128 chars) */
+  name: string;
+  /** Detailed description (max 1000 chars) */
+  description: string;
+  /** Agent responsible for this task (skip_serializing_if in Rust) */
+  agent_assigned?: string;
+  /** Priority level (1=critical, 5=low) */
+  priority: number;
+  /** Current task status */
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked';
+  /** Task dependencies (other task IDs that must complete first) */
+  dependencies: string[];
+  /** Execution duration in milliseconds (skip_serializing_if in Rust) */
+  duration_ms?: number;
+  /** Creation timestamp (ISO 8601 string) */
+  created_at: string;
+  /** Completion timestamp (skip_serializing_if in Rust) */
+  completed_at?: string;
+}
 
 /**
  * Workflow status representing the current state of a workflow
@@ -59,9 +88,9 @@ export interface Workflow {
   /** Cumulative output tokens from sub-agents only */
   sub_agent_tokens_output: number;
   /** Cumulative cached input tokens for this workflow */
-  total_cached_tokens?: number;
+  total_cached_tokens: number | null;
   /** Cumulative cache-write tokens for this workflow */
-  total_cache_write_tokens?: number;
+  total_cache_write_tokens: number | null;
   /** Folder ID for organization (absent = uncategorized) */
   folder_id?: string;
   /** Whether this workflow is pinned to the top of the sidebar */

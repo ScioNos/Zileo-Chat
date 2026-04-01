@@ -43,8 +43,7 @@ Uses extracted components, services, and stores for clean architecture.
 	// Service imports
 	import { invoke } from '@tauri-apps/api/core';
 	import { WorkflowService, MessageService, BlockService, LocalStorage, STORAGE_KEYS, WorkflowExecutorService } from '$lib/services';
-	import type { ChatBlock, SubAgentBlockData, TodoTaskDisplay } from '$types/chat-block';
-	import type { SubAgentExecution } from '$types/sub-agent';
+	import type { ChatBlock, TodoTaskDisplay } from '$types/chat-block';
 
 	// Store imports
 	import {
@@ -92,36 +91,35 @@ Uses extracted components, services, and stores for clean architecture.
 	} from '$lib/stores/folders';
 	import { withToastError } from '$lib/utils/async';
 	import { getErrorMessage } from '$lib/utils/error';
-	import type { Workflow, WorkflowFolder } from '$types/workflow';
+	import type { Workflow, WorkflowFolder, PersistedTask } from '$types/workflow';
 	import type { ProviderType } from '$types/llm';
-
-	// ============================================================================
-	// PageState Interface
-	// ============================================================================
 
 	/**
 	 * Aggregated page state interface for cleaner state management.
 	 * Groups 8 related UI/data variables into single reactive object.
 	 */
-	/** Task as returned by Rust list_workflow_tasks command (snake_case fields) */
-	interface PersistedTask {
-		id: string;
-		name: string;
-		description: string;
-		agent_assigned: string | null;
-		priority: number;
-		status: 'pending' | 'in_progress' | 'completed' | 'blocked';
-		duration_ms: number | null;
-	}
-
 	interface PageState {
 		leftSidebarCollapsed: boolean;
 		selectedWorkflowId: string | null;
 		selectedAgentId: string | null;
 		currentMaxIterations: number;
 		currentContextWindow: number;
-		messages: Message[];
 		messagesLoading: boolean;
+	}
+
+	/**
+	 * Maps persisted tasks from Rust snake_case format to TodoTaskDisplay.
+	 */
+	function mapPersistedTasks(tasks: PersistedTask[]): TodoTaskDisplay[] {
+		return tasks.map((t) => ({
+			id: t.id,
+			name: t.name,
+			description: t.description,
+			status: t.status,
+			priority: t.priority,
+			agent_name: t.agent_assigned,
+			duration_ms: t.duration_ms
+		}));
 	}
 
 	/** Initial page state with localStorage restoration */
@@ -131,13 +129,8 @@ Uses extracted components, services, and stores for clean architecture.
 		selectedAgentId: null,
 		currentMaxIterations: 50,
 		currentContextWindow: 128000,
-		messages: [],
 		messagesLoading: false
 	};
-
-	// ============================================================================
-	// State Variables
-	// ============================================================================
 
 	/** Modal state - single union type instead of 3 booleans */
 	let modalState = $state<ModalState>({ type: 'none' });
@@ -148,11 +141,14 @@ Uses extracted components, services, and stores for clean architecture.
 	/** Aggregated page state */
 	let pageState = $state<PageState>(initialPageState);
 
+	/** Chat messages (read-only, only reassigned — no deep proxy needed) */
+	let messages = $state.raw<Message[]>([]);
+
 	/** Persisted blocks per message */
 	let messageBlocks = new SvelteMap<string, ChatBlock[]>();
 
-	/** Persisted tasks for the current workflow */
-	let persistedTasks = $state<TodoTaskDisplay[]>([]);
+	/** Persisted tasks for the current workflow (read-only, only reassigned) */
+	let persistedTasks = $state.raw<TodoTaskDisplay[]>([]);
 
 	/** Resolved tasks: real-time store during execution of THIS workflow, persisted otherwise.
 	 *  Resolves agent UUIDs to display names via $agents store. */
@@ -168,46 +164,6 @@ Uses extracted components, services, and stores for clean architecture.
 		}))
 	);
 
-	// ============================================================================
-	// Data Loading Functions (simplified using services)
-	// ============================================================================
-
-	/**
-	 * Append sub-agent execution blocks to messageBlocks.
-	 *
-	 * Sub-agent executions are stored in a separate table (sub_agent_execution) and
-	 * not loaded by load_message_blocks (which only covers tool_execution/thinking_step).
-	 * This function rebuilds SubAgent ChatBlocks from the enriched message.sub_agents
-	 * data and the raw execution records, then appends them to messageBlocks.
-	 */
-	function appendSubAgentBlocks(messages: Message[], executions: SubAgentExecution[]): void {
-		for (const message of messages) {
-			if (!message.sub_agents || message.sub_agents.length === 0) continue;
-
-			const existingBlocks = messageBlocks.get(message.id) ?? [];
-			const maxSequence = existingBlocks.reduce((max, b) => Math.max(max, b.sequence), 0);
-
-			const subAgentBlocks: ChatBlock[] = message.sub_agents.map((sa, i) => {
-				const execution = executions.find((e) => e.id === sa.id);
-				const data: SubAgentBlockData = {
-					agent_name: sa.name,
-					status: sa.status,
-					duration_ms: sa.duration_ms,
-					tokens_input: sa.tokens_input,
-					tokens_output: sa.tokens_output,
-					report_summary: execution?.result_summary
-				};
-				return {
-					block_type: 'sub_agent' as ChatBlock['block_type'],
-					sequence: maxSequence + 1 + i,
-					data
-				};
-			});
-
-			messageBlocks.set(message.id, [...existingBlocks, ...subAgentBlocks]);
-		}
-	}
-
 	/**
 	 * Load workflow data (messages and persisted blocks).
 	 */
@@ -217,7 +173,7 @@ Uses extracted components, services, and stores for clean architecture.
 		try {
 			// Load messages
 			const result = await MessageService.loadWithSubAgents(workflowId);
-			pageState.messages = result.messages;
+			messages = result.messages;
 			if (result.error) {
 				toastStore.add({
 					type: 'error',
@@ -239,22 +195,11 @@ Uses extracted components, services, and stores for clean architecture.
 				// Already cleared above
 			}
 
-			// Rebuild sub-agent blocks from executions (not in tool_execution/thinking_step tables)
-			appendSubAgentBlocks(result.messages, result.executions);
-
 			// Load persisted tasks for this workflow
 			persistedTasks = [];
 			try {
 				const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
-				persistedTasks = tasks.map((t) => ({
-					id: t.id,
-					name: t.name,
-					description: t.description,
-					status: t.status,
-					priority: t.priority,
-					agent_name: t.agent_assigned ?? undefined,
-					duration_ms: t.duration_ms ?? undefined
-				}));
+				persistedTasks = mapPersistedTasks(tasks);
 			} catch {
 				// Tasks are optional; silently continue if loading fails
 			}
@@ -263,10 +208,6 @@ Uses extracted components, services, and stores for clean architecture.
 		}
 	}
 
-	// ============================================================================
-	// Workflow Management Functions
-	// ============================================================================
-
 	/**
 	 * Create a new workflow.
 	 */
@@ -274,7 +215,7 @@ Uses extracted components, services, and stores for clean architecture.
 		const id = await WorkflowService.create(name, agentId);
 
 		pageState.selectedWorkflowId = id;
-		pageState.messages = [];
+		messages = [];
 
 		await workflowStore.loadWorkflows();
 		await selectWorkflow(id);
@@ -338,7 +279,7 @@ Uses extracted components, services, and stores for clean architecture.
 
 			if (pageState.selectedWorkflowId === workflowId) {
 				pageState.selectedWorkflowId = null;
-				pageState.messages = [];
+				messages = [];
 			}
 
 			modalState = { type: 'none' };
@@ -378,7 +319,7 @@ Uses extracted components, services, and stores for clean architecture.
 		// Clear selection if current workflow was deleted
 		if (pageState.selectedWorkflowId && ids.includes(pageState.selectedWorkflowId) && !result.skipped_running.includes(pageState.selectedWorkflowId)) {
 			pageState.selectedWorkflowId = null;
-			pageState.messages = [];
+			messages = [];
 		}
 
 		return result;
@@ -391,10 +332,6 @@ Uses extracted components, services, and stores for clean architecture.
 		await WorkflowService.rename(workflowId, newName);
 		await workflowStore.loadWorkflows();
 	});
-
-	// ============================================================================
-	// Folder Management Functions
-	// ============================================================================
 
 	/**
 	 * Create a new folder with a default name and color.
@@ -445,10 +382,6 @@ Uses extracted components, services, and stores for clean architecture.
 		}
 	});
 
-	// ============================================================================
-	// Agent Management Functions
-	// ============================================================================
-
 	/**
 	 * Handle agent selection change.
 	 */
@@ -494,10 +427,6 @@ Uses extracted components, services, and stores for clean architecture.
 		pageState.currentMaxIterations = value;
 	}
 
-	// ============================================================================
-	// Message Handling (delegated to WorkflowExecutorService)
-	// ============================================================================
-
 	/**
 	 * Handle sending a message with streaming.
 	 * Delegates orchestration to WorkflowExecutorService.
@@ -514,13 +443,13 @@ Uses extracted components, services, and stores for clean architecture.
 			},
 			{
 				onUserMessage: (msg) => {
-					pageState.messages = [...pageState.messages, msg];
+					messages = [...messages, msg];
 				},
 				onAssistantMessage: (msg) => {
-					pageState.messages = [...pageState.messages, msg];
+					messages = [...messages, msg];
 				},
 				onError: (msg) => {
-					pageState.messages = [...pageState.messages, msg];
+					messages = [...messages, msg];
 				}
 			}
 		);
@@ -540,15 +469,7 @@ Uses extracted components, services, and stores for clean architecture.
 				const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', {
 					workflowId: pageState.selectedWorkflowId
 				});
-				persistedTasks = tasks.map((t) => ({
-					id: t.id,
-					name: t.name,
-					description: t.description,
-					status: t.status,
-					priority: t.priority,
-					agent_name: t.agent_assigned ?? undefined,
-					duration_ms: t.duration_ms ?? undefined
-				}));
+				persistedTasks = mapPersistedTasks(tasks);
 			} catch {
 				// Tasks are optional; silently continue
 			}
@@ -567,10 +488,6 @@ Uses extracted components, services, and stores for clean architecture.
 		}
 	}
 
-	// ============================================================================
-	// Validation Handlers
-	// ============================================================================
-
 	/**
 	 * Handle validation approval.
 	 */
@@ -586,10 +503,6 @@ Uses extracted components, services, and stores for clean architecture.
 		await validationStore.reject(reason);
 		modalState = { type: 'none' };
 	}
-
-	// ============================================================================
-	// Lifecycle Hooks (simplified onMount)
-	// ============================================================================
 
 	/**
 	 * Initialize component on mount.
@@ -733,7 +646,7 @@ Uses extracted components, services, and stores for clean architecture.
 
 			<!-- Chat Container -->
 			<ChatContainer
-				messages={pageState.messages}
+				messages={messages}
 				messagesLoading={pageState.messagesLoading}
 				{messageBlocks}
 				executionBlocks={$executionBlocks$}

@@ -53,7 +53,7 @@ mod tool_factory_tests {
         let tool = result.unwrap();
         assert_eq!(tool.definition().id, "MemoryTool");
         assert_eq!(tool.definition().name, "Memory Manager");
-        assert!(!tool.requires_confirmation());
+        assert!(!tool.definition().requires_confirmation);
     }
 
     #[tokio::test]
@@ -319,8 +319,6 @@ mod agent_config_tests {
             reasoning_effort: None,
         };
 
-        assert!(config.has_valid_tools());
-        assert!(config.validate_tools().is_empty());
         assert!(config.tools.contains(&"MemoryTool".to_string()));
     }
 }

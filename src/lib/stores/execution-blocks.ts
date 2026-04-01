@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Execution blocks store for managing block-by-block execution display.
@@ -29,10 +27,6 @@
 import { writable, derived } from 'svelte/store';
 import type { StreamChunk } from '$types/streaming';
 import type { ChatBlock, ChatBlockType, ThinkingBlockData, ToolCallBlockData, SubAgentBlockData, TodoTaskDisplay } from '$types/chat-block';
-
-// ============================================================================
-// Types
-// ============================================================================
 
 /**
  * State interface for the execution blocks store.
@@ -62,10 +56,6 @@ export interface ExecutionBlocksState {
 	nextSequence: number;
 }
 
-// ============================================================================
-// Initial State
-// ============================================================================
-
 const initialState: ExecutionBlocksState = {
 	workflowId: null,
 	blocks: [],
@@ -77,10 +67,6 @@ const initialState: ExecutionBlocksState = {
 	cancelled: false,
 	nextSequence: 1
 };
-
-// ============================================================================
-// Store Implementation
-// ============================================================================
 
 const store = writable<ExecutionBlocksState>(initialState);
 
@@ -128,7 +114,8 @@ function handleToolStart(state: ExecutionBlocksState, chunk: StreamChunk): Execu
 function handleToolCallComplete(state: ExecutionBlocksState, chunk: StreamChunk): ExecutionBlocksState {
 	const data: ToolCallBlockData = {
 		tool_name: chunk.tool ?? 'unknown',
-		tool_type: 'local',
+		tool_type: chunk.tool_type ?? 'local',
+		server_name: chunk.server_name,
 		input_params: chunk.tool_input ?? '{}',
 		output_result: chunk.tool_output ?? '{}',
 		success: chunk.tool_success ?? false,
@@ -162,13 +149,23 @@ function handleResponseBlock(state: ExecutionBlocksState, chunk: StreamChunk): E
  * Process a sub_agent_complete chunk into a SubAgentBlock.
  */
 function handleSubAgentComplete(state: ExecutionBlocksState, chunk: StreamChunk): ExecutionBlocksState {
+	// Dedup: skip if a sub_agent block with the same sub_agent_id already exists
+	const subAgentId = chunk.sub_agent_id;
+	if (subAgentId) {
+		const alreadyExists = state.blocks.some(
+			(b) => b.block_type === 'sub_agent' && (b.data as SubAgentBlockData)._sub_agent_id === subAgentId
+		);
+		if (alreadyExists) return { ...state, spinnerContext: null };
+	}
+
 	const data: SubAgentBlockData = {
 		agent_name: chunk.sub_agent_name ?? 'Unknown Agent',
 		status: 'completed',
 		duration_ms: chunk.duration ?? chunk.metrics?.duration_ms,
 		tokens_input: chunk.metrics?.tokens_input,
 		tokens_output: chunk.metrics?.tokens_output,
-		report_summary: chunk.content
+		report_summary: chunk.content,
+		_sub_agent_id: subAgentId
 	};
 	const block = createBlock('sub_agent', state.nextSequence, data);
 	return {
@@ -183,11 +180,21 @@ function handleSubAgentComplete(state: ExecutionBlocksState, chunk: StreamChunk)
  * Process a sub_agent_error chunk into a SubAgentBlock with error status.
  */
 function handleSubAgentError(state: ExecutionBlocksState, chunk: StreamChunk): ExecutionBlocksState {
+	// Dedup: skip if a sub_agent block with the same sub_agent_id already exists
+	const subAgentId = chunk.sub_agent_id;
+	if (subAgentId) {
+		const alreadyExists = state.blocks.some(
+			(b) => b.block_type === 'sub_agent' && (b.data as SubAgentBlockData)._sub_agent_id === subAgentId
+		);
+		if (alreadyExists) return { ...state, spinnerContext: null };
+	}
+
 	const data: SubAgentBlockData = {
 		agent_name: chunk.sub_agent_name ?? 'Unknown Agent',
 		status: 'error',
 		duration_ms: chunk.duration,
-		report_summary: chunk.content
+		report_summary: chunk.content,
+		_sub_agent_id: subAgentId
 	};
 	const block = createBlock('sub_agent', state.nextSequence, data);
 	return {
@@ -372,10 +379,6 @@ export const executionBlocksStore = {
 		store.set(initialState);
 	}
 };
-
-// ============================================================================
-// Derived Stores
-// ============================================================================
 
 /** Current execution blocks */
 export const executionBlocks = derived(store, (s) => s.blocks);

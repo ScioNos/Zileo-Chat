@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * @fileoverview Chat block types for block-by-block execution display.
@@ -98,6 +96,8 @@ export interface SubAgentBlockData {
 	tokens_output?: number;
 	/** Summary of the sub-agent report */
 	report_summary?: string;
+	/** Internal: sub-agent ID for deduplication (not persisted) */
+	_sub_agent_id?: string;
 }
 
 /**

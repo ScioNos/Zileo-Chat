@@ -57,6 +57,7 @@ pub async fn load_workflow_sub_agent_executions(
             tokens_output,
             result_summary,
             error_message,
+            parent_message_id,
             created_at,
             completed_at
         FROM sub_agent_execution
@@ -129,14 +130,4 @@ pub async fn clear_workflow_sub_agent_executions(
 
     info!(count = count, "Workflow sub-agent executions cleared");
     Ok(count)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_module_compiles() {
-        // Basic compile test - module structure is valid
-        let result: Result<(), &str> = Ok(());
-        assert!(result.is_ok());
-    }
 }

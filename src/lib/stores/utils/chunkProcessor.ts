@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Shared chunk processor for stream chunk state updates.
@@ -198,8 +196,8 @@ function handleTaskCreate(s: ChunkableState, c: StreamChunk): ChunkableState {
 		tasks: [
 			...s.tasks,
 			{
-				id: c.task_id!,
-				name: c.task_name!,
+				id: c.task_id ?? '',
+				name: c.task_name ?? '',
 				status: (c.task_status ?? 'pending') as ActiveTask['status'],
 				priority: c.task_priority ?? 3,
 				createdAt: Date.now(),

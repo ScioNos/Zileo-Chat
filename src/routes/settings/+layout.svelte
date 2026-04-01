@@ -174,9 +174,10 @@ Each section is now a separate route for better performance and UX.
 <style>
 	.settings-page {
 		display: flex;
-		height: 100%;
 		flex: 1;
 		min-width: 0;
+		min-height: 0;
+		overflow: hidden;
 	}
 
 	/* Sidebar */
@@ -280,6 +281,37 @@ Each section is now a separate route for better performance and UX.
 
 	.security-text {
 		font-size: var(--font-size-xs);
+	}
+
+	/* Shared settings page styles (scoped to content area) */
+	.content-area :global(.settings-section) {
+		margin-bottom: var(--spacing-2xl);
+		padding-bottom: var(--spacing-xl);
+	}
+
+	.content-area :global(.section-title) {
+		font-size: var(--font-size-2xl);
+		font-weight: var(--font-weight-semibold);
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.content-area :global(.section-title-row) {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-sm);
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.content-area :global(.section-title-row .section-title) {
+		margin-bottom: 0;
+	}
+
+	.content-area :global(.lazy-loading) {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--spacing-md);
+		padding: var(--spacing-xl);
 	}
 
 	/* Content Area */

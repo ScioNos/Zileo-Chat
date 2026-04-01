@@ -165,7 +165,6 @@ pub struct MCPServer {
 /// Wraps `MCPServer` with an optional security warning (e.g., HTTP usage).
 /// Mirrors the `CustomProviderResponse` pattern from custom_provider.rs.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MCPServerResponse {
     /// Server data
     pub server: MCPServer,
@@ -224,7 +223,7 @@ pub struct MCPToolCallResult {
 /// MCP tool call log entry
 ///
 /// Stored in the database for auditing and debugging purposes.
-#[allow(dead_code)] // API type for MCP call logging/auditing
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPCallLog {
     /// Unique log entry ID

@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * @fileoverview Tool execution types for persistence and display.
@@ -104,6 +102,8 @@ export interface ToolExecution {
 	duration_ms: number;
 	/** Iteration number in tool loop (0-indexed) */
 	iteration: number;
+	/** Global ordering sequence within execution (for interleaving with thinking steps) */
+	sequence: number;
 	/** Timestamp when recorded */
 	created_at: string;
 }

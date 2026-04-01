@@ -18,7 +18,6 @@
 //! (commands, workflows, database queries). Tool-specific constants remain
 //! in [`crate::tools::constants`].
 
-// ===== Workflow Constants =====
 /// Constants for workflow execution and streaming.
 #[allow(dead_code)]
 pub mod workflow {
@@ -40,7 +39,6 @@ pub mod workflow {
     pub const FULL_STATE_LOAD_TIMEOUT_SECS: u64 = 60;
 }
 
-// ===== Query Limits =====
 /// Default limits for database queries to prevent memory explosion.
 #[allow(dead_code)] // Some constants prepared for future use
 pub mod query_limits {
@@ -56,7 +54,6 @@ pub mod query_limits {
     pub const DEFAULT_MODELS_LIMIT: usize = 100;
 }
 
-// ===== Command Validation Constants =====
 /// Centralized validation constants for Tauri commands.
 /// These constants define limits and valid values across the application.
 #[allow(dead_code)]
@@ -67,9 +64,9 @@ pub mod commands {
     /// Maximum length for system prompts
     pub const MAX_SYSTEM_PROMPT_LEN: usize = 10000;
     /// Minimum temperature value for LLM
-    pub const MIN_TEMPERATURE: f32 = 0.0;
+    pub const MIN_TEMPERATURE: f64 = 0.0;
     /// Maximum temperature value for LLM
-    pub const MAX_TEMPERATURE: f32 = 2.0;
+    pub const MAX_TEMPERATURE: f64 = 2.0;
     /// Minimum max_tokens value
     pub const MIN_MAX_TOKENS: usize = 256;
     /// Maximum max_tokens value

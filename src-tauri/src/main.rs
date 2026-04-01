@@ -102,91 +102,28 @@ async fn main() -> anyhow::Result<()> {
     // Note: Agents are loaded in setup hook after app_handle is set
     // This ensures AgentToolContext has access to app_handle for validation events
 
-    // Load MCP servers from database
-    if let Err(e) = app_state.mcp_manager.load_from_db().await {
+    // Note: Builtin model seeding is handled by the seed_builtin_models Tauri command
+    // (invokable from frontend). get_all_builtin_models() returns an empty Vec.
+
+    // Initialize secure keystore (synchronous, instant)
+    let keystore = commands::SecureKeyStore::default();
+    tracing::info!("Secure keystore initialized");
+
+    // Run MCP loading, provider init, and embedding init in parallel.
+    // MCP is fully independent. Providers and embedding both need keystore
+    // (already initialized above) but are independent of each other.
+    let (mcp_result, _, _) = tokio::join!(
+        app_state.mcp_manager.load_from_db(),
+        app_state.initialize_providers_from_config(&keystore),
+        app_state.initialize_embedding_from_config(&keystore),
+    );
+
+    if let Err(e) = mcp_result {
         tracing::warn!(error = %e, "Failed to load MCP servers from database");
     } else {
         let count = app_state.mcp_manager.connected_count().await;
         tracing::info!(count = count, "MCP servers loaded from database");
     }
-
-    // Seed builtin LLM models if needed
-    {
-        use models::llm_models::get_all_builtin_models;
-
-        let builtin_models = get_all_builtin_models();
-        let mut inserted = 0;
-
-        for model in &builtin_models {
-            let check_query = format!(
-                "SELECT count() FROM llm_model WHERE id = '{}' GROUP ALL",
-                model.id
-            );
-            let count_result: Vec<serde_json::Value> = app_state
-                .db
-                .db
-                .query(&check_query)
-                .await
-                .map(|mut r| r.take(0).unwrap_or_default())
-                .unwrap_or_default();
-
-            let exists = count_result
-                .first()
-                .and_then(|v| v.get("count").and_then(|c| c.as_i64()))
-                .unwrap_or(0)
-                > 0;
-
-            if !exists {
-                let data = serde_json::json!({
-                    "id": model.id,
-                    "provider": model.provider,
-                    "name": model.name,
-                    "api_name": model.api_name,
-                    "context_window": model.context_window,
-                    "max_output_tokens": model.max_output_tokens,
-                    "temperature_default": model.temperature_default,
-                    "is_builtin": true,
-                });
-                let query = format!("CREATE llm_model:`{}` CONTENT $data", model.id);
-                if app_state
-                    .db
-                    .execute_with_params(&query, vec![("data".to_string(), data)])
-                    .await
-                    .is_ok()
-                {
-                    // Set timestamps via SurrealQL functions (can't be in CONTENT bind)
-                    let _ = app_state
-                        .db
-                        .execute(&format!(
-                            "UPDATE llm_model:`{}` SET created_at = time::now(), updated_at = time::now()",
-                            model.id
-                        ))
-                        .await;
-                    inserted += 1;
-                }
-            }
-        }
-
-        if inserted > 0 {
-            tracing::info!(
-                total = builtin_models.len(),
-                inserted = inserted,
-                "Builtin LLM models seeded"
-            );
-        } else {
-            tracing::debug!("All builtin LLM models already exist");
-        }
-    }
-
-    // Initialize secure keystore
-    let keystore = commands::SecureKeyStore::default();
-    tracing::info!("Secure keystore initialized");
-
-    // Initialize LLM providers from saved configuration
-    app_state.initialize_providers_from_config(&keystore).await;
-
-    // Initialize embedding service from saved configuration (if any)
-    app_state.initialize_embedding_from_config(&keystore).await;
 
     // Run Tauri application
     tauri::Builder::default()
@@ -230,16 +167,16 @@ async fn main() -> anyhow::Result<()> {
             commands::custom_provider::update_custom_provider,
             commands::custom_provider::delete_custom_provider,
             // Model CRUD commands
-            commands::llm_models::list_models,
-            commands::llm_models::get_model,
-            commands::llm_models::get_model_by_api_name,
-            commands::llm_models::create_model,
-            commands::llm_models::update_model,
-            commands::llm_models::delete_model,
-            commands::llm_models::get_provider_settings,
-            commands::llm_models::update_provider_settings,
-            commands::llm_models::test_provider_connection,
-            commands::llm_models::seed_builtin_models,
+            commands::llm_models::crud::list_models,
+            commands::llm_models::crud::get_model,
+            commands::llm_models::crud::get_model_by_api_name,
+            commands::llm_models::crud::create_model,
+            commands::llm_models::crud::update_model,
+            commands::llm_models::crud::delete_model,
+            commands::llm_models::provider_settings::get_provider_settings,
+            commands::llm_models::provider_settings::update_provider_settings,
+            commands::llm_models::connection::test_provider_connection,
+            commands::llm_models::seed::seed_builtin_models,
             commands::validation::create_validation_request,
             commands::validation::list_pending_validations,
             commands::validation::list_workflow_validations,
@@ -257,8 +194,8 @@ async fn main() -> anyhow::Result<()> {
             commands::memory::delete_memory,
             commands::memory::search_memories,
             commands::memory::clear_memories_by_type,
-            commands::streaming::execute_workflow_streaming,
-            commands::streaming::cancel_workflow_streaming,
+            commands::streaming::execution::execute_workflow_streaming,
+            commands::streaming::execution::cancel_workflow_streaming,
             commands::message::save_message,
             commands::message::load_workflow_messages,
             commands::message::load_workflow_messages_paginated,
@@ -288,33 +225,33 @@ async fn main() -> anyhow::Result<()> {
             commands::task::update_task_status,
             commands::task::complete_task,
             commands::task::delete_task,
-            commands::mcp::list_mcp_servers,
-            commands::mcp::get_mcp_server,
-            commands::mcp::create_mcp_server,
-            commands::mcp::update_mcp_server,
-            commands::mcp::delete_mcp_server,
-            commands::mcp::test_mcp_server,
-            commands::mcp::start_mcp_server,
-            commands::mcp::stop_mcp_server,
-            commands::mcp::list_mcp_tools,
-            commands::mcp::call_mcp_tool,
-            commands::mcp::get_mcp_latency_metrics,
+            commands::mcp::crud::list_mcp_servers,
+            commands::mcp::crud::get_mcp_server,
+            commands::mcp::crud::create_mcp_server,
+            commands::mcp::crud::update_mcp_server,
+            commands::mcp::crud::delete_mcp_server,
+            commands::mcp::lifecycle::test_mcp_server,
+            commands::mcp::lifecycle::start_mcp_server,
+            commands::mcp::lifecycle::stop_mcp_server,
+            commands::mcp::tools::list_mcp_tools,
+            commands::mcp::tools::call_mcp_tool,
+            commands::mcp::tools::get_mcp_latency_metrics,
             commands::migration::migrate_memory_schema,
             commands::migration::get_memory_schema_status,
             commands::migration::migrate_mcp_http_schema,
             commands::migration::migrate_memory_v2_schema,
             commands::migration::migrate_reasoning_effort,
             commands::migration::migrate_sidebar_features,
-            commands::embedding::get_embedding_config,
-            commands::embedding::save_embedding_config,
-            commands::embedding::get_memory_stats,
-            commands::embedding::update_memory,
-            commands::embedding::export_memories,
-            commands::embedding::import_memories,
-            commands::embedding::regenerate_embeddings,
-            commands::embedding::reinit_embedding_service,
-            commands::embedding::test_embedding,
-            commands::embedding::get_memory_token_stats,
+            commands::embedding::config::get_embedding_config,
+            commands::embedding::config::save_embedding_config,
+            commands::embedding::config::reinit_embedding_service,
+            commands::embedding::config::test_embedding,
+            commands::embedding::operations::update_memory,
+            commands::embedding::operations::export_memories,
+            commands::embedding::operations::import_memories,
+            commands::embedding::operations::regenerate_embeddings,
+            commands::embedding::stats::get_memory_stats,
+            commands::embedding::stats::get_memory_token_stats,
             // Prompt commands (Prompt Library)
             commands::prompt::list_prompts,
             commands::prompt::get_prompt,
@@ -333,17 +270,16 @@ async fn main() -> anyhow::Result<()> {
             commands::file_manager::list_trash,
             commands::file_manager::restore_from_trash_cmd,
             // Import/Export commands
-            commands::import_export::prepare_export_preview,
-            commands::import_export::generate_export_file,
-            commands::import_export::validate_import,
-            commands::import_export::execute_import,
-            commands::import_export::save_export_to_file,
+            commands::import_export::export::prepare_export_preview,
+            commands::import_export::export::generate_export_file,
+            commands::import_export::export::save_export_to_file,
+            commands::import_export::import::validate_import,
+            commands::import_export::import::execute_import,
             commands::user_question::submit_user_response,
             commands::user_question::get_pending_questions,
             commands::user_question::skip_question,
         ])
         .setup(|app| {
-            // === Create native Help menu with legal notices ===
             let legal_notice = MenuItemBuilder::with_id("legal-notice", "Mentions l\u{00e9}gales")
                 .build(app)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -419,9 +355,6 @@ async fn main() -> anyhow::Result<()> {
             let mcp_manager = state.inner().mcp_manager.clone();
 
             tauri::async_runtime::spawn(async move {
-                // Suppress unused warning for orchestrator (used in context)
-                let _ = &orchestrator;
-
                 // Set app handle in ToolFactory for validation event emission
                 // This is needed for sub-agents that don't have agent_context
                 // Clone handle first to avoid holding guard across await

@@ -283,10 +283,6 @@ pub async fn delete_validation(
     Ok(())
 }
 
-// =====================================================
-// Validation Settings Commands (Global Configuration)
-// =====================================================
-
 /// Gets the current validation settings.
 /// Returns default settings if none are configured.
 ///
@@ -428,10 +424,6 @@ pub async fn reset_validation_settings(
     Ok(settings)
 }
 
-// =====================================================
-// Helper Functions
-// =====================================================
-
 /// Internal helper to get validation settings without State wrapper
 async fn get_validation_settings_internal(
     state: &State<'_, AppState>,
@@ -506,10 +498,6 @@ fn apply_audit_config(
     Ok(())
 }
 
-// =====================================================
-// Tool Discovery Commands
-// =====================================================
-
 /// Information about an available tool for validation settings
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -560,56 +548,6 @@ pub async fn list_available_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::core::{AgentOrchestrator, AgentRegistry};
-    use crate::db::DBClient;
-    use crate::llm::ProviderManager;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
-    #[allow(dead_code)]
-    async fn setup_test_state() -> AppState {
-        let temp_dir = tempdir().expect("Failed to create temp dir");
-        let db_path = temp_dir.path().join("test_validation_db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let db = Arc::new(
-            DBClient::new(db_path_str)
-                .await
-                .expect("Failed to create test DB"),
-        );
-        db.initialize_schema().await.expect("Schema init failed");
-
-        let registry = Arc::new(AgentRegistry::new());
-        let orchestrator = Arc::new(AgentOrchestrator::new(registry.clone()));
-        let llm_manager = Arc::new(ProviderManager::new().expect("test provider manager"));
-        let mcp_manager = Arc::new(
-            crate::mcp::MCPManager::new(db.clone())
-                .await
-                .expect("Failed to create MCP manager"),
-        );
-
-        std::mem::forget(temp_dir);
-
-        // Create shared embedding service reference
-        let embedding_service = Arc::new(tokio::sync::RwLock::new(None));
-
-        AppState {
-            db: db.clone(),
-            registry,
-            orchestrator,
-            llm_manager,
-            mcp_manager,
-            tool_factory: Arc::new(crate::tools::ToolFactory::new(
-                db,
-                embedding_service.clone(),
-            )),
-            embedding_service,
-            streaming_cancellations: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            app_handle: Arc::new(std::sync::RwLock::new(None)),
-        }
-    }
 
     #[test]
     fn test_validation_type_serialization() {

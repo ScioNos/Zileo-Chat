@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
@@ -55,6 +53,8 @@ describe('Workflow Store', () => {
 		current_context_tokens: 0,
 		sub_agent_tokens_input: 0,
 		sub_agent_tokens_output: 0,
+		total_cached_tokens: null,
+		total_cache_write_tokens: null,
 		pinned: false
 	});
 

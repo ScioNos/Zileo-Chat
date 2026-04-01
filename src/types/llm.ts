@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Builtin provider identifiers.
@@ -46,34 +44,6 @@ export interface LLMResponse {
   provider: ProviderType;
   /** Finish reason (if available) */
   finish_reason: string | null;
-}
-
-/**
- * Provider status information
- */
-export interface ProviderStatus {
-  /** Provider type */
-  provider: string;
-  /** Whether the provider is configured */
-  configured: boolean;
-  /** Current default model */
-  default_model: string;
-  /** Available models */
-  available_models: string[];
-}
-
-/**
- * Complete LLM configuration response
- */
-export interface LLMConfigResponse {
-  /** Active provider */
-  active_provider: string;
-  /** Mistral configuration status */
-  mistral: ProviderStatus;
-  /** Ollama configuration status */
-  ollama: ProviderStatus;
-  /** Ollama server URL */
-  ollama_url: string;
 }
 
 /**

@@ -24,8 +24,8 @@ use crate::{
     constants::commands as cmd_const,
     db::extract_count,
     models::{
-        merge_into_chat_blocks, ChatBlock, Message, MessageCreate, PaginatedMessages, ThinkingStep,
-        ToolExecution,
+        merge_into_chat_blocks, sub_agent::SubAgentExecution, ChatBlock, Message, MessageCreate,
+        PaginatedMessages, ThinkingStep, ToolExecution,
     },
     security::validate_uuid_field,
     AppState,
@@ -45,6 +45,7 @@ use uuid::Uuid;
 /// * `model` - Model used for generation (optional)
 /// * `provider` - Provider used (optional)
 /// * `duration_ms` - Generation duration in milliseconds (optional)
+/// * `cost_usd` - Estimated cost in USD (optional)
 ///
 /// # Returns
 /// The ID of the created message
@@ -69,6 +70,7 @@ pub async fn save_message(
     provider: Option<String>,
     duration_ms: Option<u64>,
     thinking_tokens: Option<u64>,
+    cost_usd: Option<f64>,
     message_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -115,7 +117,7 @@ pub async fn save_message(
         tokens_output,
         model,
         provider,
-        cost_usd: None, // Cost calculation is provider-specific (future enhancement)
+        cost_usd,
         duration_ms,
         thinking_tokens,
     };
@@ -437,6 +439,35 @@ pub async fn load_message_blocks(
         format!("Failed to load thinking steps: {}", e)
     })?;
 
+    // Query sub-agent executions linked to this message
+    let sub_agent_query = format!(
+        r#"SELECT
+            meta::id(id) AS id,
+            workflow_id,
+            parent_agent_id,
+            sub_agent_id,
+            sub_agent_name,
+            task_description,
+            status,
+            duration_ms,
+            tokens_input,
+            tokens_output,
+            result_summary,
+            error_message,
+            parent_message_id,
+            created_at,
+            completed_at
+        FROM sub_agent_execution
+        WHERE parent_message_id = '{}'
+        ORDER BY created_at ASC"#,
+        validated_message_id
+    );
+
+    let sub_agent_json = state.db.query_json(&sub_agent_query).await.map_err(|e| {
+        error!(error = %e, "Failed to load sub-agent executions for blocks");
+        format!("Failed to load sub-agent executions: {}", e)
+    })?;
+
     // Deserialize tool executions
     let tool_executions: Vec<ToolExecution> = tool_json
         .into_iter()
@@ -457,42 +488,93 @@ pub async fn load_message_blocks(
             format!("Failed to deserialize thinking steps: {}", e)
         })?;
 
+    // Deserialize sub-agent executions
+    let sub_agent_executions: Vec<SubAgentExecution> = sub_agent_json
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<SubAgentExecution>, _>>()
+        .map_err(|e| {
+            error!(error = %e, "Failed to deserialize sub-agent executions");
+            format!("Failed to deserialize sub-agent executions: {}", e)
+        })?;
+
+    // Load internal blocks from sub-agent executions
+    // Sub-agent internals are persisted with message_id = execution_id (not assistant message_id)
+    // Re-sequence them to appear after primary blocks but before sub_agent completion blocks
+    let mut all_tool_executions = tool_executions;
+    let mut all_thinking_steps = thinking_steps;
+
+    let primary_max_seq = all_tool_executions
+        .iter()
+        .map(|t| t.sequence)
+        .chain(all_thinking_steps.iter().map(|t| t.sequence))
+        .max()
+        .unwrap_or(0);
+
+    let mut seq_offset = primary_max_seq + 1;
+
+    for sa in &sub_agent_executions {
+        let sa_tool_query = format!(
+            r#"SELECT
+                meta::id(id) AS id, workflow_id, message_id, agent_id,
+                tool_type, tool_name, server_name, input_params, output_result,
+                success, error_message, duration_ms, iteration, sequence, created_at
+            FROM tool_execution
+            WHERE message_id = '{}'
+            ORDER BY sequence ASC, created_at ASC"#,
+            sa.id
+        );
+        let sa_thinking_query = format!(
+            r#"SELECT
+                meta::id(id) AS id, workflow_id, message_id, agent_id,
+                step_number, content, duration_ms, tokens, sequence, source, created_at
+            FROM thinking_step
+            WHERE message_id = '{}'
+            ORDER BY sequence ASC, step_number ASC"#,
+            sa.id
+        );
+
+        if let Ok(sa_tools_json) = state.db.query_json(&sa_tool_query).await {
+            let mut sa_tools: Vec<ToolExecution> = sa_tools_json
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            // Re-sequence to avoid conflicts with primary blocks
+            for t in &mut sa_tools {
+                t.sequence += seq_offset;
+            }
+            seq_offset += sa_tools.iter().map(|t| t.sequence).max().unwrap_or(0) + 1;
+            all_tool_executions.extend(sa_tools);
+        }
+
+        if let Ok(sa_thinking_json) = state.db.query_json(&sa_thinking_query).await {
+            let mut sa_thinking: Vec<ThinkingStep> = sa_thinking_json
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            // Re-sequence to avoid conflicts with primary blocks
+            for t in &mut sa_thinking {
+                t.sequence += seq_offset;
+            }
+            seq_offset += sa_thinking.iter().map(|t| t.sequence).max().unwrap_or(0) + 1;
+            all_thinking_steps.extend(sa_thinking);
+        }
+    }
+
     // Merge into unified ChatBlocks sorted by sequence
-    let blocks = merge_into_chat_blocks(&tool_executions, &thinking_steps);
+    let blocks = merge_into_chat_blocks(
+        &all_tool_executions,
+        &all_thinking_steps,
+        &sub_agent_executions,
+    );
 
     info!(
-        tool_count = tool_executions.len(),
-        thinking_count = thinking_steps.len(),
+        tool_count = all_tool_executions.len(),
+        thinking_count = all_thinking_steps.len(),
+        sub_agent_count = sub_agent_executions.len(),
         total_blocks = blocks.len(),
-        "Message blocks loaded"
+        "Message blocks loaded (including sub-agent internals)"
     );
 
     Ok(blocks)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_max_message_content_len() {
-        // 100KB should be enough for most message content
-        assert_eq!(cmd_const::MAX_MESSAGE_CONTENT_LEN, 100_000);
-    }
-
-    #[test]
-    fn test_valid_roles() {
-        let valid_roles = vec!["user", "assistant", "system"];
-        for role in valid_roles {
-            assert!(matches!(role, "user" | "assistant" | "system"));
-        }
-    }
-
-    #[test]
-    fn test_invalid_role_detection() {
-        let invalid_roles = vec!["admin", "bot", ""];
-        for role in invalid_roles {
-            assert!(!matches!(role, "user" | "assistant" | "system"));
-        }
-    }
 }

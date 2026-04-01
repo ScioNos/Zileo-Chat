@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Copyright 2025 Zileo-Chat-3 Contributors
-// SPDX-License-Identifier: Apache-2.0
 
 /**
  * Token store for managing token usage and cost tracking.
@@ -179,8 +177,7 @@ export const tokenStore = {
 				cached: cachedTokens ?? null,
 				cacheWrite: cacheWriteTokens ?? null,
 				speed: null
-			},
-			contextUsed: tokensIn
+			}
 		}));
 	},
 
@@ -217,10 +214,6 @@ export const tokenStore = {
 		store.set(initialState);
 	}
 };
-
-// ============================================================================
-// Derived Stores
-// ============================================================================
 
 /**
  * Derived store: complete token display data for TokenDisplay component.

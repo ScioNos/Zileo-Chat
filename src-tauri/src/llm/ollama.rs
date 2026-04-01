@@ -12,20 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Ollama local provider implementation using rig-core
+//! Ollama local provider implementation via direct HTTP
 
+use super::http;
 use super::provider::{
     CompletionParams, LLMError, LLMProvider, LLMResponse, ProviderType, ToolCompletionParams,
 };
 use crate::models::agent::ReasoningEffort;
-use crate::tools::utils::safe_truncate;
 use async_trait::async_trait;
-use rig::client::Nothing;
-use rig::completion::Prompt;
-use rig::providers::ollama;
-
-// Trait required for .agent() method on rig::client::Client
-use rig::client::CompletionClient;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
@@ -33,27 +27,41 @@ use tracing::{debug, info, instrument};
 /// Default Ollama server URL
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
+/// Builds the `options` JSON object for Ollama API requests.
+///
+/// Includes `num_ctx` only when `context_window` is provided, otherwise
+/// lets Ollama use its default context size.
+fn build_options(
+    temperature: f64,
+    max_tokens: usize,
+    context_window: Option<usize>,
+) -> serde_json::Value {
+    let mut options = serde_json::json!({
+        "temperature": temperature,
+        "num_predict": max_tokens
+    });
+    if let Some(ctx) = context_window {
+        options["num_ctx"] = serde_json::json!(ctx);
+    }
+    options
+}
+
 /// Ollama local provider implementation
 pub struct OllamaProvider {
-    /// Ollama client
-    client: Arc<RwLock<Option<ollama::Client>>>,
     /// Server URL
     server_url: Arc<RwLock<String>>,
     /// Configured flag
     configured: Arc<RwLock<bool>>,
-    /// Shared HTTP client for direct API calls (connection pooling)
+    /// Shared HTTP client for API calls (connection pooling)
     http_client: Arc<reqwest::Client>,
 }
 
-#[allow(dead_code)]
 impl OllamaProvider {
     /// Creates a new Ollama provider with default settings and a shared HTTP client.
     ///
-    /// The HTTP client is used for direct API calls (thinking models, tool calls)
-    /// and provides connection pooling for better performance.
+    /// The HTTP client provides connection pooling for better performance.
     pub fn new(http_client: Arc<reqwest::Client>) -> Self {
         Self {
-            client: Arc::new(RwLock::new(None)),
             server_url: Arc::new(RwLock::new(DEFAULT_OLLAMA_URL.to_string())),
             configured: Arc::new(RwLock::new(false)),
             http_client,
@@ -67,6 +75,7 @@ impl OllamaProvider {
     ///
     /// # Errors
     /// Returns an error if the HTTP client fails to initialize.
+    #[allow(dead_code)] // Used in tests only (lib/binary split)
     pub fn with_url(url: &str) -> Result<Self, String> {
         let http_client = Arc::new(
             reqwest::Client::builder()
@@ -75,34 +84,16 @@ impl OllamaProvider {
                 .map_err(|e| format!("Failed to create HTTP client: {}", e))?,
         );
         Ok(Self {
-            client: Arc::new(RwLock::new(None)),
             server_url: Arc::new(RwLock::new(url.to_string())),
             configured: Arc::new(RwLock::new(false)),
             http_client,
         })
     }
 
-    /// Configures the provider (connects to the Ollama server)
+    /// Configures the provider with the given server URL.
     pub async fn configure(&self, url: Option<&str>) -> Result<(), LLMError> {
         let server_url = url.unwrap_or(DEFAULT_OLLAMA_URL);
         *self.server_url.write().await = server_url.to_string();
-
-        // Create client with custom URL if provided
-        let client = if server_url != DEFAULT_OLLAMA_URL {
-            ollama::Client::builder()
-                .api_key(Nothing)
-                .base_url(server_url)
-                .build()
-                .map_err(|e| {
-                    LLMError::ConnectionError(format!("Failed to create Ollama client: {}", e))
-                })?
-        } else {
-            ollama::Client::new(Nothing).map_err(|e| {
-                LLMError::ConnectionError(format!("Failed to create Ollama client: {}", e))
-            })?
-        };
-
-        *self.client.write().await = Some(client);
         *self.configured.write().await = true;
 
         info!(url = server_url, "Ollama provider configured");
@@ -110,13 +101,14 @@ impl OllamaProvider {
     }
 
     /// Clears the provider configuration
+    #[allow(dead_code)] // Used in tests only (lib/binary split)
     pub async fn clear(&self) {
-        *self.client.write().await = None;
         *self.configured.write().await = false;
         info!("Ollama provider cleared");
     }
 
     /// Gets the current server URL
+    #[allow(dead_code)] // Used in tests only (lib/binary split)
     pub async fn get_server_url(&self) -> String {
         self.server_url.read().await.clone()
     }
@@ -168,14 +160,7 @@ impl OllamaProvider {
         let server_url = self.server_url.read().await.clone();
         let url = format!("{}/api/chat", server_url);
 
-        // Build options with optional num_ctx
-        let mut options = serde_json::json!({
-            "temperature": params.temperature,
-            "num_predict": params.max_tokens
-        });
-        if let Some(ctx) = params.context_window {
-            options["num_ctx"] = serde_json::json!(ctx);
-        }
+        let options = build_options(params.temperature, params.max_tokens, params.context_window);
 
         // Build request body with tools
         let mut body = serde_json::json!({
@@ -217,21 +202,10 @@ impl OllamaProvider {
         })?;
 
         if !status.is_success() {
-            return Err(LLMError::RequestFailed(format!(
-                "Ollama API error ({}): {}",
-                status, response_text
-            )));
+            return Err(http::parse_api_error("Ollama", status, &response_text));
         }
 
-        // Parse to JSON Value (caller will use adapter to extract specific fields)
-        let json_response: serde_json::Value =
-            serde_json::from_str(&response_text).map_err(|e| {
-                LLMError::RequestFailed(format!(
-                    "Failed to parse Ollama response: {}. Body: {}",
-                    e,
-                    safe_truncate(&response_text, 500, true)
-                ))
-            })?;
+        let json_response: serde_json::Value = http::parse_json_response("Ollama", &response_text)?;
 
         // Log basic info
         let has_tool_calls = json_response
@@ -267,13 +241,7 @@ impl OllamaProvider {
         let server_url = self.server_url.read().await.clone();
         let url = format!("{}/api/chat", server_url);
 
-        let mut options = serde_json::json!({
-            "temperature": params.temperature,
-            "num_predict": params.max_tokens
-        });
-        if let Some(ctx) = params.context_window {
-            options["num_ctx"] = serde_json::json!(ctx);
-        }
+        let options = build_options(params.temperature, params.max_tokens, params.context_window);
 
         let body = serde_json::json!({
             "model": model,
@@ -307,15 +275,10 @@ impl OllamaProvider {
         })?;
 
         if !status.is_success() {
-            return Err(LLMError::RequestFailed(format!(
-                "Ollama API error ({}): {}",
-                status, response_text
-            )));
+            return Err(http::parse_api_error("Ollama", status, &response_text));
         }
 
-        let json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-            LLMError::RequestFailed(format!("Failed to parse Ollama response: {}", e))
-        })?;
+        let json: serde_json::Value = http::parse_json_response("Ollama", &response_text)?;
 
         let content = json
             .pointer("/message/content")
@@ -329,20 +292,12 @@ impl OllamaProvider {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
 
-        // Use actual token counts from Ollama if available
         let tokens_input = json
             .get("prompt_eval_count")
             .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| {
-                crate::llm::utils::estimate_tokens(prompt) as u64
-                    + crate::llm::utils::estimate_tokens(system_text) as u64
-            }) as usize;
+            .unwrap_or(0) as usize;
 
-        let tokens_output = json
-            .get("eval_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| crate::llm::utils::estimate_tokens(&content) as u64)
-            as usize;
+        let tokens_output = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         info!(
             tokens_input = tokens_input,
@@ -396,7 +351,7 @@ impl LLMProvider for OllamaProvider {
             .as_deref()
             .unwrap_or("You are a helpful assistant.");
 
-        // When reasoning_effort is set, use direct HTTP call to send `think` parameter
+        // When reasoning_effort is set, use thinking path with `think` parameter
         if let Some(ref effort) = params.reasoning_effort {
             debug!(
                 model = model_name,
@@ -408,10 +363,21 @@ impl LLMProvider for OllamaProvider {
                 .await;
         }
 
-        let client_guard = self.client.read().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| LLMError::NotConfigured("Ollama".to_string()))?;
+        // Direct HTTP call to get real token counts from API
+        let server_url = self.server_url.read().await.clone();
+        let url = format!("{}/api/chat", server_url);
+
+        let options = build_options(params.temperature, params.max_tokens, params.context_window);
+
+        let body = serde_json::json!({
+            "model": model_name,
+            "messages": [
+                { "role": "system", "content": system_text },
+                { "role": "user", "content": &params.prompt }
+            ],
+            "stream": false,
+            "options": options
+        });
 
         debug!(
             model = model_name,
@@ -420,52 +386,61 @@ impl LLMProvider for OllamaProvider {
             "Starting Ollama completion"
         );
 
-        let tokens_input_estimate = crate::llm::utils::estimate_tokens(&params.prompt)
-            + crate::llm::utils::estimate_tokens(system_text);
-
-        // Build agent and execute prompt
-        let mut builder = client
-            .agent(model_name)
-            .preamble(system_text)
-            .temperature(params.temperature as f64)
-            .max_tokens(params.max_tokens as u64);
-
-        if let Some(ctx) = params.context_window {
-            builder = builder.additional_params(serde_json::json!({"num_ctx": ctx}));
-        }
-
-        let agent = builder.build();
-
-        let response = agent.prompt(&params.prompt).await.map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("connection") || err_str.contains("refused") {
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
                 LLMError::ConnectionError(format!(
-                    "Cannot connect to Ollama server. Make sure Ollama is running: {}",
-                    err_str
+                    "Cannot connect to Ollama server at {}: {}",
+                    server_url, e
                 ))
-            } else if err_str.contains("not found") || err_str.contains("model") {
-                LLMError::ModelNotFound(format!(
-                    "Model '{}' not found. Try: ollama pull {}",
-                    model_name, model_name
-                ))
-            } else {
-                LLMError::RequestFailed(err_str)
-            }
+            })?;
+
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| {
+            LLMError::RequestFailed(format!("Failed to read Ollama response: {}", e))
         })?;
 
-        let tokens_output_estimate = crate::llm::utils::estimate_tokens(&response);
+        if !status.is_success() {
+            // Check for model not found in error response
+            if response_text.contains("not found") || response_text.contains("model") {
+                return Err(LLMError::ModelNotFound(format!(
+                    "Model '{}' not found. Try: ollama pull {}",
+                    model_name, model_name
+                )));
+            }
+            return Err(http::parse_api_error("Ollama", status, &response_text));
+        }
+
+        let json: serde_json::Value = http::parse_json_response("Ollama", &response_text)?;
+
+        let content = json
+            .pointer("/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let tokens_input = json
+            .get("prompt_eval_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        let tokens_output = json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         info!(
-            tokens_input = tokens_input_estimate,
-            tokens_output = tokens_output_estimate,
-            response_len = response.len(),
+            tokens_input = tokens_input,
+            tokens_output = tokens_output,
+            response_len = content.len(),
             "Ollama completion successful"
         );
 
         Ok(LLMResponse {
-            content: response,
-            tokens_input: tokens_input_estimate,
-            tokens_output: tokens_output_estimate,
+            content,
+            tokens_input,
+            tokens_output,
             model: model_name.to_string(),
             provider: ProviderType::Ollama,
             finish_reason: Some("stop".to_string()),
@@ -544,7 +519,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ollama_provider_complete_not_configured() {
+    async fn test_ollama_provider_complete_error_handling() {
+        // Direct HTTP call will fail: ConnectionError if Ollama is not running,
+        // or ModelNotFound if running but model doesn't exist
         let provider = test_ollama_provider();
 
         let result = provider
@@ -561,8 +538,12 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(LLMError::NotConfigured(_)) => {}
-            _ => panic!("Expected NotConfigured error"),
+            Err(LLMError::ConnectionError(_) | LLMError::ModelNotFound(_)) => {}
+            Err(other) => panic!(
+                "Expected ConnectionError or ModelNotFound, got: {:?}",
+                other
+            ),
+            Ok(_) => panic!("Expected error"),
         }
     }
 
@@ -596,30 +577,18 @@ mod tests {
     }
 
     #[test]
-    fn test_num_ctx_included_in_options_when_provided() {
-        let context_window: Option<usize> = Some(32768);
-        let mut options = serde_json::json!({
-            "temperature": 0.7,
-            "num_predict": 4096
-        });
-        if let Some(ctx) = context_window {
-            options["num_ctx"] = serde_json::json!(ctx);
-        }
+    fn test_build_options_includes_num_ctx_when_provided() {
+        let options = build_options(0.7, 4096, Some(32768));
         assert_eq!(options["num_ctx"], 32768);
         assert_eq!(options["temperature"], 0.7);
         assert_eq!(options["num_predict"], 4096);
     }
 
     #[test]
-    fn test_num_ctx_omitted_from_options_when_none() {
-        let context_window: Option<usize> = None;
-        let mut options = serde_json::json!({
-            "temperature": 0.7,
-            "num_predict": 4096
-        });
-        if let Some(ctx) = context_window {
-            options["num_ctx"] = serde_json::json!(ctx);
-        }
+    fn test_build_options_omits_num_ctx_when_none() {
+        let options = build_options(0.7, 4096, None);
         assert!(options.get("num_ctx").is_none());
+        assert_eq!(options["temperature"], 0.7);
+        assert_eq!(options["num_predict"], 4096);
     }
 }
