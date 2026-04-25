@@ -68,7 +68,6 @@ Uses extracted components, services, and stores for clean architecture.
 		executionBlocks as executionBlocks$,
 		isExecuting as isExecuting$,
 		spinnerContext as spinnerContext$,
-		executionResponse as executionResponse$,
 		executionTasks as executionTasks$,
 		executionWorkflowId as executionWorkflowId$
 	} from '$lib/stores/execution-blocks';
@@ -91,6 +90,8 @@ Uses extracted components, services, and stores for clean architecture.
 	} from '$lib/stores/folders';
 	import { withToastError } from '$lib/utils/async';
 	import { getErrorMessage } from '$lib/utils/error';
+	import { isUuid } from '$lib/utils/uuid';
+	import { ITERATIONS_LIMITS } from '$lib/utils/constants';
 	import type { Workflow, WorkflowFolder, PersistedTask } from '$types/workflow';
 	import type { ProviderType } from '$types/llm';
 
@@ -127,7 +128,7 @@ Uses extracted components, services, and stores for clean architecture.
 		leftSidebarCollapsed: LocalStorage.get(STORAGE_KEYS.LEFT_SIDEBAR_COLLAPSED, false),
 		selectedWorkflowId: null,
 		selectedAgentId: null,
-		currentMaxIterations: 50,
+		currentMaxIterations: ITERATIONS_LIMITS.DEFAULT,
 		currentContextWindow: 128000,
 		messagesLoading: false
 	};
@@ -150,17 +151,30 @@ Uses extracted components, services, and stores for clean architecture.
 	/** Persisted tasks for the current workflow (read-only, only reassigned) */
 	let persistedTasks = $state.raw<TodoTaskDisplay[]>([]);
 
+	/**
+	 * Resolves a raw agent identifier (UUID or live name) to a display name.
+	 *
+	 * - Non-UUID strings are returned as-is (live stream already sends names).
+	 * - UUIDs are looked up in the `$agents` store.
+	 * - Orphan UUIDs (deleted agents) fall back to a localized "Unknown agent" label.
+	 */
+	function resolveAgentName(rawName: string | undefined): string | undefined {
+		if (!rawName) return undefined;
+		if (!isUuid(rawName)) return rawName;
+		const found = $agents.find((a) => a.id === rawName);
+		if (found) return found.name;
+		return $i18n('agent_unknown');
+	}
+
 	/** Resolved tasks: real-time store during execution of THIS workflow, persisted otherwise.
-	 *  Resolves agent UUIDs to display names via $agents store. */
+	 *  Resolves agent UUIDs to display names with orphan-safe fallback. */
 	let resolvedTasks = $derived(
 		($isExecuting$ && $executionWorkflowId$ === pageState.selectedWorkflowId
 			? $executionTasks$
 			: persistedTasks
 		).map((t) => ({
 			...t,
-			agent_name: t.agent_name
-				? ($agents.find((a) => a.id === t.agent_name)?.name ?? t.agent_name)
-				: undefined
+			agent_name: resolveAgentName(t.agent_name)
 		}))
 	);
 
@@ -212,12 +226,11 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Create a new workflow.
 	 */
 	async function handleCreateWorkflow(name: string, agentId: string): Promise<void> {
-		const id = await WorkflowService.create(name, agentId);
+		const id = await workflowStore.createWorkflow(name, agentId);
 
 		pageState.selectedWorkflowId = id;
 		messages = [];
 
-		await workflowStore.loadWorkflows();
 		await selectWorkflow(id);
 
 		modalState = { type: 'none' };
@@ -274,8 +287,7 @@ Uses extracted components, services, and stores for clean architecture.
 	async function handleDeleteWorkflow(workflowId: string): Promise<void> {
 		deletingWorkflow = true;
 		try {
-			await WorkflowService.delete(workflowId);
-			await workflowStore.loadWorkflows();
+			await workflowStore.deleteWorkflow(workflowId);
 
 			if (pageState.selectedWorkflowId === workflowId) {
 				pageState.selectedWorkflowId = null;
@@ -329,8 +341,7 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Rename a workflow.
 	 */
 	const handleRename = withToastError(async (workflowId: string, newName: string) => {
-		await WorkflowService.rename(workflowId, newName);
-		await workflowStore.loadWorkflows();
+		await workflowStore.renameWorkflow(workflowId, newName);
 	});
 
 	/**
@@ -354,7 +365,7 @@ Uses extracted components, services, and stores for clean architecture.
 	 */
 	const handleDeleteFolder = withToastError(async (folder: WorkflowFolder) => {
 		await folderStore.deleteFolder(folder.id);
-		await workflowStore.loadWorkflows();
+		workflowStore.detachFromFolder(folder.id);
 	});
 
 	/**
@@ -397,7 +408,7 @@ Uses extracted components, services, and stores for clean architecture.
 	async function loadAgentConfig(agentId: string): Promise<void> {
 		try {
 			const config = await agentStore.getAgentConfig(agentId);
-			pageState.currentMaxIterations = config.max_tool_iterations ?? 50;
+			pageState.currentMaxIterations = config.max_tool_iterations ?? ITERATIONS_LIMITS.DEFAULT;
 
 			// Load full model data to get context_window and pricing
 			if (config.llm?.model && config.llm?.provider) {
@@ -415,7 +426,7 @@ Uses extracted components, services, and stores for clean architecture.
 				pageState.currentContextWindow = 128000;
 			}
 		} catch {
-			pageState.currentMaxIterations = 50;
+			pageState.currentMaxIterations = ITERATIONS_LIMITS.DEFAULT;
 			pageState.currentContextWindow = 128000;
 		}
 	}
@@ -536,9 +547,14 @@ Uses extracted components, services, and stores for clean architecture.
 			workflowStore.setStatusFilter(savedFilter);
 		}
 
-		// Restore last selected workflow from localStorage
+		// Restore last selected workflow from localStorage.
+		// If the active status filter would hide it, clear the filter so the
+		// restored workflow remains visible in the sidebar.
 		const lastWorkflowId = LocalStorage.get(STORAGE_KEYS.SELECTED_WORKFLOW_ID, null);
 		if (lastWorkflowId && $workflows.find(w => w.id === lastWorkflowId)) {
+			if (!$filteredWorkflows.find(w => w.id === lastWorkflowId)) {
+				workflowStore.setStatusFilter('all');
+			}
 			await selectWorkflow(lastWorkflowId);
 		}
 
@@ -653,7 +669,6 @@ Uses extracted components, services, and stores for clean architecture.
 				isExecuting={$isExecuting$}
 				spinnerContext={$spinnerContext$}
 				executionTasks={resolvedTasks}
-				executionResponse={$executionResponse$}
 				disabled={!pageState.selectedAgentId}
 				onsend={handleSend}
 				oncancel={handleCancel}

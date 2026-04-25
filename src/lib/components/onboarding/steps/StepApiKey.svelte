@@ -24,6 +24,20 @@
 	import { onboardingStore, onboardingLoading } from '$lib/stores/onboarding';
 	import { Button, Input } from '$lib/components/ui';
 	import { getErrorMessage } from '$lib/utils/error';
+	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { isAllowedScheme } from '$lib/utils/url';
+
+	const MISTRAL_CONSOLE_URL = 'https://console.mistral.ai';
+
+	/**
+	 * Opens the Mistral console in the user's default browser via the Tauri opener plugin.
+	 */
+	async function openMistralConsole(event: MouseEvent): Promise<void> {
+		event.preventDefault();
+		if (isAllowedScheme(MISTRAL_CONSOLE_URL)) {
+			await openUrl(MISTRAL_CONSOLE_URL);
+		}
+	}
 
 	interface Props {
 		onNext: () => void;
@@ -86,7 +100,7 @@
 		/>
 
 		<p class="help-text">
-			<a href="https://console.mistral.ai" target="_blank" rel="noopener noreferrer">
+			<a href={MISTRAL_CONSOLE_URL} onclick={openMistralConsole}>
 				{$i18n('onboarding_apikey_help')}
 			</a>
 		</p>
@@ -140,7 +154,7 @@
 	}
 
 	.step-description {
-		font-size: var(--font-size-md);
+		font-size: var(--font-size-base);
 		color: var(--color-text-secondary);
 		margin: 0;
 		max-width: 400px;
@@ -176,7 +190,7 @@
 
 	.status {
 		padding: var(--spacing-sm) var(--spacing-md);
-		border-radius: var(--radius-md);
+		border-radius: var(--border-radius-md);
 		font-size: var(--font-size-sm);
 		text-align: center;
 	}
@@ -208,6 +222,6 @@
 	.skip-step:focus-visible {
 		outline: 2px solid var(--color-primary);
 		outline-offset: 2px;
-		border-radius: var(--radius-sm);
+		border-radius: var(--border-radius-sm);
 	}
 </style>

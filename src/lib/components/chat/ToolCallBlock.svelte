@@ -9,7 +9,7 @@
 <script lang="ts">
 	import { Wrench, ChevronDown, CheckCircle, XCircle, Server } from '@lucide/svelte';
 	import { i18n } from '$lib/i18n';
-	import { formatToolDuration } from '$types/tool';
+	import { formatDuration } from '$lib/utils/duration';
 
 	interface Props {
 		toolName: string;
@@ -21,6 +21,8 @@
 		errorMessage?: string;
 		durationMs: number;
 		collapsed?: boolean;
+		/** Stable block sequence used to derive a deterministic DOM id */
+		sequence?: number;
 	}
 
 	let {
@@ -32,12 +34,13 @@
 		success,
 		errorMessage,
 		durationMs,
-		collapsed = true
+		collapsed = true,
+		sequence
 	}: Props = $props();
 
-	const blockId = `tool-${crypto.randomUUID().slice(0, 8)}`;
+	const blockId = $derived(`tool-${sequence ?? 'tmp'}`);
 
-	const formattedDuration = $derived(formatToolDuration(durationMs));
+	const formattedDuration = $derived(formatDuration(durationMs));
 
 	const formattedInput = $derived(formatJson(inputParams));
 	const formattedOutput = $derived(formatJson(outputResult));
@@ -127,7 +130,7 @@
 
 <style>
 	.tool-call-block {
-		border-radius: var(--radius-md);
+		border-radius: var(--border-radius-md);
 		margin: var(--spacing-xs) 0;
 		background: var(--color-bg-secondary);
 		overflow: hidden;
@@ -176,7 +179,7 @@
 		gap: 2px;
 		padding: 1px var(--spacing-xs);
 		background: var(--color-bg-tertiary);
-		border-radius: var(--radius-sm);
+		border-radius: var(--border-radius-sm);
 		font-size: var(--font-size-xs);
 		color: var(--color-text-secondary);
 	}
@@ -240,7 +243,7 @@
 		line-height: 1.5;
 		color: var(--color-text-primary);
 		background: var(--color-bg-tertiary);
-		border-radius: var(--radius-sm);
+		border-radius: var(--border-radius-sm);
 		padding: var(--spacing-xs) var(--spacing-sm);
 		white-space: pre-wrap;
 		word-break: break-word;
@@ -258,6 +261,6 @@
 		color: var(--color-danger);
 		padding: var(--spacing-xs) var(--spacing-sm);
 		background: var(--color-danger-bg, rgba(239, 68, 68, 0.1));
-		border-radius: var(--radius-sm);
+		border-radius: var(--border-radius-sm);
 	}
 </style>

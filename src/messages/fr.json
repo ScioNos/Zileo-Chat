@@ -16,6 +16,7 @@
   "common_saving": "Enregistrement...",
   "common_add": "Ajouter",
   "common_retry": "Reessayer",
+  "common_dismiss": "Ignorer",
 
   "nav_skip_to_content": "Aller au contenu principal",
 
@@ -26,6 +27,7 @@
   "agent_loading": "Chargement des agents...",
   "agent_loading_description": "Veuillez patienter pendant le chargement de vos agents.",
   "agent_no_agents": "Aucun agent configure",
+  "agent_unknown": "Agent inconnu",
   "agent_no_agents_description": "Vous devez creer au moins un agent avant de demarrer un flux de travail. Configurez votre premier agent dans les Parametres.",
   "agent_go_to_settings": "Aller aux Parametres",
   "agent_select_or_create": "Selectionnez ou creez un flux de travail",
@@ -689,9 +691,9 @@
   "chat_input_placeholder": "Saisissez votre message...",
   "chat_input_arialabel": "Champ de saisie du message",
   "chat_send_arialabel": "Envoyer le message",
-  "chat_prompt_library_title": "Selectionner depuis la bibliotheque d'instructions (Ctrl+P)",
+  "chat_prompt_library_title": "Selectionner depuis la bibliotheque d'instructions (Ctrl+K)",
   "chat_prompt_library_arialabel": "Ouvrir la bibliotheque d'instructions",
-  "chat_keyboard_hint": "Ctrl+Entree pour envoyer | Ctrl+P pour les instructions",
+  "chat_keyboard_hint": "Ctrl+Entree pour envoyer | Ctrl+K pour les instructions",
   "chat_tokens": "{count} jetons",
   "chat_messages_arialabel": "Messages de la conversation",
   "chat_no_messages": "Aucun message pour le moment. Demarrez une conversation !",

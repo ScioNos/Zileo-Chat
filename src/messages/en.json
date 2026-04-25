@@ -16,6 +16,7 @@
   "common_saving": "Saving...",
   "common_add": "Add",
   "common_retry": "Retry",
+  "common_dismiss": "Dismiss",
 
   "nav_skip_to_content": "Skip to main content",
 
@@ -26,6 +27,7 @@
   "agent_loading": "Loading agents...",
   "agent_loading_description": "Please wait while we load your configured agents.",
   "agent_no_agents": "No agents configured",
+  "agent_unknown": "Unknown agent",
   "agent_no_agents_description": "You need to create at least one agent before starting a workflow. Configure your first agent in the Settings page.",
   "agent_go_to_settings": "Go to Settings",
   "agent_select_or_create": "Select or create a workflow",
@@ -688,9 +690,9 @@
   "chat_input_placeholder": "Type your message...",
   "chat_input_arialabel": "Message input",
   "chat_send_arialabel": "Send message",
-  "chat_prompt_library_title": "Select from prompt library (Ctrl+P)",
+  "chat_prompt_library_title": "Select from prompt library (Ctrl+K)",
   "chat_prompt_library_arialabel": "Open prompt library",
-  "chat_keyboard_hint": "Ctrl+Enter to send | Ctrl+P for prompts",
+  "chat_keyboard_hint": "Ctrl+Enter to send | Ctrl+K for prompts",
   "chat_tokens": "{count} tokens",
   "chat_messages_arialabel": "Chat messages",
   "chat_no_messages": "No messages yet. Start a conversation!",
