@@ -151,6 +151,7 @@
 pub mod agent;
 pub mod custom_provider;
 pub mod embedding;
+pub mod error;
 pub mod file_manager;
 pub mod import_export;
 pub mod llm_models;
@@ -168,6 +169,7 @@ pub mod thinking;
 pub mod tool_execution;
 pub mod user_question;
 pub mod validation;
+pub mod validation_audit;
 pub mod workflow;
 pub mod workflow_folder;
 

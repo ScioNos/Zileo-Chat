@@ -159,6 +159,11 @@ pub enum LLMError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// Operation was cancelled via a `CancellationToken`.
+    /// Non-retryable: cancellation is intentional, not a transient failure.
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 impl From<anyhow::Error> for LLMError {

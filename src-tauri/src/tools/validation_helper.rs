@@ -31,10 +31,10 @@
 //! All validation types share a single flow via `create_and_wait_validation()`.
 
 use crate::db::DBClient;
-use crate::models::streaming::{events, ValidationRequiredEvent};
+use crate::models::streaming::{events, ValidationRequiredEvent, ValidationResolvedEvent};
 use crate::models::{
-    RiskLevel, ValidationMode, ValidationRequestCreate, ValidationSettings, ValidationStatus,
-    ValidationType,
+    RiskLevel, TimeoutBehavior, ValidationMode, ValidationRequestCreate, ValidationSettings,
+    ValidationStatus, ValidationType,
 };
 use crate::tools::constants::sub_agent::{VALIDATION_POLL_MS, VALIDATION_TIMEOUT_SECS};
 use crate::tools::ToolError;
@@ -43,6 +43,61 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, error, info, warn};
+
+/// Minimum allowed timeout (seconds) for a validation request.
+/// Re-export of [`crate::constants::validation::VALIDATION_TIMEOUT_MIN_SECS`].
+pub(crate) const VALIDATION_TIMEOUT_MIN_SECS: u64 =
+    crate::constants::validation::VALIDATION_TIMEOUT_MIN_SECS;
+
+/// Maximum allowed timeout (seconds) for a validation request.
+/// Re-export of [`crate::constants::validation::VALIDATION_TIMEOUT_MAX_SECS`].
+pub(crate) const VALIDATION_TIMEOUT_MAX_SECS: u64 =
+    crate::constants::validation::VALIDATION_TIMEOUT_MAX_SECS;
+
+/// Outcome of `wait_for_validation` after polling.
+///
+/// Carries both the resulting decision and whether it came from a timeout
+/// (so callers can route audit logging through the right `DecidedBy` source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WaitOutcome {
+    pub decision: WaitDecision,
+    pub via_timeout: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitDecision {
+    Approved,
+    Rejected,
+    /// Skip is only reachable via timeout + `TimeoutBehavior::Skip`.
+    Skipped,
+}
+
+impl WaitOutcome {
+    fn user_decision(d: WaitDecision) -> Self {
+        Self {
+            decision: d,
+            via_timeout: false,
+        }
+    }
+    fn from_timeout(d: WaitDecision) -> Self {
+        Self {
+            decision: d,
+            via_timeout: true,
+        }
+    }
+}
+
+/// Clamps a user-configured timeout (in seconds) into the allowed range.
+///
+/// `raw <= 0` falls back to [`VALIDATION_TIMEOUT_SECS`] (60s — the documented
+/// default for validation responses). Otherwise the value is clamped into
+/// `[VALIDATION_TIMEOUT_MIN_SECS, VALIDATION_TIMEOUT_MAX_SECS]` = `[5, 600]` seconds.
+pub(crate) fn clamp_timeout_seconds(raw: i32) -> u64 {
+    if raw <= 0 {
+        return VALIDATION_TIMEOUT_SECS;
+    }
+    (raw as u64).clamp(VALIDATION_TIMEOUT_MIN_SECS, VALIDATION_TIMEOUT_MAX_SECS)
+}
 
 /// Validates a trimmed name with configurable field name and max length.
 ///
@@ -81,6 +136,26 @@ pub fn validate_trimmed_name(
     Ok(trimmed.to_string())
 }
 
+/// Returns `true` when `auto_approve_low` is enabled and the risk level is low.
+fn is_auto_approved_low(settings: &ValidationSettings, risk_level: &RiskLevel) -> bool {
+    settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low
+}
+
+/// Returns `true` when the operation type is selected for validation in
+/// `Selective` mode.
+fn type_requires_validation(
+    settings: &ValidationSettings,
+    validation_type: &ValidationType,
+) -> bool {
+    match validation_type {
+        ValidationType::SubAgent => settings.selective_config.sub_agents,
+        ValidationType::Tool => settings.selective_config.tools,
+        ValidationType::Mcp => settings.selective_config.mcp,
+        ValidationType::FileOp => settings.selective_config.file_ops,
+        ValidationType::DbOp => settings.selective_config.db_ops,
+    }
+}
+
 /// Checks if validation is required based on settings for any operation type.
 ///
 /// Pure logic function (no I/O) that evaluates the validation mode, operation type,
@@ -98,10 +173,9 @@ pub(crate) fn should_require_validation(
     validation_type: &ValidationType,
     risk_level: &RiskLevel,
 ) -> bool {
-    // Check mode first
     match settings.mode {
         ValidationMode::Auto => {
-            // In auto mode, only validate if always_confirm_high is set AND risk is high
+            // Auto mode: only validate when always_confirm_high covers the operation.
             if settings.risk_thresholds.always_confirm_high
                 && (*risk_level == RiskLevel::High || *risk_level == RiskLevel::Critical)
             {
@@ -109,45 +183,31 @@ pub(crate) fn should_require_validation(
                 return true;
             }
             info!("Auto mode: skipping validation");
-            return false;
+            false
         }
         ValidationMode::Manual => {
-            // Manual mode: always validate unless auto_approve_low is set AND risk is low
-            if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
+            // Manual mode: always validate unless auto_approve_low covers the operation.
+            if is_auto_approved_low(settings, risk_level) {
                 info!("Manual mode but auto-approving low risk operation");
                 return false;
             }
-            return true;
+            true
         }
         ValidationMode::Selective => {
-            // Selective mode: check operation type below
+            if !type_requires_validation(settings, validation_type) {
+                info!(
+                    validation_type = %validation_type,
+                    "Selective mode: operation type does not require validation"
+                );
+                return false;
+            }
+            if is_auto_approved_low(settings, risk_level) {
+                info!("Auto-approving low risk operation");
+                return false;
+            }
+            true
         }
     }
-
-    // Selective mode: check if operation type requires validation
-    let type_requires_validation = match validation_type {
-        ValidationType::SubAgent => settings.selective_config.sub_agents,
-        ValidationType::Tool => settings.selective_config.tools,
-        ValidationType::Mcp => settings.selective_config.mcp,
-        ValidationType::FileOp => settings.selective_config.file_ops,
-        ValidationType::DbOp => settings.selective_config.db_ops,
-    };
-
-    if !type_requires_validation {
-        info!(
-            validation_type = %validation_type,
-            "Selective mode: operation type does not require validation"
-        );
-        return false;
-    }
-
-    // Check risk thresholds
-    if settings.risk_thresholds.auto_approve_low && *risk_level == RiskLevel::Low {
-        info!("Auto-approving low risk operation");
-        return false;
-    }
-
-    true
 }
 
 /// Checks if a FileManagerTool operation is destructive and requires confirmation.
@@ -211,39 +271,35 @@ impl ValidationHelper {
 
     /// Waits for validation response by polling the database.
     ///
+    /// On timeout, applies the configured `timeout_behavior`:
+    /// - `Reject` (default): updates the row to `rejected` and returns `WaitOutcome::Rejected`.
+    /// - `Approve`: updates the row to `approved` (decided_by = `timeout`)
+    ///   and returns `WaitOutcome::Approved`.
+    /// - `Skip`: leaves the row pending and returns `WaitOutcome::Skipped`
+    ///   so the agent can proceed without blocking.
+    ///
     /// # Arguments
     /// * `validation_id` - Validation request ID to check
     /// * `timeout` - Maximum time to wait for response
+    /// * `timeout_behavior` - Behavior to apply when the wait expires
     ///
-    /// # Returns
-    /// * `Ok(true)` - If approved
-    /// * `Ok(false)` - If rejected
-    /// * `Err(ToolError::Timeout)` - If timed out
+    /// # Errors
+    /// Returns [`ToolError::DatabaseError`] if the polling query fails.
     async fn wait_for_validation(
         &self,
         validation_id: &str,
         timeout: Duration,
-    ) -> Result<bool, ToolError> {
+        timeout_behavior: TimeoutBehavior,
+    ) -> Result<WaitOutcome, ToolError> {
         let poll_interval = Duration::from_millis(VALIDATION_POLL_MS);
         let start_time = std::time::Instant::now();
 
         loop {
             // Check if timeout exceeded
             if start_time.elapsed() >= timeout {
-                // Update validation status to rejected (timeout)
-                let update_query = format!(
-                    "UPDATE validation_request:`{}` SET status = 'rejected', \
-                     details.rejection_reason = 'Validation timed out'",
-                    validation_id
-                );
-                let _ = self.db.execute(&update_query).await;
-
-                return Err(ToolError::Timeout(format!(
-                    "Validation request '{}' timed out after {} seconds. \
-                     User did not respond in time.",
-                    validation_id,
-                    timeout.as_secs()
-                )));
+                return Ok(self
+                    .apply_timeout_behavior(validation_id, timeout, &timeout_behavior)
+                    .await);
             }
 
             // Query validation status
@@ -257,8 +313,12 @@ impl ValidationHelper {
                 let status = first["status"].as_str().unwrap_or("pending");
 
                 match status {
-                    "approved" => return Ok(true),
-                    "rejected" => return Ok(false),
+                    "approved" => {
+                        return Ok(WaitOutcome::user_decision(WaitDecision::Approved));
+                    }
+                    "rejected" => {
+                        return Ok(WaitOutcome::user_decision(WaitDecision::Rejected));
+                    }
                     "pending" => {
                         // Continue waiting
                         debug!(
@@ -282,8 +342,114 @@ impl ValidationHelper {
         }
     }
 
+    /// Applies the configured `timeout_behavior` once the wait period expires.
+    ///
+    /// Updates the validation row to reflect the auto-decision (Reject/Approve)
+    /// or leaves it pending (Skip), then returns the resulting outcome.
+    /// Database write failures are logged but never propagated, since the
+    /// caller has already given up waiting and must move on.
+    async fn apply_timeout_behavior(
+        &self,
+        validation_id: &str,
+        timeout: Duration,
+        timeout_behavior: &TimeoutBehavior,
+    ) -> WaitOutcome {
+        let outcome = match timeout_behavior {
+            TimeoutBehavior::Reject => {
+                let query = format!(
+                    "UPDATE validation_request:`{}` SET status = 'rejected', \
+                     details.rejection_reason = $reason",
+                    validation_id
+                );
+                let reason = format!(
+                    "Validation timed out after {} seconds (auto-reject)",
+                    timeout.as_secs()
+                );
+                if let Err(e) = self
+                    .db
+                    .execute_with_params(
+                        &query,
+                        vec![("reason".to_string(), Value::String(reason))],
+                    )
+                    .await
+                {
+                    warn!(error = %e, validation_id, "Failed to mark validation rejected on timeout");
+                }
+                info!(
+                    validation_id,
+                    elapsed_secs = timeout.as_secs(),
+                    "Validation timed out -> auto-reject"
+                );
+                WaitOutcome::from_timeout(WaitDecision::Rejected)
+            }
+            TimeoutBehavior::Approve => {
+                let query = format!(
+                    "UPDATE validation_request:`{}` SET status = 'approved', \
+                     details.timeout_decision = 'approved'",
+                    validation_id
+                );
+                if let Err(e) = self.db.execute(&query).await {
+                    warn!(error = %e, validation_id, "Failed to mark validation approved on timeout");
+                }
+                info!(
+                    validation_id,
+                    elapsed_secs = timeout.as_secs(),
+                    "Validation timed out -> auto-approve"
+                );
+                WaitOutcome::from_timeout(WaitDecision::Approved)
+            }
+            TimeoutBehavior::Skip => {
+                info!(
+                    validation_id,
+                    elapsed_secs = timeout.as_secs(),
+                    "Validation timed out -> skip (agent proceeds without decision)"
+                );
+                WaitOutcome::from_timeout(WaitDecision::Skipped)
+            }
+        };
+
+        self.emit_resolved_event(validation_id, outcome.decision, "timeout");
+
+        outcome
+    }
+
+    /// Emits a `validation_resolved` Tauri event so the frontend can close the
+    /// validation modal once the backend resolves the request itself (timeout).
+    /// User-driven approve/reject already updates the frontend store via the
+    /// Tauri command response, so we only emit here for server-side resolutions.
+    fn emit_resolved_event(&self, validation_id: &str, decision: WaitDecision, source: &str) {
+        let Some(ref app_handle) = self.app_handle else {
+            return;
+        };
+
+        let resolution = match decision {
+            WaitDecision::Approved => "approved",
+            WaitDecision::Rejected => "rejected",
+            WaitDecision::Skipped => "skipped",
+        };
+
+        let event = ValidationResolvedEvent {
+            validation_id: validation_id.to_string(),
+            resolution: resolution.to_string(),
+            source: source.to_string(),
+        };
+
+        if let Err(e) = app_handle.emit(events::VALIDATION_RESOLVED, &event) {
+            warn!(error = %e, validation_id, "Failed to emit validation_resolved event");
+        } else {
+            debug!(
+                validation_id,
+                resolution, source, "Emitted validation_resolved event"
+            );
+        }
+    }
+
     /// Creates a validation request and waits for response.
     /// This is the common logic shared by all validation types.
+    ///
+    /// Loads the user's `ValidationSettings` to honor `timeout_seconds` (clamped
+    /// to `[5, 600]`) and `timeout_behavior`. Falls back to the hardcoded
+    /// `VALIDATION_TIMEOUT_SECS` (60s) and `Reject` if settings cannot be loaded.
     pub(crate) async fn create_and_wait_validation(
         &self,
         validation_id: &str,
@@ -331,25 +497,93 @@ impl ValidationHelper {
             warn!("No app handle available, skipping event emission");
         }
 
-        // Wait for validation response
-        let result = self
-            .wait_for_validation(validation_id, Duration::from_secs(VALIDATION_TIMEOUT_SECS))
-            .await;
+        // Resolve timeout + behavior from user settings (with safe fallbacks).
+        let settings = self.load_validation_settings().await;
+        let timeout_secs = clamp_timeout_seconds(settings.timeout_seconds);
+        let timeout_behavior = settings.timeout_behavior.clone();
 
-        match result {
-            Ok(true) => {
+        let outcome = self
+            .wait_for_validation(
+                validation_id,
+                Duration::from_secs(timeout_secs),
+                timeout_behavior,
+            )
+            .await?;
+
+        // append a timeout-driven audit entry.
+        // User-driven approve/reject is audited from the Tauri command path
+        // (commands/validation.rs) so we don't double-write here.
+        if outcome.via_timeout {
+            self.write_timeout_audit(
+                &settings,
+                validation_id,
+                workflow_id,
+                &validation_type,
+                description,
+                &risk_level,
+                outcome.decision,
+            )
+            .await;
+        }
+
+        match outcome.decision {
+            WaitDecision::Approved => {
                 info!(validation_id = %validation_id, "Validation approved");
                 Ok(())
             }
-            Ok(false) => {
+            WaitDecision::Rejected => {
                 info!(validation_id = %validation_id, "Validation rejected");
                 Err(ToolError::PermissionDenied(format!(
                     "Operation was rejected by user: {}",
                     description
                 )))
             }
-            Err(e) => Err(e),
+            WaitDecision::Skipped => {
+                info!(
+                    validation_id = %validation_id,
+                    "Validation skipped on timeout (agent proceeds)"
+                );
+                Ok(())
+            }
         }
+    }
+
+    /// Best-effort audit write for a timeout-driven decision. Never propagates errors.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_timeout_audit(
+        &self,
+        settings: &ValidationSettings,
+        validation_id: &str,
+        workflow_id: &str,
+        validation_type: &ValidationType,
+        description: &str,
+        risk_level: &RiskLevel,
+        decision: WaitDecision,
+    ) {
+        use crate::commands::validation_audit::{write_audit_entry, AuditEntryDraft};
+        use crate::models::{AuditDecision, DecidedBy};
+
+        let audit_decision = match decision {
+            WaitDecision::Approved => AuditDecision::Approved,
+            WaitDecision::Rejected => AuditDecision::Rejected,
+            WaitDecision::Skipped => AuditDecision::Skipped,
+        };
+        let draft = AuditEntryDraft {
+            validation_id: validation_id.to_string(),
+            tool_name: validation_type.to_string(),
+            decision: audit_decision,
+            decided_by: DecidedBy::Timeout,
+            risk_level: risk_level.clone(),
+            workflow_id: Some(workflow_id.to_string()),
+            agent_id: None,
+            prompt_preview: Some(description.to_string()),
+            metadata: Some(serde_json::json!({
+                "source": "timeout",
+                "behavior": settings.timeout_behavior.to_string(),
+                "timeout_seconds": settings.timeout_seconds,
+            })),
+        };
+        write_audit_entry(&self.db, settings, draft).await;
     }
 }
 
