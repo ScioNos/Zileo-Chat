@@ -59,7 +59,6 @@ pub mod todo {
     pub const TASK_SELECT_FIELDS: &str = "meta::id(id) AS id, workflow_id, name, description, agent_assigned, priority, status, dependencies, duration_ms, created_at, completed_at";
 }
 
-#[allow(dead_code)]
 pub mod user_question {
     pub const MAX_QUESTION_LENGTH: usize = 2000;
     pub const MAX_OPTION_ID_LENGTH: usize = 64;
@@ -69,7 +68,6 @@ pub mod user_question {
     pub const MAX_TEXT_RESPONSE_LENGTH: usize = 10000;
     pub const POLL_INTERVALS_MS: &[u64] = &[500, 500, 1000, 1000, 2000, 2000, 5000];
     pub const VALID_TYPES: &[&str] = &["checkbox", "text", "mixed"];
-    pub const VALID_STATUSES: &[&str] = &["pending", "answered", "skipped", "timeout"];
 
     // Configurable timeout for wait_for_response
     /// Default timeout (seconds) for waiting for user response.
@@ -99,11 +97,6 @@ pub mod sub_agent {
     pub const ACTIVITY_CHECK_INTERVAL_SECS: u64 = 30;
 
     // Centralized Magic Numbers
-    /// Maximum characters for result summaries in sub-agent reports.
-    /// (Used when event emission is unified)
-    #[allow(dead_code)]
-    pub const RESULT_SUMMARY_MAX_CHARS: usize = 200;
-
     /// Maximum characters for task description truncation.
     pub const TASK_DESC_TRUNCATE_CHARS: usize = 100;
 
@@ -132,14 +125,7 @@ pub mod sub_agent {
     pub const INITIAL_RETRY_DELAY_MS: u64 = 500;
 }
 
-#[allow(dead_code)]
 pub mod calculator {
-    /// Maximum supported value (to prevent overflow)
-    pub const MAX_VALUE: f64 = 1e308;
-
-    /// Minimum positive value (for precision)
-    pub const MIN_POSITIVE: f64 = 1e-308;
-
     /// Valid unary operations
     pub const UNARY_OPS: &[&str] = &[
         "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "sqrt", "cbrt", "exp",

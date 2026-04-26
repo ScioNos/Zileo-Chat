@@ -30,7 +30,11 @@ pub(super) struct MistralEmbeddingRequest<'a> {
     pub(super) encoding_format: &'a str,
 }
 
-/// Mistral embedding API response
+/// Mistral embedding API response.
+///
+/// Fields below are deserialized from the API but not all are read after parsing
+/// (only `data` is consumed). The remaining fields exist to validate the response
+/// shape and surface useful info in debug logs.
 #[derive(Debug, Deserialize)]
 pub(super) struct MistralEmbeddingResponse {
     #[allow(dead_code)]
@@ -44,16 +48,22 @@ pub(super) struct MistralEmbeddingResponse {
     pub usage: MistralUsage,
 }
 
-/// Mistral embedding data item
+/// Mistral embedding data item.
+///
+/// Only `embedding` is consumed downstream; `object` and `index` are kept for
+/// response-shape validation during deserialization.
 #[derive(Debug, Deserialize)]
 pub(super) struct MistralEmbeddingData {
     #[allow(dead_code)]
     pub object: String,
+    #[allow(dead_code)]
     pub index: usize,
     pub embedding: Vec<f32>,
 }
 
-/// Mistral API usage statistics
+/// Mistral API usage statistics.
+///
+/// Deserialized for completeness/debug visibility; not currently surfaced to callers.
 #[derive(Debug, Deserialize)]
 pub(super) struct MistralUsage {
     #[allow(dead_code)]
@@ -137,60 +147,6 @@ pub async fn embed_mistral(
     Ok(embedding)
 }
 
-/// Embeds batch using Mistral API (native batch support).
-pub async fn embed_batch_mistral(
-    client: &Client,
-    texts: &[&str],
-    api_key: &str,
-    model: &str,
-) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-    let request = MistralEmbeddingRequest {
-        model,
-        input: texts.to_vec(),
-        encoding_format: "float",
-    };
-
-    debug!(
-        model = model,
-        batch_size = texts.len(),
-        "Sending Mistral batch embedding request"
-    );
-
-    let response = client
-        .post(MISTRAL_EMBEDDING_URL)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(EmbeddingError::RequestFailed(format!(
-            "Mistral API returned {}: {}",
-            status, body
-        )));
-    }
-
-    let result: MistralEmbeddingResponse = response
-        .json()
-        .await
-        .map_err(|e| EmbeddingError::InvalidResponse(e.to_string()))?;
-
-    let mut embeddings: Vec<_> = result.data.into_iter().collect();
-    embeddings.sort_by_key(|d| d.index);
-
-    let embeddings: Vec<Vec<f32>> = embeddings.into_iter().map(|d| d.embedding).collect();
-
-    debug!(
-        count = embeddings.len(),
-        "Mistral batch embedding generated successfully"
-    );
-
-    Ok(embeddings)
-}
-
 /// Embeds text using Ollama API.
 pub async fn embed_ollama(
     client: &Client,
@@ -251,27 +207,4 @@ pub async fn embed_ollama(
     );
 
     Ok(result.embedding)
-}
-
-/// Embeds batch using Ollama API (sequential, no native batch support).
-pub async fn embed_batch_ollama(
-    client: &Client,
-    texts: &[&str],
-    base_url: &str,
-    model: &str,
-) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-    debug!(
-        batch_size = texts.len(),
-        "Processing Ollama batch sequentially"
-    );
-
-    let mut embeddings = Vec::with_capacity(texts.len());
-    for text in texts {
-        let embedding = embed_ollama(client, text, base_url, model).await?;
-        embeddings.push(embedding);
-    }
-
-    debug!(count = embeddings.len(), "Ollama batch embedding completed");
-
-    Ok(embeddings)
 }

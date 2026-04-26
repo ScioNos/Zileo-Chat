@@ -62,6 +62,7 @@ impl Default for RetryConfig {
     }
 }
 
+// RetryConfig methods used by lib LLM providers; not all reachable from binary target.
 #[allow(dead_code)]
 impl RetryConfig {
     /// Creates a new RetryConfig with custom values
@@ -88,11 +89,9 @@ impl RetryConfig {
 /// Retryable errors:
 /// - ConnectionError: Network issues, transient failures
 /// - RequestFailed: May be rate limit (429) or server error (5xx)
-/// - StreamingError: May be transient network issue
 ///
 /// Non-retryable errors:
 /// - NotConfigured: Configuration issue, won't fix itself
-/// - InvalidProvider: Invalid input, won't fix itself
 /// - MissingApiKey: Auth issue, won't fix itself
 /// - ModelNotFound: Invalid model, won't fix itself
 /// - CircuitOpen: Provider temporarily unavailable, circuit breaker handles recovery
@@ -100,7 +99,7 @@ impl RetryConfig {
 pub fn is_retryable(error: &LLMError) -> bool {
     matches!(
         error,
-        LLMError::ConnectionError(_) | LLMError::RequestFailed(_) | LLMError::StreamingError(_)
+        LLMError::ConnectionError(_) | LLMError::RequestFailed(_)
     )
 }
 
@@ -316,16 +315,10 @@ mod tests {
         assert!(is_retryable(&LLMError::RequestFailed(
             "rate limit".to_string()
         )));
-        assert!(is_retryable(&LLMError::StreamingError(
-            "connection reset".to_string()
-        )));
 
         // Non-retryable errors
         assert!(!is_retryable(&LLMError::NotConfigured(
             "mistral".to_string()
-        )));
-        assert!(!is_retryable(&LLMError::InvalidProvider(
-            "unknown".to_string()
         )));
         assert!(!is_retryable(&LLMError::MissingApiKey(
             "mistral".to_string()

@@ -86,7 +86,7 @@ impl std::str::FromStr for ProviderType {
             "ollama" => Ok(ProviderType::Ollama),
             other => {
                 if other.is_empty() {
-                    Err(LLMError::InvalidProvider(s.to_string()))
+                    Err(LLMError::Internal(format!("Invalid provider: {}", s)))
                 } else {
                     Ok(ProviderType::Custom(other.to_string()))
                 }
@@ -122,15 +122,13 @@ pub struct LLMResponse {
 
 /// LLM error types
 #[derive(Debug, Error)]
+// Variants emitted from various lib code paths; not all are constructed in
+// every test target, hence the module-level allow.
 #[allow(dead_code)]
 pub enum LLMError {
     /// Provider not configured
     #[error("Provider not configured: {0}")]
     NotConfigured(String),
-
-    /// Invalid provider name
-    #[error("Invalid provider: {0}")]
-    InvalidProvider(String),
 
     /// API key missing
     #[error("API key missing for provider: {0}")]
@@ -147,10 +145,6 @@ pub enum LLMError {
     /// Connection error (for Ollama)
     #[error("Connection error: {0}")]
     ConnectionError(String),
-
-    /// Streaming error
-    #[error("Streaming error: {0}")]
-    StreamingError(String),
 
     /// Circuit breaker is open (provider temporarily unavailable)
     #[error("Circuit breaker open for provider: {0}")]
@@ -217,6 +211,7 @@ pub struct ToolCompletionParams {
 
 /// Common trait for all LLM providers
 #[async_trait]
+// Trait used via dyn dispatch by the LLM layer; reachable from lib code only.
 #[allow(dead_code)]
 pub trait LLMProvider: Send + Sync {
     /// Returns the provider type
