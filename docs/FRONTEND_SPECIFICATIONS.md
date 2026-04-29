@@ -40,7 +40,7 @@ Route-based architecture with code splitting per section. The settings layout pr
 | `/settings/audit-log` | Audit Log | Validation audit log: list with filters (tool, decision, risk, date), summary stats, manual purge, CSV export |
 | `/settings/prompts` | Prompts | Prompt library with name/description/category/content/variables, duplicate/export/versioning |
 | `/settings/skills` | Skills | Skill document CRUD |
-| `/settings/import-export` | Import/Export | Data portability (schema v1.1, 6 entity types) |
+| `/settings/import-export` | Import/Export | Data portability (schema v1.2, 6 entity types) |
 | `/settings/theme` | Theme | Light/Dark/Auto theme, color scheme, font settings, live preview |
 
 See `src/routes/settings/` for all section pages.
@@ -142,11 +142,11 @@ Workflows are auto-saved to SurrealDB. On startup, non-terminated workflows are 
 
 ## 5. Component Library
 
-102 total components organized under `src/lib/components/`:
+103 total components organized under `src/lib/components/`:
 
 | Directory | Count | Description |
 |-----------|-------|-------------|
-| `ui/` | 19 | Atomic UI: Badge, Button, Card, ContextMenu, DeleteConfirmModal, ErrorBanner, HelpButton, Input, LanguageSelector, MarkdownRenderer, Modal, ProgressBar, Select, Skeleton, Spinner, StatusIndicator, Textarea, ToastContainer, ToastItem |
+| `ui/` | 20 | Atomic UI: Badge, Button, Card, ContextMenu, DeleteConfirmModal, ErrorBanner, HelpButton, Input, LanguageSelector, MarkdownRenderer, Modal, PasswordInput, ProgressBar, Select, Skeleton, Spinner, StatusIndicator, Textarea, ToastContainer, ToastItem |
 | `layout/` | 3 | AppContainer, FloatingMenu, Sidebar |
 | `navigation/` | 1 | NavItem |
 | `agent/` | 3 | AgentHeader, ChatContainer, WorkflowSidebar |
@@ -196,7 +196,7 @@ Workflows are auto-saved to SurrealDB. On startup, non-terminated workflows are 
 | `i18n.ts` | Locale, LocaleInfo, LOCALES | Internationalization |
 | `import-export.ts` | Import/export structures | Backup/restore |
 | `llm.ts` | LLMModel, ProviderSettings, ConnectionTestResult, LLMState, ProviderType | LLM providers |
-| `mcp.ts` | MCPServer, MCPServerConfig, MCPTool, MCPTestResult | MCP servers |
+| `mcp.ts` | MCPServer, MCPServerConfig, MCPServerConfigWithSecret, MCPAuthType, MCPAuthMetadata, MCPAuthSecret, LegacyHttpAuthWarning, MCPTool, MCPTestResult | MCP servers (HTTP auth: Bearer/API Key/Basic, secrets in keychain) |
 | `memory.ts` | Memory, MemoryType | Memory/RAG |
 | `message.ts` | Message | Chat messages |
 | `onboarding.ts` | Onboarding state types | First-launch wizard |
@@ -214,7 +214,7 @@ Workflows are auto-saved to SurrealDB. On startup, non-terminated workflows are 
 
 ## 8. Utilities and Services
 
-### Utilities (`src/lib/utils/`, 14 modules)
+### Utilities (`src/lib/utils/`, 16 modules)
 
 | Module | Key Exports | Description |
 |--------|-------------|-------------|
@@ -231,6 +231,8 @@ Workflows are auto-saved to SurrealDB. On startup, non-terminated workflows are 
 | `uuid.ts` | `isUuid()` | Canonical 8-4-4-4-12 hex UUID validation |
 | `constants.ts` | `ITERATIONS_LIMITS` | Shared frontend constants (synchronized with backend clamping) |
 | `settings-refresh.ts` | `onSettingsRefresh()`, `attachSettingsRefreshListener()`, `SETTINGS_REFRESH_EVENT` | Subscribe to the global `settings:refresh` event after import/export |
+| `mcp-auth-validation.ts` | MCP HTTP auth validators | Validates `MCPAuthMetadata`/`MCPAuthSecret` symmetrically with the Rust backend |
+| `agent-reasoning.ts` | `getReasoningOptions()`, `getReasoningHelp()`, `normalizeReasoningEffortForProvider()` | Provider-aware reasoning_effort selector helpers (Mistral exposes Off/High only; other providers expose Off/Low/Medium/High) |
 | `index.ts` | Re-exports | Barrel file |
 
 ### Actions (`src/lib/actions/`, 1 module)
