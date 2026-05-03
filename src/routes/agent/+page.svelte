@@ -241,6 +241,10 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Handles workflow switching for background workflows by restoring streaming state.
 	 */
 	async function selectWorkflow(workflowId: string): Promise<void> {
+		// Phase 13 — clear "zombie" values from the previous workflow IMMEDIATELY
+		// so the user never sees a flash of the wrong session metrics.
+		tokenStore.reset();
+
 		pageState.selectedWorkflowId = workflowId;
 		workflowStore.select(workflowId);
 		LocalStorage.set(STORAGE_KEYS.SELECTED_WORKFLOW_ID, workflowId);
@@ -251,6 +255,16 @@ Uses extracted components, services, and stores for clean architecture.
 		// Load workflow data (messages and historical activities)
 		await loadWorkflowData(workflowId);
 
+		// Update token store with workflow cumulative metrics
+		const workflow = workflowStore.getSelected();
+		if (workflow) {
+			tokenStore.updateFromWorkflow(workflow);
+		}
+
+		// Phase 13 — fetch the metrics of the last assistant message so the
+		// session display reflects "what the last run cost" rather than zeros.
+		const lastMetrics = await MessageService.getLastAssistantMetrics(workflowId);
+
 		// Check if this workflow is running in the background
 		const bgExecution = backgroundWorkflowsStore.getExecution(workflowId);
 		if (bgExecution && bgExecution.status === 'running') {
@@ -258,20 +272,30 @@ Uses extracted components, services, and stores for clean architecture.
 			streamingStore.restoreFrom(bgExecution);
 			executionBlocksStore.start(workflowId);
 			tokenStore.startStreaming();
-			tokenStore.setSessionTokens(0, bgExecution.tokensReceived);
+			// Phase 13: hydrate the FULL session token display, not just outputs.
+			// Inputs/cache survive workflow switches because chunkProcessor.ts
+			// keeps them on the bg execution itself (response_block updates).
+			tokenStore.setSessionTokens(
+				bgExecution.tokensSent,
+				bgExecution.tokensReceived,
+				bgExecution.cachedTokens ?? undefined,
+				bgExecution.cacheWriteTokens ?? undefined
+			);
+			// Option A: also restore the in-progress cost so a switch back to
+			// a still-running workflow shows what's accrued so far, marked as
+			// partial via the `~` prefix in MetricsBar / TokenDisplay.
+			if (bgExecution.partialCostUsd != null) {
+				tokenStore.setPartialSessionCost(bgExecution.partialCostUsd);
+			}
 
 			// Open user question modal if there are pending questions for this workflow
 			userQuestionStore.openForWorkflow(workflowId);
 		} else {
-			// Not running in background - reset streaming and execution state
+			// Not running in background — show the last assistant message's
+			// metrics so the user sees a meaningful session summary.
 			streamingStore.reset();
 			executionBlocksStore.reset();
-		}
-
-		// Update token store with workflow cumulative metrics
-		const workflow = workflowStore.getSelected();
-		if (workflow) {
-			tokenStore.updateFromWorkflow(workflow);
+			tokenStore.restoreFromLastMessage(lastMetrics);
 		}
 
 		// Auto-select agent if workflow has one
@@ -533,6 +557,36 @@ Uses extracted components, services, and stores for clean architecture.
 			(chunk) => {
 				streamingStore.processChunkDirect(chunk);
 				executionBlocksStore.processChunk(chunk);
+				// Mirror live token & cost updates so the metrics bar reflects
+				// each tool-loop iteration in real time. Two chunk types feed
+				// this: `iteration_progress` (during streaming, fired after
+				// every LLM call) and `response_block` (final, fires once at
+				// workflow completion). Both carry the same token shape.
+				if (
+					chunk.chunk_type === 'iteration_progress' ||
+					chunk.chunk_type === 'response_block'
+				) {
+					const tIn = chunk.tokens_input;
+					const tOut = chunk.tokens_output;
+					if (typeof tIn === 'number' && typeof tOut === 'number') {
+						// Drives the ENTREE/SORTIE display + speed (t/s) live.
+						tokenStore.setSessionTokens(
+							tIn,
+							tOut,
+							chunk.cached_tokens,
+							chunk.cache_write_tokens
+						);
+						// `tokens_input` IS the context-window usage of that call.
+						tokenStore.setContextUsed(tIn);
+					}
+					// Option A: in-progress cost (running sum of backend values).
+					if (typeof chunk.cost_usd === 'number') {
+						const bgExec = backgroundWorkflowsStore.getExecution(chunk.workflow_id);
+						if (bgExec?.partialCostUsd != null) {
+							tokenStore.setPartialSessionCost(bgExec.partialCostUsd);
+						}
+					}
+				}
 			},
 			(complete) => {
 				streamingStore.processCompleteDirect(complete);

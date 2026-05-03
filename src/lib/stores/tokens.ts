@@ -24,6 +24,7 @@
 import { writable, derived } from 'svelte/store';
 import type { TokenDisplayData, Workflow } from '$types/workflow';
 import type { LLMModel } from '$types/llm';
+import type { MessageMetrics } from '$types/message';
 
 /**
  * State interface for the token store
@@ -49,12 +50,14 @@ interface TokenState {
 	subAgent: {
 		input: number;
 		output: number;
+		/** Cumulative USD cost of sub-agents (computed with their OWN pricing). */
+		costUsd: number;
 	};
 	/** Current context window usage (last API call input tokens) */
 	contextUsed: number;
 	/** Model context window size */
 	contextMax: number;
-	/** Input token price (per million tokens) */
+	/** Input token price (per million tokens) — kept only for context-window UX, NOT for cost calculation. */
 	inputPrice: number;
 	/** Output token price (per million tokens) */
 	outputPrice: number;
@@ -66,8 +69,24 @@ interface TokenState {
 	isStreaming: boolean;
 	/** Timestamp when streaming started */
 	streamStartTime: number | null;
-	/** Session cost from backend (more accurate than frontend calculation) */
+	/**
+	 * Session cost from backend. `null` means "not yet provided" — the UI must
+	 * render a neutral placeholder rather than invent a number.
+	 */
 	sessionCost: number | null;
+	/**
+	 * `true` when `sessionCost` is the running sum of per-iteration costs
+	 * carried by `response_block` chunks (Option A): the workflow is still
+	 * progressing and more iterations may bump the value. Components show a
+	 * `~` prefix to make the partial nature visible. `false` when the cost
+	 * is the final post-completion value.
+	 */
+	sessionCostInProgress: boolean;
+	/**
+	 * Pricing lookup status from the most recent backend response. Allows the
+	 * UI to differentiate "free" from "pricing unknown" (Phase 8).
+	 */
+	pricingStatus: 'ok' | 'model_not_found' | 'no_pricing_set' | null;
 }
 
 /**
@@ -76,7 +95,7 @@ interface TokenState {
 const initialState: TokenState = {
 	streaming: { input: 0, output: 0, cached: null, cacheWrite: null, speed: null },
 	cumulative: { input: 0, output: 0, cost: 0, cached: null, cacheWrite: null },
-	subAgent: { input: 0, output: 0 },
+	subAgent: { input: 0, output: 0, costUsd: 0 },
 	contextUsed: 0,
 	contextMax: 128000,
 	inputPrice: 0,
@@ -85,7 +104,9 @@ const initialState: TokenState = {
 	cacheWritePrice: 0,
 	isStreaming: false,
 	streamStartTime: null,
-	sessionCost: null
+	sessionCost: null,
+	sessionCostInProgress: false,
+	pricingStatus: null
 };
 
 /**
@@ -121,10 +142,47 @@ export const tokenStore = {
 			},
 			subAgent: {
 				input: workflow.sub_agent_tokens_input ?? 0,
-				output: workflow.sub_agent_tokens_output ?? 0
+				output: workflow.sub_agent_tokens_output ?? 0,
+				// Phase 6: read sub-agent cost computed by backend with each sub-agent's
+				// own pricing. Falls back to 0 on legacy rows that predate the column.
+				costUsd: workflow.sub_agent_cost_usd ?? 0
 			},
 			contextUsed: workflow.current_context_tokens ?? 0
 		}));
+	},
+
+	/**
+	 * Restore the session display from the last assistant message of a workflow.
+	 *
+	 * Called by Phase 13's `selectWorkflow` when switching to a workflow that
+	 * has no live execution running, so the UI shows "what the last run cost"
+	 * rather than blank zeros (which would look like a free / fresh session).
+	 *
+	 * Passing `null` resets the session block but leaves cumulative untouched.
+	 */
+	restoreFromLastMessage(metrics: MessageMetrics | null): void {
+		store.update((s) => ({
+			...s,
+			streaming: {
+				input: metrics?.tokens_input ?? 0,
+				output: metrics?.tokens_output ?? 0,
+				cached: metrics?.cached_tokens ?? null,
+				cacheWrite: metrics?.cache_write_tokens ?? null,
+				speed: null
+			},
+			sessionCost: metrics?.cost_usd ?? null,
+			// A persisted message is a finalised cost — never partial.
+			sessionCostInProgress: false
+		}));
+	},
+
+	/**
+	 * Records the pricing-lookup outcome reported by the backend for the most
+	 * recent response. Lets the UI show a discreet "pricing unknown" badge
+	 * instead of misleadingly displaying "Free" (Phase 8).
+	 */
+	setPricingStatus(status: 'ok' | 'model_not_found' | 'no_pricing_set' | null): void {
+		store.update((s) => ({ ...s, pricingStatus: status }));
 	},
 
 	/**
@@ -154,31 +212,51 @@ export const tokenStore = {
 			streaming: { input: 0, output: 0, cached: null, cacheWrite: null, speed: null },
 			isStreaming: true,
 			streamStartTime: Date.now(),
-			sessionCost: null
+			sessionCost: null,
+			sessionCostInProgress: false
 		}));
 	},
 
 	/**
 	 * Set session tokens from a response_block event.
-	 * Sets both input and output tokens at once without speed calculation.
-	 * Used with the block-by-block execution model.
+	 *
+	 * Computes `speed` (tokens/sec) when streaming is active and a start time
+	 * was recorded by `startStreaming()`. Without this, the `t/s` indicator
+	 * stays `null` forever — a regression from a prior refactor that moved
+	 * the speed calculation out of an older streaming helper. Outside of
+	 * streaming (e.g. restoring a previous session), speed is set to `null`
+	 * since there's no in-progress generation to measure.
 	 *
 	 * @param tokensIn - Input tokens consumed
 	 * @param tokensOut - Output tokens generated
 	 * @param cachedTokens - Cached input tokens (if reported by provider)
 	 * @param cacheWriteTokens - Cache-write tokens (if reported by provider)
 	 */
-	setSessionTokens(tokensIn: number, tokensOut: number, cachedTokens?: number, cacheWriteTokens?: number): void {
-		store.update((s) => ({
-			...s,
-			streaming: {
-				input: tokensIn,
-				output: tokensOut,
-				cached: cachedTokens ?? null,
-				cacheWrite: cacheWriteTokens ?? null,
-				speed: null
+	setSessionTokens(
+		tokensIn: number,
+		tokensOut: number,
+		cachedTokens?: number,
+		cacheWriteTokens?: number
+	): void {
+		store.update((s) => {
+			let speed: number | null = null;
+			if (s.isStreaming && s.streamStartTime !== null && tokensOut > 0) {
+				const elapsedSec = (Date.now() - s.streamStartTime) / 1000;
+				if (elapsedSec > 0) {
+					speed = tokensOut / elapsedSec;
+				}
 			}
-		}));
+			return {
+				...s,
+				streaming: {
+					input: tokensIn,
+					output: tokensOut,
+					cached: cachedTokens ?? null,
+					cacheWrite: cacheWriteTokens ?? null,
+					speed
+				}
+			};
+		});
 	},
 
 	/**
@@ -194,15 +272,48 @@ export const tokenStore = {
 	},
 
 	/**
-	 * Set session cost directly from backend result.
-	 * Used when the backend has already calculated the cost.
+	 * Update the live context-window usage from a `response_block` chunk.
+	 *
+	 * `tokens_input` reported by the latest LLM iteration IS the context
+	 * window size that call consumed, so mirroring it here makes the
+	 * "contexte" gauge update during streaming instead of only after the
+	 * workflow finishes (which is when `current_context_tokens` is persisted
+	 * onto the workflow row).
+	 */
+	setContextUsed(tokensInput: number): void {
+		store.update((s) => ({ ...s, contextUsed: tokensInput }));
+	},
+
+	/**
+	 * Set the FINAL session cost from a completed workflow result.
+	 * Always clears the in-progress flag since this value won't change again.
 	 *
 	 * @param costUsd - Cost in USD from WorkflowMetrics
 	 */
 	setSessionCost(costUsd: number): void {
 		store.update((s) => ({
 			...s,
-			sessionCost: costUsd
+			sessionCost: costUsd,
+			sessionCostInProgress: false
+		}));
+	},
+
+	/**
+	 * Set a PARTIAL session cost from a `response_block` chunk during streaming.
+	 *
+	 * The backend pricing layer computes one `cost_usd` per LLM iteration; the
+	 * chunkProcessor accumulates them into `partialCostUsd` on the bg execution.
+	 * This method mirrors that running total to the visible `sessionCost` and
+	 * marks it as still-progressing so the UI can render a `~` prefix.
+	 *
+	 * Phase 7 invariant preserved: the value comes 100% from the backend; the
+	 * frontend just stores it.
+	 */
+	setPartialSessionCost(costUsd: number | null): void {
+		store.update((s) => ({
+			...s,
+			sessionCost: costUsd,
+			sessionCostInProgress: costUsd !== null
 		}));
 	},
 
@@ -221,24 +332,24 @@ export const tokenStore = {
  * Combines streaming and cumulative metrics with cost calculations.
  */
 export const tokenDisplayData = derived(store, ($s): TokenDisplayData => {
-	// Determine if there's an active session (has streaming tokens or explicit session cost)
-	const hasActiveSession = $s.sessionCost !== null || $s.streaming.input > 0 || $s.streaming.output > 0;
+	// Phase 7: the frontend NEVER multiplies tokens × price. The backend is the
+	// single source of truth for cost. When no session cost has been provided,
+	// we fall back to the workflow's cumulative cost (so a freshly opened
+	// workflow doesn't show a blank); during a live session we wait for the
+	// backend value rather than inventing one.
+	const hasActiveSession =
+		$s.sessionCost !== null ||
+		$s.isStreaming ||
+		$s.streaming.input > 0 ||
+		$s.streaming.output > 0;
 
-	// Use backend-calculated session cost if available, otherwise calculate from prices
-	const calculatedCost =
-		($s.streaming.input * $s.inputPrice) / 1_000_000 +
-		($s.streaming.output * $s.outputPrice) / 1_000_000;
-
-	// If no active session, show cumulative cost as main cost (avoids misleading "Free")
-	// If active session, show session cost (backend value preferred)
-	const displayCost = hasActiveSession
-		? ($s.sessionCost ?? calculatedCost)
+	const displayCost: number | null = hasActiveSession
+		? $s.sessionCost
 		: $s.cumulative.cost;
 
-	// Estimate sub-agent cost using main agent pricing (approximation)
-	const subAgentCost =
-		($s.subAgent.input * $s.inputPrice) / 1_000_000 +
-		($s.subAgent.output * $s.outputPrice) / 1_000_000;
+	// Phase 6: sub-agent cost comes from the workflow row, not a per-call
+	// approximation with the parent's pricing.
+	const subAgentCost = $s.subAgent.costUsd;
 
 	return {
 		tokens_input: $s.streaming.input,
@@ -247,6 +358,9 @@ export const tokenDisplayData = derived(store, ($s): TokenDisplayData => {
 		cumulative_output: $s.cumulative.output,
 		context_max: $s.contextMax,
 		cost_usd: displayCost,
+		// Only mark as partial when we're actually showing the session value
+		// (not when displaying the workflow's cumulative cost as fallback).
+		cost_is_partial: hasActiveSession && $s.sessionCostInProgress,
 		cumulative_cost_usd: $s.cumulative.cost,
 		sub_agent_input: $s.subAgent.input,
 		sub_agent_output: $s.subAgent.output,
@@ -255,6 +369,7 @@ export const tokenDisplayData = derived(store, ($s): TokenDisplayData => {
 		cache_write_tokens: $s.streaming.cacheWrite ?? undefined,
 		cumulative_cache_write: $s.cumulative.cacheWrite ?? undefined,
 		workflow_total_cost: $s.cumulative.cost + subAgentCost,
+		pricing_status: $s.pricingStatus,
 		speed_tks: $s.streaming.speed ?? undefined,
 		is_streaming: $s.isStreaming,
 		context_used: $s.contextUsed,

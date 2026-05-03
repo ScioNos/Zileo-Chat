@@ -44,6 +44,7 @@
 	} from '@lucide/svelte';
 	import { i18n } from '$lib/i18n';
 	import { HelpButton } from '$lib/components/ui';
+	import { formatCost, formatCostOrPlaceholder } from '$lib/utils/currency';
 
 	/**
 	 * TokenDisplay props
@@ -90,15 +91,7 @@
 		return count.toLocaleString();
 	}
 
-	/**
-	 * Format cost in USD
-	 */
-	function formatCost(usd: number): string {
-		if (usd === 0) return $i18n('workflow_metrics_free');
-		if (usd < 0.0001) return '<$0.0001';
-		if (usd < 0.01) return `$${usd.toFixed(4)}`;
-		return `$${usd.toFixed(2)}`;
-	}
+	// formatCost is imported from $lib/utils/currency (Phase 9 — single source).
 
 	/**
 	 * Format speed in tokens per second
@@ -261,16 +254,33 @@
 	<div class="separator"></div>
 
 	<!-- Cost -->
-	<div class="metric cost-metric">
+	<div class="metric cost-metric" class:cost-partial={data.cost_is_partial}>
 		<div class="metric-icon cost-icon">
 			<CircleDollarSign size={14} />
 		</div>
-		<span class="cost-value">{formatCost(hasSubAgents ? data.workflow_total_cost : data.cost_usd)}</span>
+		<!-- Option A: prefix with `~` when the cost is the running sum of
+		     per-iteration backend values (workflow still progressing). -->
+		<span
+			class="cost-value"
+			title={data.cost_is_partial ? $i18n('tokens_cost_in_progress_help') : undefined}
+		>{
+			hasSubAgents
+				? formatCost(data.workflow_total_cost, $i18n('workflow_metrics_free'))
+				: data.cost_is_partial && data.cost_usd !== null
+					? `~ ${formatCost(data.cost_usd, $i18n('workflow_metrics_free'))}`
+					: formatCostOrPlaceholder(data.cost_usd, $i18n('workflow_metrics_free'))
+		}</span>
 		<span class="cost-estimate">{$i18n('workflow_cost_estimate')}</span>
-		{#if !compact && hasSubAgents && data.cumulative_cost_usd > 0}
-			<span class="cost-total">({$i18n('workflow_token_agent')}: {formatCost(data.cumulative_cost_usd)})</span>
+		{#if !compact && data.pricing_status && data.pricing_status !== 'ok'}
+			<!-- Phase 8: backend reports pricing missing — surface a discreet badge
+			     so users don't read a $0 / "Free" display as a real free request. -->
+			<span class="cost-total" title={$i18n('tokens_pricing_unknown_help')}>
+				⚠ {$i18n('tokens_pricing_unknown')}
+			</span>
+		{:else if !compact && hasSubAgents && data.cumulative_cost_usd > 0}
+			<span class="cost-total">({$i18n('workflow_token_agent')}: {formatCost(data.cumulative_cost_usd, $i18n('workflow_metrics_free'))})</span>
 		{:else if !compact && data.cumulative_cost_usd > 0 && data.cumulative_cost_usd !== data.cost_usd}
-			<span class="cost-total">({formatCost(data.cumulative_cost_usd)})</span>
+			<span class="cost-total">({formatCost(data.cumulative_cost_usd, $i18n('workflow_metrics_free'))})</span>
 		{/if}
 	</div>
 
@@ -569,6 +579,25 @@
 		font-family: var(--font-mono);
 		font-weight: var(--font-weight-semibold);
 		color: var(--color-secondary);
+	}
+
+	/* Option A: a workflow that's still progressing reports a partial cost.
+	   Lower opacity + animated pulse keep the figure readable while signalling
+	   that it's not the final number yet. */
+	.cost-partial .cost-value {
+		opacity: 0.85;
+		animation: cost-pulse 1.6s ease-in-out infinite;
+	}
+
+	@keyframes cost-pulse {
+		0%, 100% { opacity: 0.85; }
+		50% { opacity: 0.55; }
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.cost-partial .cost-value {
+			animation: none;
+		}
 	}
 
 	.cost-estimate {

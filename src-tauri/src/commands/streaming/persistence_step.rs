@@ -172,21 +172,10 @@ pub async fn finalize_completion(
     }
     thinking_step_number += 1;
 
-    // 3. Emit response block.
-    emit_chunk(
-        window,
-        StreamChunk::response_block(
-            workflow_id.to_string(),
-            report.response.clone(),
-            report.metrics.tokens_input,
-            report.metrics.tokens_output,
-            report.metrics.cached_tokens,
-            report.metrics.cache_write_tokens,
-            report.metrics.thinking_tokens,
-        ),
-    );
-
-    // 4. Pricing +warning.
+    // 3. Resolve pricing BEFORE emitting the response_block so the chunk can
+    //    carry the per-iteration cost. This lets a backgrounded workflow
+    //    accumulate `partialCostUsd` on its bg execution without the frontend
+    //    inventing any number (Phase 7 invariant preserved).
     let pricing = load_model_pricing_info(
         state,
         agent_id,
@@ -194,6 +183,7 @@ pub async fn finalize_completion(
         report.metrics.tokens_output,
         report.metrics.cached_tokens,
         report.metrics.cache_write_tokens,
+        report.metrics.provider_cost_usd,
     )
     .await;
 
@@ -206,6 +196,21 @@ pub async fn finalize_completion(
             "Cost is $0.00 with non-zero token usage — model pricing likely missing"
         );
     }
+
+    // 4. Emit response block with the resolved cost embedded.
+    emit_chunk(
+        window,
+        StreamChunk::response_block(
+            workflow_id.to_string(),
+            report.response.clone(),
+            report.metrics.tokens_input,
+            report.metrics.tokens_output,
+            report.metrics.cached_tokens,
+            report.metrics.cache_write_tokens,
+            report.metrics.thinking_tokens,
+            Some(pricing.cost_usd),
+        ),
+    );
 
     // 5. Workflow row cumulative update.
     update_workflow_cumulative_metrics(
@@ -286,6 +291,16 @@ pub async fn finalize_completion(
         "Persisted tool executions and thinking steps to database"
     );
 
+    let pricing_status = match pricing.status {
+        crate::commands::streaming::pricing::PricingStatus::Ok => Some("ok".to_string()),
+        crate::commands::streaming::pricing::PricingStatus::ModelNotFound => {
+            Some("model_not_found".to_string())
+        }
+        crate::commands::streaming::pricing::PricingStatus::NoPricingSet => {
+            Some("no_pricing_set".to_string())
+        }
+    };
+
     let result = WorkflowResult {
         report: report.content,
         response: report.response,
@@ -299,6 +314,9 @@ pub async fn finalize_completion(
             cached_tokens: report.metrics.cached_tokens,
             cache_write_tokens: report.metrics.cache_write_tokens,
             thinking_tokens: report.metrics.thinking_tokens,
+            provider_cost_usd: report.metrics.provider_cost_usd,
+            model_id_used: Some(pricing.model_id.clone()),
+            pricing_status,
             iteration_metrics: report.metrics.iteration_metrics.clone(),
         },
         tools_used: report.metrics.tools_used.clone(),
