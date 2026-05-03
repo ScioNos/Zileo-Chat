@@ -27,16 +27,12 @@ use super::UserQuestionStreamPayload;
 pub enum ChunkType {
     /// Tool execution started
     ToolStart,
-    /// Tool execution completed
-    ToolEnd,
     /// Reasoning/thinking step
     Reasoning,
     /// Error occurred
     Error,
     /// Sub-agent execution started
     SubAgentStart,
-    /// Sub-agent execution progress update
-    SubAgentProgress,
     /// Sub-agent execution completed
     SubAgentComplete,
     /// Sub-agent execution error
@@ -74,10 +70,10 @@ pub struct StreamChunk {
     /// Text content (for reasoning/error/thinking_block/response_block chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Tool name (for tool_start/tool_end chunks)
+    /// Tool name (for tool_start/tool_call_complete chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
-    /// Duration in milliseconds (for tool_end chunks)
+    /// Duration in milliseconds (for tool_call_complete/task_complete/sub_agent_* chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<u64>,
     /// Sub-agent ID (for sub_agent_* chunks)
@@ -92,7 +88,7 @@ pub struct StreamChunk {
     /// Sub-agent metrics (for sub_agent_complete chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<SubAgentStreamMetrics>,
-    /// Progress percentage 0-100 (for sub_agent_progress chunks)
+    /// Progress percentage 0-100 (for sub_agent_complete chunks; always 100)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<u8>,
     /// Task ID (for task_* chunks)
@@ -116,12 +112,6 @@ pub struct StreamChunk {
     /// Question ID (for user_question_complete chunks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question_id: Option<String>,
-    /// Token count for this chunk (incremental)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens_delta: Option<usize>,
-    /// Cumulative token count (running total)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens_total: Option<usize>,
     /// Tool type: "local" or "mcp" (for tool_call_complete)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_type: Option<String>,
@@ -156,7 +146,7 @@ pub struct StreamChunk {
     /// (`load_model_pricing_info` -> `resolve_cost`). Carried in `response_block`
     /// so a switched-away workflow can accumulate `partialCostUsd` on its
     /// background execution without the frontend ever multiplying tokens by
-    /// prices itself (Phase 7 invariant).
+    /// prices itself (backend-as-source-of-truth invariant).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// 1-based iteration index for `iteration_progress` chunks emitted from
@@ -201,8 +191,6 @@ impl StreamChunk {
             task_agent_name: None,
             user_question: None,
             question_id: None,
-            tokens_delta: None,
-            tokens_total: None,
             tool_type: None,
             server_name: None,
             tool_input: None,
@@ -393,7 +381,7 @@ impl StreamChunk {
 
     /// Creates a tool call complete chunk with full input/output details.
     ///
-    /// Replaces tool_end with enriched data for inline display.
+    /// Carries the enriched data for inline display.
     #[allow(clippy::too_many_arguments)]
     pub fn tool_call_complete(
         workflow_id: impl Into<String>,
@@ -421,7 +409,7 @@ impl StreamChunk {
     /// in the tool loop. Carries CUMULATIVE tokens (sum across iterations
     /// so far) and the cumulative cost computed by the backend pricing
     /// layer — the frontend mirrors them straight onto the metrics bar
-    /// without inventing any number itself (Phase 7 invariant).
+    /// without inventing any number itself (backend-as-source-of-truth invariant).
     #[allow(clippy::too_many_arguments)]
     pub fn iteration_progress(
         workflow_id: impl Into<String>,
@@ -448,7 +436,7 @@ impl StreamChunk {
     /// Replaces progressive token streaming with a single complete response.
     /// `cost_usd` is the per-iteration cost computed by the backend pricing
     /// layer; when present it lets background executions accumulate a real
-    /// in-progress cost (Phase 13 follow-up) without the frontend ever
+    /// in-progress cost without the frontend ever
     /// multiplying tokens × prices itself.
     #[allow(clippy::too_many_arguments)]
     pub fn response_block(
@@ -607,10 +595,6 @@ mod tests {
             "\"tool_start\""
         );
         assert_eq!(
-            serde_json::to_string(&ChunkType::ToolEnd).unwrap(),
-            "\"tool_end\""
-        );
-        assert_eq!(
             serde_json::to_string(&ChunkType::ThinkingBlock).unwrap(),
             "\"thinking_block\""
         );
@@ -692,10 +676,6 @@ mod tests {
         let chunk_type = ChunkType::SubAgentStart;
         let json = serde_json::to_string(&chunk_type).unwrap();
         assert_eq!(json, "\"sub_agent_start\"");
-
-        let chunk_type = ChunkType::SubAgentProgress;
-        let json = serde_json::to_string(&chunk_type).unwrap();
-        assert_eq!(json, "\"sub_agent_progress\"");
 
         let chunk_type = ChunkType::SubAgentComplete;
         let json = serde_json::to_string(&chunk_type).unwrap();
@@ -991,7 +971,7 @@ mod tests {
         let json = serde_json::to_string(&chunk).unwrap();
         // Backend-computed cost MUST round-trip through the wire so the
         // frontend can accumulate it on the bg execution without inventing
-        // any value (Phase 7 invariant).
+        // any value (backend-as-source-of-truth invariant).
         assert!(
             json.contains("\"cost_usd\":0.0123"),
             "cost_usd must serialize when Some, got: {}",

@@ -241,8 +241,8 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Handles workflow switching for background workflows by restoring streaming state.
 	 */
 	async function selectWorkflow(workflowId: string): Promise<void> {
-		// Phase 13 — clear "zombie" values from the previous workflow IMMEDIATELY
-		// so the user never sees a flash of the wrong session metrics.
+		// Clear "zombie" values from the previous workflow IMMEDIATELY so the
+		// user never sees a flash of the wrong session metrics.
 		tokenStore.reset();
 
 		pageState.selectedWorkflowId = workflowId;
@@ -261,8 +261,8 @@ Uses extracted components, services, and stores for clean architecture.
 			tokenStore.updateFromWorkflow(workflow);
 		}
 
-		// Phase 13 — fetch the metrics of the last assistant message so the
-		// session display reflects "what the last run cost" rather than zeros.
+		// Fetch the metrics of the last assistant message so the session
+		// display reflects "what the last run cost" rather than zeros.
 		const lastMetrics = await MessageService.getLastAssistantMetrics(workflowId);
 
 		// Check if this workflow is running in the background
@@ -270,10 +270,14 @@ Uses extracted components, services, and stores for clean architecture.
 		if (bgExecution && bgExecution.status === 'running') {
 			// Restore streaming state from background execution
 			streamingStore.restoreFrom(bgExecution);
-			executionBlocksStore.start(workflowId);
+			// H3 audit (2026-05-02): rebuild the execution-blocks timeline by
+			// replaying the buffered chunks of this workflow, instead of just
+			// resetting state via `start()` (which left the execution area
+			// blank until the next chunk landed).
+			executionBlocksStore.restoreFromChunks(workflowId, bgExecution.chunkHistory);
 			tokenStore.startStreaming();
-			// Phase 13: hydrate the FULL session token display, not just outputs.
-			// Inputs/cache survive workflow switches because chunkProcessor.ts
+			// Hydrate the FULL session token display, not just outputs. Inputs
+			// and cache survive workflow switches because chunkProcessor.ts
 			// keeps them on the bg execution itself (response_block updates).
 			tokenStore.setSessionTokens(
 				bgExecution.tokensSent,

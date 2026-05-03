@@ -98,13 +98,24 @@ pub async fn execute_workflow_streaming(
     )
     .await;
 
-    let (task, task_id) = build_task(&state, &workflow_id, &message, &locale).await;
+    let (task, task_id) = build_task(&state, &workflow_id, &message, &locale, &message_id).await;
+
+    // Look up the orchestrator's display name for the spinner (M4 audit
+    // 2026-05-02). Falls back to agent_id inside `run_orchestrator_with_cancel`
+    // when the agent is not registered yet.
+    let agent_name = state
+        .orchestrator
+        .registry()
+        .get(&agent_id)
+        .await
+        .map(|agent| agent.config().name.clone());
 
     let (report, duration_ms) = match run_orchestrator_with_cancel(
         &window,
         &state,
         &workflow_id,
         &agent_id,
+        agent_name.as_deref(),
         task,
         cancellation_token,
     )
@@ -166,29 +177,7 @@ pub async fn cancel_workflow_streaming(
 
 #[cfg(test)]
 mod tests {
-    use crate::models::streaming::{events, CompletionStatus, StreamChunk, WorkflowComplete};
-
-    #[test]
-    fn test_stream_chunk_creation() {
-        let chunk = StreamChunk::reasoning("wf_001".to_string(), "Analyzing...".to_string());
-        assert_eq!(chunk.workflow_id, "wf_001");
-        assert!(chunk.content.is_some());
-
-        let chunk = StreamChunk::tool_start("wf_001".to_string(), "search".to_string());
-        assert!(chunk.tool.is_some());
-        assert!(chunk.content.is_none());
-    }
-
-    #[test]
-    fn test_workflow_complete_creation() {
-        let complete = WorkflowComplete::success("wf_001".to_string());
-        assert_eq!(complete.status, CompletionStatus::Completed);
-        assert!(complete.error.is_none());
-
-        let complete = WorkflowComplete::failed("wf_001".to_string(), "Error".to_string());
-        assert_eq!(complete.status, CompletionStatus::Error);
-        assert!(complete.error.is_some());
-    }
+    use crate::models::streaming::events;
 
     #[test]
     fn test_event_names() {

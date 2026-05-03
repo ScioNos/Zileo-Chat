@@ -31,12 +31,11 @@ import type { ActiveTool, ActiveReasoningStep, ActiveSubAgent, ActiveTask } from
  * Common state fields that can be updated by stream chunks.
  * Both StreamingState and WorkflowStreamState extend this shape.
  *
- * Phase 13 added the input/cache token fields so that switching back to a
- * still-running background workflow restores the full session display from
- * its bg state, not only the output count. `partialCostUsd` (Option A
- * follow-up) accumulates the per-iteration backend-computed cost so the
- * in-progress display stays accurate without the frontend multiplying
- * tokens by prices itself.
+ * Includes input/cache token fields so that switching back to a still-running
+ * background workflow restores the full session display from its bg state,
+ * not only the output count. `partialCostUsd` accumulates the per-iteration
+ * backend-computed cost so the in-progress display stays accurate without
+ * the frontend multiplying tokens by prices itself.
  */
 export interface ChunkableState {
 	content: string;
@@ -78,20 +77,6 @@ function handleToolStart(s: ChunkableState, c: StreamChunk): ChunkableState {
 				startedAt: Date.now()
 			}
 		]
-	};
-}
-
-/**
- * Handle tool_end chunk - mark tool as completed with duration.
- */
-function handleToolEnd(s: ChunkableState, c: StreamChunk): ChunkableState {
-	return {
-		...s,
-		tools: s.tools.map((t) =>
-			t.name === c.tool && t.status === 'running'
-				? { ...t, status: 'completed' as const, duration: c.duration }
-				: t
-		)
 	};
 }
 
@@ -145,23 +130,6 @@ function handleSubAgentStart(s: ChunkableState, c: StreamChunk): ChunkableState 
 	};
 }
 
-/**
- * Handle sub_agent_progress chunk - update sub-agent progress.
- */
-function handleSubAgentProgress(s: ChunkableState, c: StreamChunk): ChunkableState {
-	return {
-		...s,
-		subAgents: s.subAgents.map((a) =>
-			a.id === c.sub_agent_id
-				? {
-						...a,
-						progress: c.progress ?? a.progress,
-						statusMessage: c.content ?? a.statusMessage
-					}
-				: a
-		)
-	};
-}
 
 /**
  * Handle sub_agent_complete chunk - mark sub-agent as completed with metrics.
@@ -286,13 +254,13 @@ function handleToolCallComplete(s: ChunkableState, c: StreamChunk): ChunkableSta
  * Handle response_block chunk - set final content and token counts (backward compat).
  * The executionBlocksStore handles the full response display separately.
  *
- * Phase 13: also persists `tokens_input`, `cached_tokens` and `cache_write_tokens`
- * so a switch back to a still-running bg workflow can restore the full session
+ * Also persists `tokens_input`, `cached_tokens` and `cache_write_tokens` so a
+ * switch back to a still-running bg workflow can restore the full session
  * display, not just the output count.
  *
- * Option A follow-up: accumulates `cost_usd` from each chunk into
- * `partialCostUsd`. The cost is computed by the backend pricing layer; the
- * frontend only sums values it receives — never multiplies tokens × prices.
+ * Accumulates `cost_usd` from each chunk into `partialCostUsd`. The cost is
+ * computed by the backend pricing layer; the frontend only sums values it
+ * receives — never multiplies tokens × prices.
  */
 function handleResponseBlock(s: ChunkableState, c: StreamChunk): ChunkableState {
 	const next: ChunkableState = {
@@ -337,11 +305,9 @@ function handleIterationProgress(s: ChunkableState, c: StreamChunk): ChunkableSt
  */
 const chunkHandlers: Record<string, ChunkHandler> = {
 	tool_start: handleToolStart,
-	tool_end: handleToolEnd,
 	reasoning: handleReasoning,
 	error: handleError,
 	sub_agent_start: handleSubAgentStart,
-	sub_agent_progress: handleSubAgentProgress,
 	sub_agent_complete: handleSubAgentComplete,
 	sub_agent_error: handleSubAgentError,
 	task_create: handleTaskCreate,

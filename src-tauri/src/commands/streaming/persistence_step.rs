@@ -33,7 +33,7 @@ use tauri::{State, Window};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::helpers::{aggregate_sub_agent_tokens, emit_chunk, emit_complete};
+use super::helpers::{aggregate_sub_agent_metrics, emit_chunk, emit_complete};
 use super::pricing::{
     load_model_pricing_info, update_workflow_cumulative_metrics, CumulativeMetricsUpdate,
 };
@@ -175,7 +175,7 @@ pub async fn finalize_completion(
     // 3. Resolve pricing BEFORE emitting the response_block so the chunk can
     //    carry the per-iteration cost. This lets a backgrounded workflow
     //    accumulate `partialCostUsd` on its bg execution without the frontend
-    //    inventing any number (Phase 7 invariant preserved).
+    //    inventing any number (backend-as-source-of-truth invariant).
     let pricing = load_model_pricing_info(
         state,
         agent_id,
@@ -229,7 +229,7 @@ pub async fn finalize_completion(
     .await;
 
     // 6. Sub-agent token rollup.
-    aggregate_sub_agent_tokens(state, workflow_id).await;
+    aggregate_sub_agent_metrics(state, workflow_id).await;
 
     // 7. Persist tool executions and reasoning steps.
     let tool_executions: Vec<WorkflowToolExecution> = report
@@ -268,22 +268,11 @@ pub async fn finalize_completion(
     )
     .await;
 
-    // 8. Link orphan sub-agent executions.
-    if let Err(e) = state
-        .db
-        .execute_with_params(
-            "UPDATE sub_agent_execution SET parent_message_id = $msg_id \
-             WHERE workflow_id = $wf_id \
-               AND (parent_message_id IS NONE OR parent_message_id IS NULL)",
-            vec![
-                ("msg_id".to_string(), serde_json::json!(message_id)),
-                ("wf_id".to_string(), serde_json::json!(workflow_id)),
-            ],
-        )
-        .await
-    {
-        warn!(error = %e, "Failed to link sub-agent executions to message");
-    }
+    // 8. Sub-agent executions get `parent_message_id` at CREATE time
+    //    (see SubAgentExecutor::create_execution_record_with_parent and
+    //    SubAgentExecutionCreate::parent_message_id) — H2 audit 2026-05-02.
+    //    The legacy bulk UPDATE was removed because it over-attributed
+    //    nested sub-agents (A→B→C) all to the same primary message.
 
     info!(
         tool_executions_count = tool_executions.len(),

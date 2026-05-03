@@ -134,7 +134,7 @@ pub async fn load_conversation_history(
 /// Queries all completed sub_agent_execution records for this workflow and
 /// stores their totals in `sub_agent_tokens_input/output` and
 /// `sub_agent_cost_usd`. The cost is the sum of each sub-agent's own pricing,
-/// not the parent's (Phase 6).
+/// not the parent's.
 ///
 /// Kept separate from `total_*` (main agent only) so the frontend can display
 /// both independently and compute combined totals.
@@ -199,12 +199,6 @@ pub async fn aggregate_sub_agent_metrics(state: &AppState, workflow_id: &str) {
             error!(error = %e, "Failed to query sub-agent metrics for aggregation");
         }
     }
-}
-
-/// Backwards-compatible alias for callers that still use the old name.
-/// New code should call `aggregate_sub_agent_metrics` directly.
-pub async fn aggregate_sub_agent_tokens(state: &AppState, workflow_id: &str) {
-    aggregate_sub_agent_metrics(state, workflow_id).await;
 }
 
 #[cfg(test)]
@@ -365,7 +359,7 @@ mod tests {
 
     // =========================================================================
     // aggregate_sub_agent_metrics — verifies that the workflow row receives
-    // accurate sub-agent totals (Phase 6 of the token-cost-accuracy refactor).
+    // accurate sub-agent totals from the token-cost-accuracy refactor.
     //
     // Fixtures use seed_test_workflow + seed_sub_agent_execution helpers so
     // each test gets a clean ephemeral DB scoped via setup_test_state.
@@ -461,7 +455,7 @@ mod tests {
         let (state, _db_guard) = setup_test_state().await;
         let workflow_id = seed_test_workflow(&state.db).await;
 
-        // Legacy execution row predating Phase 6 — `cost_usd` is NONE.
+        // Legacy execution row predating the cost refactor — `cost_usd` is NONE.
         // Aggregation must not crash and must treat NONE as 0.
         seed_sub_agent_execution(
             &state.db,

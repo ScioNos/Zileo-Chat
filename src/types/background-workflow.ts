@@ -30,6 +30,7 @@ import type {
 	ActiveSubAgent,
 	ActiveTask
 } from '$lib/stores/streaming';
+import type { StreamChunk } from '$types/streaming';
 
 /**
  * Possible statuses for a background workflow execution.
@@ -65,8 +66,8 @@ export interface WorkflowStreamState {
 	tokensReceived: number;
 	/**
 	 * Cumulative input/prompt tokens reported by `response_block` chunks.
-	 * Phase 13: kept on the bg execution itself so switching back to a still-
-	 * running workflow restores the FULL session display, not just outputs.
+	 * Kept on the bg execution itself so switching back to a still-running
+	 * workflow restores the FULL session display, not just outputs.
 	 */
 	tokensSent: number;
 	/**
@@ -82,7 +83,7 @@ export interface WorkflowStreamState {
 	/**
 	 * Sum of `cost_usd` carried by every `response_block` chunk. `null` until
 	 * the first chunk with a cost lands. Computed by the backend pricing
-	 * layer; the frontend only stores the running total. Phase 13 + Option A.
+	 * layer; the frontend only stores the running total.
 	 */
 	partialCostUsd: number | null;
 	/** Error message if status is 'error' */
@@ -93,6 +94,17 @@ export interface WorkflowStreamState {
 	completedAt: number | null;
 	/** Whether the workflow is waiting for user input */
 	hasPendingQuestion: boolean;
+	/**
+	 * Buffer of raw stream chunks received for this workflow.
+	 *
+	 * Used to reconstruct `executionBlocks` when the user switches BACK to a
+	 * still-running workflow that was started in the background — without it
+	 * the execution area appears empty until the next chunk arrives because
+	 * `executionBlocksStore.start()` resets state on every switch (H3 audit
+	 * 2026-05-02). Soft-capped at `MAX_CHUNK_HISTORY` to keep memory bounded
+	 * on long-running workflows.
+	 */
+	chunkHistory: StreamChunk[];
 }
 
 /**
