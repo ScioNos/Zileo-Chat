@@ -104,7 +104,6 @@ Uses extracted components, services, and stores for clean architecture.
 		selectedWorkflowId: string | null;
 		selectedAgentId: string | null;
 		currentMaxIterations: number;
-		currentContextWindow: number;
 		messagesLoading: boolean;
 	}
 
@@ -129,7 +128,6 @@ Uses extracted components, services, and stores for clean architecture.
 		selectedWorkflowId: null,
 		selectedAgentId: null,
 		currentMaxIterations: ITERATIONS_LIMITS.DEFAULT,
-		currentContextWindow: 128000,
 		messagesLoading: false
 	};
 
@@ -450,7 +448,8 @@ Uses extracted components, services, and stores for clean architecture.
 			const config = await agentStore.getAgentConfig(agentId);
 			pageState.currentMaxIterations = config.max_tool_iterations ?? ITERATIONS_LIMITS.DEFAULT;
 
-			// Load full model data to get context_window and pricing
+			// Load full model data so the context-usage gauge reads the agent's
+			// configured ceiling from the database (no hardcoded fallback).
 			if (config.llm?.model && config.llm?.provider) {
 				try {
 					const model = await fetchModelByApiName(
@@ -458,16 +457,13 @@ Uses extracted components, services, and stores for clean architecture.
 						config.llm.provider.toLowerCase() as ProviderType
 					);
 					tokenStore.updateFromModel(model);
-					pageState.currentContextWindow = model.context_window;
 				} catch {
-					pageState.currentContextWindow = 128000;
+					// Model fetch failed: keep the previous ceiling rather than
+					// inventing one. The gauge reads as 0% until a valid model loads.
 				}
-			} else {
-				pageState.currentContextWindow = 128000;
 			}
 		} catch {
 			pageState.currentMaxIterations = ITERATIONS_LIMITS.DEFAULT;
-			pageState.currentContextWindow = 128000;
 		}
 	}
 
@@ -603,22 +599,33 @@ Uses extracted components, services, and stores for clean architecture.
 				// this: `iteration_progress` (during streaming, fired after
 				// every LLM call) and `response_block` (final, fires once at
 				// workflow completion). Both carry the same token shape.
+				//
+				// Sub-agent chunks are skipped: a delegated agent runs its own
+				// TokenTracker (resets to 0) and would stomp the orchestrator's
+				// running totals if mirrored here. Sub-agent rollup happens
+				// server-side via aggregate_sub_agent_metrics.
 				if (
-					chunk.chunk_type === 'iteration_progress' ||
-					chunk.chunk_type === 'response_block'
+					(chunk.chunk_type === 'iteration_progress' ||
+						chunk.chunk_type === 'response_block') &&
+					!chunk.is_sub_agent
 				) {
 					const tIn = chunk.tokens_input;
 					const tOut = chunk.tokens_output;
 					if (typeof tIn === 'number' && typeof tOut === 'number') {
 						// Drives the ENTREE/SORTIE display + speed (t/s) live.
+						// `tokens_input` is the cumulative sum across iterations.
 						tokenStore.setSessionTokens(
 							tIn,
 							tOut,
 							chunk.cached_tokens,
 							chunk.cache_write_tokens
 						);
-						// `tokens_input` IS the context-window usage of that call.
-						tokenStore.setContextUsed(tIn);
+						// `iter_input` is the LATEST call's input alone — the
+						// correct ceiling for the context-window gauge so it
+						// tracks the current call instead of saturating after
+						// a few iterations. Falls back to `tokens_input` if a
+						// pre-fix backend ever emits a chunk without iter_input.
+						tokenStore.setContextUsed(chunk.iter_input ?? tIn);
 					}
 					// Option A: in-progress cost (running sum of backend values).
 					if (typeof chunk.cost_usd === 'number') {
