@@ -14,21 +14,22 @@
  * limitations under the License.
  */
 
-
 /**
  * Vitest test setup file.
- * Mocks Tauri APIs for unit testing.
+ * Mocks the frontend Tauri adapter boundary for unit testing.
  */
 
 import { vi } from 'vitest';
 
-// Mock @tauri-apps/api/event
-vi.mock('@tauri-apps/api/event', () => ({
-	listen: vi.fn().mockResolvedValue(() => {}),
-	emit: vi.fn().mockResolvedValue(undefined)
-}));
-
-// Mock @tauri-apps/api/core
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: vi.fn().mockResolvedValue(undefined)
+vi.mock('$lib/tauri', () => ({
+createTauriUnavailableError: (apiName: string) =>
+new Error(`${apiName} is only available in the Tauri runtime`),
+isBrowserRuntime: vi.fn(() => typeof window !== 'undefined'),
+isTauriRuntime: vi.fn(() => false),
+tauriInvoke: vi.fn().mockResolvedValue(undefined),
+tauriListen: vi.fn().mockResolvedValue(() => {}),
+setTauriWindowTheme: vi.fn().mockResolvedValue(undefined),
+openDialog: vi.fn().mockResolvedValue(null),
+saveDialog: vi.fn().mockResolvedValue(null),
+openExternalUrl: vi.fn().mockResolvedValue(undefined)
 }));
