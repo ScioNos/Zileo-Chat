@@ -29,6 +29,37 @@ import {
 	ONBOARDING_STORAGE_KEY
 } from '$types/onboarding';
 
+function isLocalStorageAvailable(): boolean {
+	return typeof localStorage !== 'undefined';
+}
+
+function getStoredOnboardingCompleted(): boolean {
+	if (!isLocalStorageAvailable()) return false;
+	try {
+		return localStorage.getItem(ONBOARDING_STORAGE_KEY) === 'true';
+	} catch {
+		return false;
+	}
+}
+
+function setStoredOnboardingCompleted(): void {
+	if (!isLocalStorageAvailable()) return;
+	try {
+		localStorage.setItem(ONBOARDING_STORAGE_KEY, 'true');
+	} catch {
+		// Persistence is best-effort; UI state is still updated below.
+	}
+}
+
+function clearStoredOnboardingCompleted(): void {
+	if (!isLocalStorageAvailable()) return;
+	try {
+		localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+	} catch {
+		// Ignore storage cleanup failures in restricted browser/test contexts.
+	}
+}
+
 /**
  * Creates the onboarding store with localStorage persistence
  */
@@ -43,8 +74,7 @@ function createOnboardingStore() {
 		 * @returns true if onboarding has not been completed
 		 */
 		shouldShow: (): boolean => {
-			if (typeof localStorage === 'undefined') return false;
-			return localStorage.getItem(ONBOARDING_STORAGE_KEY) !== 'true';
+			return !getStoredOnboardingCompleted();
 		},
 
 		/**
@@ -98,9 +128,7 @@ function createOnboardingStore() {
 		 * Mark onboarding as complete and persist to localStorage
 		 */
 		markComplete: (): void => {
-			if (typeof localStorage !== 'undefined') {
-				localStorage.setItem(ONBOARDING_STORAGE_KEY, 'true');
-			}
+			setStoredOnboardingCompleted();
 			update((s) => ({ ...s, completed: true }));
 		},
 
@@ -132,9 +160,7 @@ function createOnboardingStore() {
 		 * Reset store to initial state (for testing)
 		 */
 		reset: (): void => {
-			if (typeof localStorage !== 'undefined') {
-				localStorage.removeItem(ONBOARDING_STORAGE_KEY);
-			}
+			clearStoredOnboardingCompleted();
 			set(INITIAL_ONBOARDING_STATE);
 		}
 	};

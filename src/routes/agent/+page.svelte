@@ -586,7 +586,17 @@ Uses extracted components, services, and stores for clean architecture.
 		await agentStore.loadAgents();
 
 		// Load validation settings (needed for concurrent workflow limits)
-		await validationSettingsStore.loadSettings().catch(() => {});
+		try {
+			await validationSettingsStore.loadSettings();
+		} catch (err) {
+			toastStore.add({
+				type: 'error',
+				title: $i18n('validation_load_resources_failed', { error: getErrorMessage(err) }),
+				message: '',
+				persistent: false,
+				duration: 5000
+			});
+		}
 
 		// Initialize background workflows store (owns event listeners)
 		await backgroundWorkflowsStore.init();
