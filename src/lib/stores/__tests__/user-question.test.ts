@@ -29,8 +29,8 @@ import type { UserQuestionStreamPayload } from '$types/user-question';
 
 const invokeMock = vi.fn();
 
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args)
+vi.mock('$lib/tauri', () => ({
+	tauriInvoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args)
 }));
 
 vi.mock('../background-workflows', () => ({

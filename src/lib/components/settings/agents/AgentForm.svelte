@@ -43,7 +43,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	import type { AgentConfig, AgentConfigCreate, Lifecycle, ReasoningEffort } from '$types/agent';
 	import type { SkillSummary } from '$types/skill';
 	import { Button, Input, Textarea, Card, Badge, Select } from '$lib/components/ui';
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { onMount } from 'svelte';
 	import { i18n, t } from '$lib/i18n';
 	import {
@@ -213,7 +213,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 
 		// Load available skills
 		try {
-			availableSkillSummaries = await invoke<SkillSummary[]>('list_skills');
+			availableSkillSummaries = await tauriInvoke<SkillSummary[]>('list_skills');
 		} catch {
 			loadWarnings = [...loadWarnings, t('agents_skills_load_failed')];
 		}

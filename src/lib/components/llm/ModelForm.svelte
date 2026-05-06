@@ -41,7 +41,7 @@
 	import { i18n, t } from '$lib/i18n';
 	import type { CreateModelRequest, UpdateModelRequest, LLMModel, ProviderType } from '$types/llm';
 	import type { ProviderInfo } from '$types/custom-provider';
-	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { openExternalUrl } from '$lib/tauri';
 	import { isAllowedScheme } from '$lib/utils/url';
 
 	/**
@@ -51,7 +51,7 @@
 	async function openExternal(event: MouseEvent, url: string): Promise<void> {
 		event.preventDefault();
 		if (isAllowedScheme(url)) {
-			await openUrl(url);
+			await openExternalUrl(url);
 		}
 	}
 

@@ -30,13 +30,13 @@ import {
 } from '../workflows';
 import type { Workflow } from '$types/workflow';
 
-// Mock @tauri-apps/api/core
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: vi.fn()
+// Mock /tauri
+vi.mock('$lib/tauri', () => ({
+	tauriInvoke: vi.fn()
 }));
 
 // Import invoke after mocking
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 
 describe('Workflow Store', () => {
 	const createMockWorkflow = (id: string, name: string): Workflow => ({

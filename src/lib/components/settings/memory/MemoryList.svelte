@@ -24,8 +24,8 @@ Displays memories with filtering, search, and action buttons.
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
-	import { save } from '@tauri-apps/plugin-dialog';
+	import { tauriInvoke } from '$lib/tauri';
+	import { saveDialog } from '$lib/tauri';
 	import { Button, Card, Input, Select, Badge, StatusIndicator, Modal, DeleteConfirmModal } from '$lib/components/ui';
 	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type { Memory, MemoryType, MemorySearchResult } from '$types/memory';
@@ -138,7 +138,7 @@ Displays memories with filtering, search, and action buttons.
 		try {
 			const filter = typeFilter || undefined;
 			// Pass workflowId as null to get ALL memories (both workflow-scoped and general)
-			memories = await invoke<Memory[]>('list_memories', { typeFilter: filter, workflowId: null });
+			memories = await tauriInvoke<Memory[]>('list_memories', { typeFilter: filter, workflowId: null });
 		} catch (err) {
 			notify('error', t('memory_failed_load').replace('{error}', getErrorMessage(err)));
 		} finally {
@@ -159,7 +159,7 @@ Displays memories with filtering, search, and action buttons.
 		try {
 			// Search all memories (both workflow-scoped and general)
 			// Vector search will be used if embedding service is configured
-			const results = await invoke<MemorySearchResult[]>('search_memories', {
+			const results = await tauriInvoke<MemorySearchResult[]>('search_memories', {
 				query: searchQuery,
 				limit: 50,
 				typeFilter: typeFilter || undefined,
@@ -240,7 +240,7 @@ Displays memories with filtering, search, and action buttons.
 		if (!memoryToDelete) return;
 		deleting = true;
 		try {
-			await invoke('delete_memory', { memoryId: memoryToDelete.id });
+			await tauriInvoke('delete_memory', { memoryId: memoryToDelete.id });
 			memories = memories.filter((m) => m.id !== memoryToDelete!.id);
 			notify('success', t('memory_deleted'));
 			showDeleteConfirm = false;
@@ -268,7 +268,7 @@ Displays memories with filtering, search, and action buttons.
 		actionLoading = true;
 		try {
 			const exportFormat: ExportFormat = format === 'json' ? 'json' : 'csv';
-			const data = await invoke<string>('export_memories', {
+			const data = await tauriInvoke<string>('export_memories', {
 				format: exportFormat,
 				typeFilter: typeFilter || undefined
 			});
@@ -276,7 +276,7 @@ Displays memories with filtering, search, and action buttons.
 			const defaultFilename = `memories-${new Date().toISOString().slice(0, 10)}.${format}`;
 			const filterName = format === 'json' ? 'JSON' : 'CSV';
 
-			const filePath = await save({
+			const filePath = await saveDialog({
 				defaultPath: defaultFilename,
 				filters: [{ name: filterName, extensions: [format] }],
 				title: t('memory_export_title')
@@ -287,7 +287,7 @@ Displays memories with filtering, search, and action buttons.
 				return;
 			}
 
-			await invoke('save_export_to_file', { path: filePath, content: data });
+			await tauriInvoke('save_export_to_file', { path: filePath, content: data });
 
 			notify('success', t('memory_exported').replace('{count}', String(memories.length)));
 		} catch (err) {
@@ -312,7 +312,7 @@ Displays memories with filtering, search, and action buttons.
 			actionLoading = true;
 			try {
 				const text = await file.text();
-				const result = await invoke<ImportResult>('import_memories', { data: text });
+				const result = await tauriInvoke<ImportResult>('import_memories', { data: text });
 
 				if (result.imported > 0) {
 					notify('success', t('memory_imported').replace('{count}', String(result.imported)));
@@ -349,7 +349,7 @@ Displays memories with filtering, search, and action buttons.
 	async function confirmRegenerate(): Promise<void> {
 		regenerating = true;
 		try {
-			const result = await invoke<RegenerateResult>('regenerate_embeddings', {
+			const result = await tauriInvoke<RegenerateResult>('regenerate_embeddings', {
 				typeFilter: typeFilter || undefined
 			});
 			notify(

@@ -41,7 +41,7 @@ Uses extracted components, services, and stores for clean architecture.
 	import { i18n } from '$lib/i18n';
 
 	// Service imports
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { WorkflowService, MessageService, BlockService, LocalStorage, STORAGE_KEYS, WorkflowExecutorService } from '$lib/services';
 	import type { ChatBlock, TodoTaskDisplay } from '$types/chat-block';
 
@@ -213,7 +213,7 @@ Uses extracted components, services, and stores for clean architecture.
 				// Load persisted tasks for this workflow
 				persistedTasks = [];
 				try {
-					const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
+					const tasks = await tauriInvoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
 					if (!isStillSelected()) return;
 					persistedTasks = mapPersistedTasks(tasks);
 				} catch (err) {
@@ -522,7 +522,7 @@ Uses extracted components, services, and stores for clean architecture.
 			// switches to persistedTasks which must be fresh from DB.
 			if (isStillSelected()) {
 				try {
-					const tasks = await invoke<PersistedTask[]>('list_workflow_tasks', {
+					const tasks = await tauriInvoke<PersistedTask[]>('list_workflow_tasks', {
 						workflowId: executionWorkflowId
 					});
 					if (isStillSelected()) {
@@ -586,7 +586,17 @@ Uses extracted components, services, and stores for clean architecture.
 		await agentStore.loadAgents();
 
 		// Load validation settings (needed for concurrent workflow limits)
-		await validationSettingsStore.loadSettings().catch(() => {});
+		try {
+			await validationSettingsStore.loadSettings();
+		} catch (err) {
+			toastStore.add({
+				type: 'error',
+				title: $i18n('validation_load_resources_failed', { error: getErrorMessage(err) }),
+				message: '',
+				persistent: false,
+				duration: 5000
+			});
+		}
 
 		// Initialize background workflows store (owns event listeners)
 		await backgroundWorkflowsStore.init();

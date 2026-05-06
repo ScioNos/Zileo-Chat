@@ -25,7 +25,7 @@
    * - Risk Thresholds (autoApproveLow, alwaysConfirmHigh)
    */
   import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
+  import { tauriInvoke } from '$lib/tauri';
   import { Button, ErrorBanner } from '$lib/components/ui';
   import { i18n } from '$lib/i18n';
   import { getErrorMessage } from '$lib/utils/error';
@@ -160,7 +160,7 @@
     loadingResources = true;
     try {
       const [tools, servers] = await Promise.all([
-        invoke<AvailableToolInfo[]>('list_available_tools'),
+        tauriInvoke<AvailableToolInfo[]>('list_available_tools'),
         loadServers(true) // Force refresh
       ]);
       availableTools = tools;

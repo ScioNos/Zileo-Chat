@@ -26,7 +26,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
-	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { openExternalUrl } from '$lib/tauri';
 	import { i18n } from '$lib/i18n';
 	import { isAllowedScheme } from '$lib/utils/url';
 	import { ExternalLink, Copy, X } from '@lucide/svelte';
@@ -75,7 +75,7 @@
 
 	async function handleOpenInBrowser(): Promise<void> {
 		if (!linkPopup) return;
-		await openUrl(linkPopup.url);
+		await openExternalUrl(linkPopup.url);
 		closePopup();
 	}
 

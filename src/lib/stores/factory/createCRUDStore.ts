@@ -24,7 +24,7 @@
  */
 
 import { writable, derived, type Readable, type Writable } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import { getErrorMessage } from '$lib/utils/error';
 
 // ============================================================================

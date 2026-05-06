@@ -37,6 +37,10 @@ export const SETTINGS_REFRESH_EVENT = 'settings:refresh';
 export function attachSettingsRefreshListener(
 	handler: () => void | Promise<void>
 ): () => void {
+	if (typeof window === 'undefined') {
+		return () => {};
+	}
+
 	const listener = (): void => {
 		void handler();
 	};

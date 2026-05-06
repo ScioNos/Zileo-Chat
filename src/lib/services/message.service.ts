@@ -21,7 +21,7 @@
  * @module lib/services/message
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import type { Message, MessageMetrics, SubAgentSummary } from '$types/message';
 import type { SubAgentExecution } from '$types/sub-agent';
 import type { WorkflowMetrics } from '$types/workflow';

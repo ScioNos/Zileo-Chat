@@ -17,10 +17,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({
-    setTheme: vi.fn().mockResolvedValue(undefined),
-  }),
+vi.mock("$lib/tauri", () => ({
+  setTauriWindowTheme: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/i18n", () => ({

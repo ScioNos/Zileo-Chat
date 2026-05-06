@@ -58,4 +58,24 @@ describe('attachSettingsRefreshListener', () => {
 		expect(handler).not.toHaveBeenCalled();
 		teardown();
 	});
+
+	it('returns a no-op teardown when window is unavailable', () => {
+		const originalWindow = globalThis.window;
+		Reflect.deleteProperty(globalThis, 'window');
+		const handler = vi.fn();
+
+		try {
+			const teardown = attachSettingsRefreshListener(handler);
+			expect(teardown).toEqual(expect.any(Function));
+			expect(() => teardown()).not.toThrow();
+			expect(handler).not.toHaveBeenCalled();
+		} finally {
+			Object.defineProperty(globalThis, 'window', {
+				value: originalWindow,
+				configurable: true,
+				writable: true
+			});
+		}
+	});
+
 });

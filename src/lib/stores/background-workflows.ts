@@ -27,7 +27,7 @@
  */
 
 import { writable, derived, get } from 'svelte/store';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { tauriListen as listen, type TauriUnlistenFn as UnlistenFn } from '$lib/tauri';
 import type { StreamChunk, WorkflowComplete } from '$types/streaming';
 import type { WorkflowStreamState, BackgroundWorkflowStatus } from '$types/background-workflow';
 import type { UserQuestionStreamPayload } from '$types/user-question';
