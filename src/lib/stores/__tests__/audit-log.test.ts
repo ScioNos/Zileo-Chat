@@ -27,11 +27,11 @@ import {
 } from '../audit-log';
 import type { AuditStats, ValidationAuditEntry } from '$types/validation';
 
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: vi.fn()
+vi.mock('$lib/tauri', () => ({
+	tauriInvoke: vi.fn()
 }));
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 
 function makeEntry(id: string, decision: ValidationAuditEntry['decision']): ValidationAuditEntry {
 	return {

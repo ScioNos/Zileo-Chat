@@ -20,7 +20,7 @@
  * Syncs with OS theme and Tauri window decorations.
  */
 import { writable, get } from "svelte/store";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { setTauriWindowTheme } from "$lib/tauri";
 
 /**
  * Theme type definition
@@ -67,7 +67,7 @@ function applyDocumentTheme(value: Theme): void {
  */
 async function syncWindowTheme(value: Theme | null): Promise<void> {
   try {
-    await getCurrentWindow().setTheme(value);
+    await setTauriWindowTheme(value);
   } catch {
     // Ignore errors (e.g. during SSR or tests)
   }

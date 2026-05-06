@@ -13,8 +13,8 @@ import { get } from 'svelte/store';
 import { tokenStore, tokenDisplayData } from '../tokens';
 
 // Mock Tauri event API (transitively imported by tokens stack).
-vi.mock('@tauri-apps/api/event', () => ({
-	listen: vi.fn().mockResolvedValue(() => {})
+vi.mock('$lib/tauri', () => ({
+	tauriListen: vi.fn().mockResolvedValue(() => {})
 }));
 
 describe('tokenStore.setSessionTokens', () => {

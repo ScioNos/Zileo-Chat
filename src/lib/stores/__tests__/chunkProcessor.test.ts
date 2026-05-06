@@ -25,8 +25,8 @@ import type { StreamChunk } from '$types/streaming';
 import { applyChunkToState, type ChunkableState } from '../utils/chunkProcessor';
 
 // Mock Tauri event API (required by transitive streaming import)
-vi.mock('@tauri-apps/api/event', () => ({
-	listen: vi.fn().mockResolvedValue(() => {})
+vi.mock('$lib/tauri', () => ({
+	tauriListen: vi.fn().mockResolvedValue(() => {})
 }));
 
 /**

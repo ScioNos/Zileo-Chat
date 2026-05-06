@@ -46,9 +46,9 @@ import {
 } from '../llm';
 import type { LLMModel, LLMState, ProviderSettings, ProviderType } from '$types/llm';
 
-// Mock @tauri-apps/api/core
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: vi.fn()
+// Mock /tauri
+vi.mock('$lib/tauri', () => ({
+	tauriInvoke: vi.fn()
 }));
 
 describe('LLM Store', () => {

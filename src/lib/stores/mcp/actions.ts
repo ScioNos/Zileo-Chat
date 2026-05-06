@@ -19,7 +19,7 @@
  * @module stores/mcp/actions
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import type {
 	LegacyHttpAuthWarning,
 	MCPServer,

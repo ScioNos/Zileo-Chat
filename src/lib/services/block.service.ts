@@ -21,7 +21,7 @@
  * @module services/block
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import type { ChatBlock } from '$types/chat-block';
 import type { Message } from '$types/message';
 

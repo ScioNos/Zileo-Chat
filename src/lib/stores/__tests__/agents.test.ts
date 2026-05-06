@@ -30,11 +30,11 @@ import {
 import type { AgentConfig, AgentSummary, AgentConfigCreate } from '$types/agent';
 
 // Mock Tauri's invoke function
-vi.mock('@tauri-apps/api/core', () => ({
-	invoke: vi.fn()
+vi.mock('$lib/tauri', () => ({
+	tauriInvoke: vi.fn()
 }));
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 
 const mockInvoke = invoke as Mock;
 

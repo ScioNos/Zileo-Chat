@@ -26,8 +26,8 @@ import { get } from 'svelte/store';
 import type { StreamChunk, WorkflowComplete } from '$types/streaming';
 
 // Mock Tauri's event API
-vi.mock('@tauri-apps/api/event', () => ({
-	listen: vi.fn().mockResolvedValue(() => {})
+vi.mock('$lib/tauri', () => ({
+	tauriListen: vi.fn().mockResolvedValue(() => {})
 }));
 
 import { streamingStore, activeSubAgents } from '../streaming';

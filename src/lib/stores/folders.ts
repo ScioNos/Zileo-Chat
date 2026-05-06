@@ -23,7 +23,7 @@
 import type { WorkflowFolder } from '$types/workflow';
 
 import { writable, derived } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import { getErrorMessage } from '$lib/utils/error';
 import { LocalStorage, STORAGE_KEYS } from '$lib/services/localStorage.service';
 

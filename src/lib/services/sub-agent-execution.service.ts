@@ -21,7 +21,7 @@
  * @module lib/services/sub-agent-execution
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import type { SubAgentExecution } from '$types/sub-agent';
 
 /**

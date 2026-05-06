@@ -21,7 +21,7 @@
  * @module lib/services/workflow
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import type { Workflow, WorkflowResult, WorkflowFullState } from '$types/workflow';
 
 /**

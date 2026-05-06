@@ -24,7 +24,7 @@
  */
 
 import { derived } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { tauriInvoke as invoke } from '$lib/tauri';
 import { createCRUDStore, createDerivedStores } from './factory/createCRUDStore';
 import { getErrorMessage } from '$lib/utils/error';
 import type {
