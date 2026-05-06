@@ -23,8 +23,8 @@ Uses Tauri's native file dialog to pick folders, validates via backend command.
 -->
 
 <script lang="ts">
-	import { invoke } from '@tauri-apps/api/core';
-	import { open } from '@tauri-apps/plugin-dialog';
+	import { tauriInvoke } from '$lib/tauri';
+	import { openDialog } from '$lib/tauri';
 	import { i18n } from '$lib/i18n';
 	import { getErrorMessage } from '$lib/utils/error';
 	import { Button } from '$lib/components/ui';
@@ -55,7 +55,7 @@ Uses Tauri's native file dialog to pick folders, validates via backend command.
 		adding = true;
 		error = null;
 		try {
-			const selected = await open({
+			const selected = await openDialog({
 				directory: true,
 				multiple: false,
 				title: $i18n('agents_folder_select_title')
@@ -80,7 +80,7 @@ Uses Tauri's native file dialog to pick folders, validates via backend command.
 			}
 
 			// Validate via backend (returns canonical path)
-			const canonicalPath = await invoke<string>('validate_agent_folder', { path });
+			const canonicalPath = await tauriInvoke<string>('validate_agent_folder', { path });
 
 			// Check canonical path for duplicates too
 			if (folders.includes(canonicalPath)) {

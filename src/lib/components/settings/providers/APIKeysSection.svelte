@@ -20,7 +20,7 @@ Manages API key configuration modal for LLM providers.
 -->
 
 <script lang="ts">
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import type { ProviderType, ProviderSettings } from '$types/llm';
 	import { Button, Input, Modal, StatusIndicator, DeleteConfirmModal } from '$lib/components/ui';
 	import { i18n } from '$lib/i18n';
@@ -97,7 +97,7 @@ Manages API key configuration modal for LLM providers.
 
 		try {
 			const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
-			await invoke('save_api_key', {
+			await tauriInvoke('save_api_key', {
 				provider: providerName,
 				apiKey: apiKey
 			});
@@ -135,7 +135,7 @@ Manages API key configuration modal for LLM providers.
 
 		try {
 			const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
-			await invoke('delete_api_key', { provider: providerName });
+			await tauriInvoke('delete_api_key', { provider: providerName });
 			onReload();
 			notify('success', $i18n('settings_api_key_deleted'));
 			showDeleteConfirm = false;

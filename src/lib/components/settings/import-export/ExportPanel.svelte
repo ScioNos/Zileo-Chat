@@ -24,8 +24,8 @@ Multi-step process: entity selection, options, preview, and export.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
-	import { save } from '@tauri-apps/plugin-dialog';
+	import { tauriInvoke } from '$lib/tauri';
+	import { saveDialog } from '$lib/tauri';
 	import { Button, Card, Badge, StatusIndicator } from '$lib/components/ui';
 	import EntitySelector from './EntitySelector.svelte';
 	import ExportPreview from './ExportPreview.svelte';
@@ -108,12 +108,12 @@ Multi-step process: entity selection, options, preview, and export.
 		error = null;
 		try {
 			const allProviders = await Promise.all([
-				invoke<AgentSummary[]>('list_agents'),
-				invoke<MCPServerConfig[]>('list_mcp_servers'),
-				invoke<LLMModel[]>('list_models'),
-				invoke<PromptSummary[]>('list_prompts'),
-				invoke<SkillSummary[]>('list_skills'),
-				invoke<ProviderInfo[]>('list_providers')
+				tauriInvoke<AgentSummary[]>('list_agents'),
+				tauriInvoke<MCPServerConfig[]>('list_mcp_servers'),
+				tauriInvoke<LLMModel[]>('list_models'),
+				tauriInvoke<PromptSummary[]>('list_prompts'),
+				tauriInvoke<SkillSummary[]>('list_skills'),
+				tauriInvoke<ProviderInfo[]>('list_providers')
 			]);
 			[agents, mcpServers, models, prompts, skills] = allProviders;
 			// Filter to custom providers only (not builtins)
@@ -132,7 +132,7 @@ Multi-step process: entity selection, options, preview, and export.
 		loading = true;
 		error = null;
 		try {
-			preview = await invoke<ExportPreviewData>('prepare_export_preview', { selection });
+			preview = await tauriInvoke<ExportPreviewData>('prepare_export_preview', { selection });
 
 			// Initialize sanitization config for each MCP server
 			// Use id if available (export preview), otherwise fallback to name
@@ -188,7 +188,7 @@ Multi-step process: entity selection, options, preview, and export.
 			}
 
 			// Generate export file content
-			const exportData = await invoke<string>('generate_export_file', {
+			const exportData = await tauriInvoke<string>('generate_export_file', {
 				selection: filteredSelection,
 				options,
 				sanitization: sanitizeMcp ? filteredSanitization : {}
@@ -197,7 +197,7 @@ Multi-step process: entity selection, options, preview, and export.
 			const defaultFilename = `zileo-export-${new Date().toISOString().slice(0, 10)}.json`;
 
 			// Show native save dialog
-			const filePath = await save({
+			const filePath = await saveDialog({
 				defaultPath: defaultFilename,
 				filters: [
 					{
@@ -215,7 +215,7 @@ Multi-step process: entity selection, options, preview, and export.
 			}
 
 			// Save file to selected path
-			await invoke('save_export_to_file', {
+			await tauriInvoke('save_export_to_file', {
 				path: filePath,
 				content: exportData
 			});

@@ -21,8 +21,8 @@ Browse, filter, export and purge the validation audit log (see commands/validati
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { save } from '@tauri-apps/plugin-dialog';
-	import { invoke } from '@tauri-apps/api/core';
+	import { saveDialog } from '$lib/tauri';
+	import { tauriInvoke } from '$lib/tauri';
 	import SettingsSectionHeader from '$lib/components/settings/SettingsSectionHeader.svelte';
 	import {
 		AuditLogStats,
@@ -72,13 +72,13 @@ Browse, filter, export and purge the validation audit log (see commands/validati
 		try {
 			const csv = await auditLogStore.exportCsv();
 			const defaultFilename = `audit-log-${new Date().toISOString().slice(0, 10)}.csv`;
-			const filePath = await save({
+			const filePath = await saveDialog({
 				defaultPath: defaultFilename,
 				filters: [{ name: 'CSV', extensions: ['csv'] }],
 				title: $i18n('audit_export_dialog_title')
 			});
 			if (!filePath) return;
-			await invoke('save_export_to_file', { path: filePath, content: csv });
+			await tauriInvoke('save_export_to_file', { path: filePath, content: csv });
 			showToast('success', $i18n('audit_export_success'));
 		} catch (err) {
 			showToast('error', getErrorMessage(err));

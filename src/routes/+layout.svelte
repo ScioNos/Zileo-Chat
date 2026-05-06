@@ -16,7 +16,7 @@
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+	import { tauriListen, type TauriUnlistenFn } from '$lib/tauri';
 	import '../styles/global.css';
 	import { theme } from '$lib/stores/theme';
 	import { localeStore } from '$lib/stores/locale';
@@ -34,8 +34,8 @@
 	// Legal modal state
 	let legalModalOpen = $state(false);
 	let legalModalType = $state<'legal-notice' | 'privacy-policy'>('legal-notice');
-	let unlistenLegal: UnlistenFn | null = null;
-	let unlistenPrivacy: UnlistenFn | null = null;
+	let unlistenLegal: TauriUnlistenFn | null = null;
+	let unlistenPrivacy: TauriUnlistenFn | null = null;
 
 	onMount(async () => {
 		theme.init();
@@ -45,12 +45,12 @@
 		showOnboarding = onboardingStore.shouldShow();
 
 		// Listen for legal menu events from Tauri
-		unlistenLegal = await listen('open-legal-notice', () => {
+		unlistenLegal = await tauriListen('open-legal-notice', () => {
 			legalModalType = 'legal-notice';
 			legalModalOpen = true;
 		});
 
-		unlistenPrivacy = await listen('open-privacy-policy', () => {
+		unlistenPrivacy = await tauriListen('open-privacy-policy', () => {
 			legalModalType = 'privacy-policy';
 			legalModalOpen = true;
 		});

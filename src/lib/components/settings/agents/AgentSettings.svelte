@@ -24,7 +24,7 @@ Provides CRUD operations for agents with list view and form modal.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import {
 		agentStore,
 		agents,
@@ -66,7 +66,7 @@ Provides CRUD operations for agents with list view and form modal.
 	onMount(async () => {
 		agentStore.loadAgents();
 		try {
-			const providers = await invoke<ProviderInfo[]>('list_providers');
+			const providers = await tauriInvoke<ProviderInfo[]>('list_providers');
 			providerNames = Object.fromEntries(providers.map((p) => [p.id, p.displayName]));
 		} catch {
 			// Non-blocking: provider names are cosmetic, fallback to raw ID

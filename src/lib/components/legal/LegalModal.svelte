@@ -28,7 +28,7 @@
 <script lang="ts">
 	import Modal from '$lib/components/ui/Modal.svelte';
 	import { i18n } from '$lib/i18n';
-	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { openExternalUrl } from '$lib/tauri';
 	import { isAllowedScheme } from '$lib/utils/url';
 
 	/**
@@ -51,7 +51,7 @@
 
 	async function handleExternalLink(url: string): Promise<void> {
 		if (isAllowedScheme(url)) {
-			await openUrl(url);
+			await openExternalUrl(url);
 		}
 	}
 </script>

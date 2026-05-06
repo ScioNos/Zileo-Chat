@@ -25,7 +25,7 @@ Decomposed into EmbeddingConfigCard, EmbeddingTestCard, MemoryStatsCard.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { Button, Select, Card, StatusIndicator, Modal, ErrorBanner, DeleteConfirmModal } from '$lib/components/ui';
 	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type {
@@ -107,9 +107,9 @@ Decomposed into EmbeddingConfigCard, EmbeddingTestCard, MemoryStatsCard.
 		loading = true;
 		try {
 			const [loadedConfig, loadedStats, loadedTokenStats] = await Promise.all([
-				invoke<EmbeddingConfig>('get_embedding_config'),
-				invoke<MemoryStats>('get_memory_stats'),
-				invoke<MemoryTokenStats>('get_memory_token_stats', { typeFilter: null })
+				tauriInvoke<EmbeddingConfig>('get_embedding_config'),
+				tauriInvoke<MemoryStats>('get_memory_stats'),
+				tauriInvoke<MemoryTokenStats>('get_memory_token_stats', { typeFilter: null })
 			]);
 			config = loadedConfig;
 			editConfig = { ...loadedConfig };
@@ -130,8 +130,8 @@ Decomposed into EmbeddingConfigCard, EmbeddingTestCard, MemoryStatsCard.
 	export async function reload(): Promise<void> {
 		try {
 			const [loadedStats, loadedTokenStats] = await Promise.all([
-				invoke<MemoryStats>('get_memory_stats'),
-				invoke<MemoryTokenStats>('get_memory_token_stats', { typeFilter: null })
+				tauriInvoke<MemoryStats>('get_memory_stats'),
+				tauriInvoke<MemoryTokenStats>('get_memory_token_stats', { typeFilter: null })
 			]);
 			stats = loadedStats;
 			tokenStats = loadedTokenStats;
@@ -164,7 +164,7 @@ Decomposed into EmbeddingConfigCard, EmbeddingTestCard, MemoryStatsCard.
 		modalError = null;
 
 		try {
-			await invoke('save_embedding_config', { config: editConfig });
+			await tauriInvoke('save_embedding_config', { config: editConfig });
 			config = { ...editConfig };
 			configExists = true;
 			showConfigModal = false;
@@ -190,7 +190,7 @@ Decomposed into EmbeddingConfigCard, EmbeddingTestCard, MemoryStatsCard.
 	async function confirmDelete(): Promise<void> {
 		deleteDeleting = true;
 		try {
-			await invoke('save_embedding_config', { config: defaultConfig });
+			await tauriInvoke('save_embedding_config', { config: defaultConfig });
 			config = { ...defaultConfig };
 			editConfig = { ...defaultConfig };
 			configExists = false;

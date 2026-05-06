@@ -23,7 +23,7 @@ Extracted from MemorySettings.svelte.
 -->
 
 <script lang="ts">
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { Card, Button, Textarea } from '$lib/components/ui';
 	import type { EmbeddingTestResult } from '$types/embedding';
 	import { i18n, t } from '$lib/i18n';
@@ -60,7 +60,7 @@ Extracted from MemorySettings.svelte.
 		testResult = null;
 
 		try {
-			testResult = await invoke<EmbeddingTestResult>('test_embedding', { text: testText });
+			testResult = await tauriInvoke<EmbeddingTestResult>('test_embedding', { text: testText });
 			if (testResult.success) {
 				notify('success', t('memory_embedding_generated').replace('{duration}', String(testResult.duration_ms)));
 			} else {

@@ -20,11 +20,11 @@
 	 * User enters Mistral API key with optional test
 	 */
 	import { i18n } from '$lib/i18n';
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { onboardingStore, onboardingLoading } from '$lib/stores/onboarding';
 	import { Button, Input } from '$lib/components/ui';
 	import { getErrorMessage } from '$lib/utils/error';
-	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { openExternalUrl } from '$lib/tauri';
 	import { isAllowedScheme } from '$lib/utils/url';
 
 	const MISTRAL_CONSOLE_URL = 'https://console.mistral.ai';
@@ -35,7 +35,7 @@
 	async function openMistralConsole(event: MouseEvent): Promise<void> {
 		event.preventDefault();
 		if (isAllowedScheme(MISTRAL_CONSOLE_URL)) {
-			await openUrl(MISTRAL_CONSOLE_URL);
+			await openExternalUrl(MISTRAL_CONSOLE_URL);
 		}
 	}
 
@@ -58,10 +58,10 @@
 
 		try {
 			// First save the API key (must use 'Mistral' capitalized - KeyStore is case-sensitive)
-			await invoke('save_api_key', { provider: 'Mistral', apiKey: apiKey.trim() });
+			await tauriInvoke('save_api_key', { provider: 'Mistral', apiKey: apiKey.trim() });
 
 			// Then test the connection
-			const result = await invoke<{ success: boolean; latency_ms?: number; error?: string }>(
+			const result = await tauriInvoke<{ success: boolean; latency_ms?: number; error?: string }>(
 				'test_provider_connection',
 				{ provider: 'mistral' }
 			);

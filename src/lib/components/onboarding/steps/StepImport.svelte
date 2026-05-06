@@ -21,7 +21,7 @@
 	 */
 	import { i18n } from '$lib/i18n';
 	import { Button } from '$lib/components/ui';
-	import { openUrl } from '@tauri-apps/plugin-opener';
+	import { openExternalUrl } from '$lib/tauri';
 	import { isAllowedScheme } from '$lib/utils/url';
 
 	interface Props {
@@ -34,7 +34,7 @@
 
 	async function openExternalLink(): Promise<void> {
 		if (isAllowedScheme(EXTERNAL_URL)) {
-			await openUrl(EXTERNAL_URL);
+			await openExternalUrl(EXTERNAL_URL);
 		}
 	}
 

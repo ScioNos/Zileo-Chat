@@ -24,7 +24,7 @@ Displays in a modal with variable detection and preview.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
+	import { tauriInvoke } from '$lib/tauri';
 	import { Button, Input, Textarea, Select, Badge } from '$lib/components/ui';
 	import type { Prompt, PromptCreate, PromptCategory } from '$types/prompt';
 	import { PROMPT_CATEGORY_I18N_KEYS } from '$types/prompt';
@@ -64,7 +64,7 @@ Displays in a modal with variable detection and preview.
 	onMount(async () => {
 		contentTextarea = document.getElementById(contentTextareaId) as HTMLTextAreaElement | null;
 		try {
-			const skills = await invoke<SkillSummary[]>('list_skills');
+			const skills = await tauriInvoke<SkillSummary[]>('list_skills');
 			availableSkills = skills.filter((s) => s.enabled);
 		} catch {
 			// Non-blocking: skill insertion is an optional feature.
