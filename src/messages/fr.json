@@ -741,7 +741,7 @@
   "prompts_form_description_placeholder": "Breve description de cette instruction",
   "prompts_form_category_label": "Categorie",
   "prompts_form_content_label": "Contenu",
-  "prompts_form_content_placeholder": "Saisissez le contenu de l'instruction. Utilisez {{nom_variable}} pour les espaces reservables.",
+  "prompts_form_content_placeholder": "Saisissez le contenu de l'instruction. Utilisez {{variable_name}} pour les espaces reservables.",
   "prompts_detected_variables": "Variables detectees :",
   "prompts_detected_skills": "Skills references :",
   "prompts_insert_skill": "Inserer une reference de skill...",
@@ -1206,7 +1206,7 @@
 
   "help_prompts_title": "Bibliotheque d'instructions",
   "help_prompts_description": "Creez des modeles d'instructions reutilisables avec des espaces reservables. Utilisez-les dans les conversations pour inserer rapidement des instructions complexes.",
-  "help_prompts_tutorial": "Cliquez sur 'Creer une instruction' pour ajouter un nouveau modele\nUtilisez la syntaxe {{nom_variable}} pour les espaces reservables\nOrganisez les instructions par categorie\nAccedez aux instructions dans le chat avec Ctrl+P\nRemplissez les variables lors de l'utilisation d'une instruction",
+  "help_prompts_tutorial": "Cliquez sur 'Creer une instruction' pour ajouter un nouveau modele\nUtilisez la syntaxe {{variable_name}} pour les espaces reservables\nOrganisez les instructions par categorie\nAccedez aux instructions dans le chat avec Ctrl+P\nRemplissez les variables lors de l'utilisation d'une instruction",
 
   "help_skills_title": "Bibliotheque de competences",
   "help_skills_description": "Creez des documents de competences contenant des instructions que les agents peuvent lire a la demande via l'outil ReadSkill.",
