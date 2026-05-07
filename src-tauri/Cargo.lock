@@ -8604,7 +8604,7 @@ dependencies = [
 
 [[package]]
 name = "zileo-chat"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8613,6 +8613,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "globset",
+ "http",
  "keyring",
  "regex",
  "reqwest 0.12.28",
