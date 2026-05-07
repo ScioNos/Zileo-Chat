@@ -488,7 +488,11 @@ Uses extracted components, services, and stores for clean architecture.
 					);
 				}
 			}
-		} catch {
+		} catch (err) {
+			console.warn(
+				`Agent configuration unavailable for agent ${agentId}; using default max iterations. ` +
+					`Original error: ${getErrorMessage(err)}`
+			);
 			pageState.currentMaxIterations = ITERATIONS_LIMITS.DEFAULT;
 		}
 	}

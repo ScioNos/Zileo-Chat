@@ -24,8 +24,7 @@ Multi-step process: entity selection, options, preview, and export.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { tauriInvoke } from '$lib/tauri';
-	import { saveDialog } from '$lib/tauri';
+	import { tauriInvoke, saveDialog, isTauriRuntime } from '$lib/tauri';
 	import { Button, Card, Badge, StatusIndicator } from '$lib/components/ui';
 	import EntitySelector from './EntitySelector.svelte';
 	import ExportPreview from './ExportPreview.svelte';
@@ -157,6 +156,26 @@ Multi-step process: entity selection, options, preview, and export.
 	}
 
 	/**
+	 * Downloads generated export content in browser-only runtimes.
+	 */
+	function downloadBrowserFile(filename: string, content: string, mimeType: string): void {
+		if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') {
+			throw new Error('Browser download API is unavailable');
+		}
+
+		const blob = new Blob([content], { type: mimeType });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = filename;
+		anchor.style.display = 'none';
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+	}
+
+	/**
 	 * Generates and saves export file using native dialog
 	 */
 	async function generateExport(): Promise<void> {
@@ -195,6 +214,13 @@ Multi-step process: entity selection, options, preview, and export.
 			});
 
 			const defaultFilename = `zileo-export-${new Date().toISOString().slice(0, 10)}.json`;
+
+			if (!isTauriRuntime()) {
+				downloadBrowserFile(defaultFilename, exportData, 'application/json');
+				onexport?.(true);
+				resetWizard();
+				return;
+			}
 
 			// Show native save dialog
 			const filePath = await saveDialog({

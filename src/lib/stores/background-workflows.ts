@@ -462,7 +462,7 @@ export const backgroundWorkflowsStore = {
 	 * Tear down the store by unregistering all Tauri event listeners,
 	 * stopping the cleanup timer, clearing callbacks, and resetting state.
 	 */
-	async destroy(): Promise<void> {
+		destroy(): void {
 		for (const unlisten of unlisteners) {
 			unlisten();
 		}

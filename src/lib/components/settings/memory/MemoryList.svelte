@@ -24,8 +24,7 @@ Displays memories with filtering, search, and action buttons.
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { tauriInvoke } from '$lib/tauri';
-	import { saveDialog } from '$lib/tauri';
+	import { tauriInvoke, saveDialog, isTauriRuntime } from '$lib/tauri';
 	import { Button, Card, Input, Select, Badge, StatusIndicator, Modal, DeleteConfirmModal } from '$lib/components/ui';
 	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type { Memory, MemoryType, MemorySearchResult } from '$types/memory';
@@ -262,6 +261,26 @@ Displays memories with filtering, search, and action buttons.
 	}
 
 	/**
+	 * Downloads exported memory content in browser-only runtimes.
+	 */
+	function downloadBrowserFile(filename: string, content: string, mimeType: string): void {
+		if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') {
+			throw new Error('Browser download API is unavailable');
+		}
+
+		const blob = new Blob([content], { type: mimeType });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = filename;
+		anchor.style.display = 'none';
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+	}
+
+	/**
 	 * Exports memories using native Tauri save dialog
 	 */
 	async function handleExport(format: 'json' | 'csv'): Promise<void> {
@@ -275,6 +294,13 @@ Displays memories with filtering, search, and action buttons.
 
 			const defaultFilename = `memories-${new Date().toISOString().slice(0, 10)}.${format}`;
 			const filterName = format === 'json' ? 'JSON' : 'CSV';
+
+			if (!isTauriRuntime()) {
+				const mimeType = format === 'json' ? 'application/json' : 'text/csv';
+				downloadBrowserFile(defaultFilename, data, mimeType);
+				notify('success', t('memory_exported').replace('{count}', String(memories.length)));
+				return;
+			}
 
 			const filePath = await saveDialog({
 				defaultPath: defaultFilename,

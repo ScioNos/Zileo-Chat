@@ -23,8 +23,7 @@ Uses Tauri's native file dialog to pick folders, validates via backend command.
 -->
 
 <script lang="ts">
-	import { tauriInvoke } from '$lib/tauri';
-	import { openDialog } from '$lib/tauri';
+	import { tauriInvoke, openDialog, createTauriUnavailableError, isTauriRuntime } from '$lib/tauri';
 	import { i18n } from '$lib/i18n';
 	import { getErrorMessage } from '$lib/utils/error';
 	import { Button } from '$lib/components/ui';
@@ -55,6 +54,10 @@ Uses Tauri's native file dialog to pick folders, validates via backend command.
 		adding = true;
 		error = null;
 		try {
+			if (!isTauriRuntime()) {
+				throw createTauriUnavailableError('Tauri open dialog');
+			}
+
 			const selected = await openDialog({
 				directory: true,
 				multiple: false,
