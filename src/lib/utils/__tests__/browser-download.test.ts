@@ -24,7 +24,11 @@ vi.restoreAllMocks();
 });
 
 it('creates a temporary anchor, triggers download, and revokes the object URL', () => {
-const createObjectURL = vi.fn(() => 'blob:test-download');
+let capturedBlob: Blob | null = null;
+const createObjectURL = vi.fn((blob: Blob) => {
+capturedBlob = blob;
+return 'blob:test-download';
+});
 const revokeObjectURL = vi.fn();
 const click = vi.fn();
 const originalCreateElement = document.createElement.bind(document);
@@ -42,8 +46,7 @@ return element;
 downloadBrowserFile('export.json', '{"ok":true}', 'application/json');
 
 expect(createObjectURL).toHaveBeenCalledOnce();
-const [[blob]] = createObjectURL.mock.calls as [[Blob]];
-		expect(blob).toBeInstanceOf(Blob);
+expect(capturedBlob).toBeInstanceOf(Blob);
 expect(click).toHaveBeenCalledOnce();
 expect(revokeObjectURL).toHaveBeenCalledWith('blob:test-download');
 expect(document.body.querySelector('a')).toBeNull();
