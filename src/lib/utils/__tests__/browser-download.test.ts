@@ -42,7 +42,8 @@ return element;
 downloadBrowserFile('export.json', '{"ok":true}', 'application/json');
 
 expect(createObjectURL).toHaveBeenCalledOnce();
-expect(createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob);
+const [[blob]] = createObjectURL.mock.calls as [[Blob]];
+		expect(blob).toBeInstanceOf(Blob);
 expect(click).toHaveBeenCalledOnce();
 expect(revokeObjectURL).toHaveBeenCalledWith('blob:test-download');
 expect(document.body.querySelector('a')).toBeNull();
