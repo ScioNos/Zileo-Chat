@@ -33,6 +33,7 @@ Displays memories with filtering, search, and action buttons.
 	import { Trash2, Edit, Eye, Download, Upload, RefreshCw } from '@lucide/svelte';
 	import { i18n, t } from '$lib/i18n';
 	import { getErrorMessage } from '$lib/utils/error';
+	import { downloadBrowserFile } from '$lib/utils/browser-download';
 	import { toastStore } from '$lib/stores/toast';
 	import type { ToastType } from '$types/background-workflow';
 
@@ -258,26 +259,6 @@ Displays memories with filtering, search, and action buttons.
 	function cancelDelete(): void {
 		showDeleteConfirm = false;
 		memoryToDelete = null;
-	}
-
-	/**
-	 * Downloads exported memory content in browser-only runtimes.
-	 */
-	function downloadBrowserFile(filename: string, content: string, mimeType: string): void {
-		if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') {
-			throw new Error('Browser download API is unavailable');
-		}
-
-		const blob = new Blob([content], { type: mimeType });
-		const url = URL.createObjectURL(blob);
-		const anchor = document.createElement('a');
-		anchor.href = url;
-		anchor.download = filename;
-		anchor.style.display = 'none';
-		document.body.appendChild(anchor);
-		anchor.click();
-		anchor.remove();
-		URL.revokeObjectURL(url);
 	}
 
 	/**
