@@ -1,6 +1,9 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
-import { fileURLToPath, URL } from 'node:url';
+
+// Note: Vitest configuration lives in vitest.config.ts (source of truth).
+// Keeping it out of this file avoids drift between dev/build aliases
+// (resolved by SvelteKit) and test aliases.
 
 export default defineConfig({
   plugins: [sveltekit()],
@@ -15,18 +18,11 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
-    target: ['es2021', 'chrome100', 'safari13'],
+    // Tauri 2 ships modern WebView (WebKit on macOS/Linux, Edge WebView2 on
+    // Windows). chrome105 / safari15 covers all platforms — older targets
+    // emit unnecessary polyfills.
+    target: ['es2022', 'chrome105', 'safari15'],
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     sourcemap: !!process.env.TAURI_DEBUG
-  },
-  test: {
-    include: ['src/**/*.{test,spec}.{js,ts}'],
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: ['src/tests/setup.ts'],
-    alias: {
-      $types: fileURLToPath(new URL('./src/types', import.meta.url)),
-      '$lib': fileURLToPath(new URL('./src/lib', import.meta.url))
-    }
   }
 });

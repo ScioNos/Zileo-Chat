@@ -173,6 +173,27 @@ pub enum LLMError {
     /// Non-retryable: cancellation is intentional, not a transient failure.
     #[error("Operation cancelled")]
     Cancelled,
+
+    /// SSE streaming response or single payload exceeded the safety cap.
+    /// Prevents OOM when a misbehaving upstream sends a runaway response.
+    #[error("Response too large: {what}")]
+    ResponseTooLarge {
+        /// What exceeded the cap (e.g. "SSE buffer", "single payload")
+        what: &'static str,
+    },
+
+    /// HTTP 4xx client error (excluding 429 which remains retryable as
+    /// rate-limiting). Marker variant: callers receive a status hint and
+    /// `is_retryable` short-circuits to false. Distinguishes auth /
+    /// validation failures from transient server-side issues that
+    /// `RequestFailed` represents.
+    #[error("Client error: HTTP {status}: {message}")]
+    ClientError {
+        /// HTTP status code (400-499 except 429)
+        status: u16,
+        /// User-facing error message
+        message: String,
+    },
 }
 
 impl From<anyhow::Error> for LLMError {

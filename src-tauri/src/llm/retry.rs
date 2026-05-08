@@ -38,6 +38,15 @@ use tracing::{debug, warn};
 
 use super::provider::LLMError;
 
+/// Apply a 0..10% additive jitter to the base backoff delay. Multiple clients
+/// hitting the same provider after a transient outage would otherwise wake up
+/// in lockstep and amplify the failure mode (thundering herd).
+fn jittered(delay: Duration) -> Duration {
+    let factor = 1.0 + rand::random::<f64>() * 0.1;
+    let nanos = (delay.as_nanos() as f64 * factor) as u64;
+    Duration::from_nanos(nanos)
+}
+
 /// Configuration for retry behavior
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -88,7 +97,8 @@ impl RetryConfig {
 ///
 /// Retryable errors:
 /// - ConnectionError: Network issues, transient failures
-/// - RequestFailed: May be rate limit (429) or server error (5xx)
+/// - RequestFailed: 429 rate limits and 5xx server errors (parse_api_error
+///   routes 4xx-except-429 to ClientError so they don't end up here)
 ///
 /// Non-retryable errors:
 /// - NotConfigured: Configuration issue, won't fix itself
@@ -96,6 +106,9 @@ impl RetryConfig {
 /// - ModelNotFound: Invalid model, won't fix itself
 /// - CircuitOpen: Provider temporarily unavailable, circuit breaker handles recovery
 /// - Internal: Programming error, won't fix itself
+/// - Cancelled: User intent, never retry
+/// - ResponseTooLarge: Cap exceeded; retrying won't shrink the response
+/// - ClientError: HTTP 4xx (auth, bad request, ...) — retry won't fix
 pub fn is_retryable(error: &LLMError) -> bool {
     matches!(
         error,
@@ -161,8 +174,9 @@ where
                     return Err(error);
                 }
 
-                // Calculate delay and wait
-                let delay = config.delay_for_attempt(attempt);
+                // Calculate delay and wait. Add jitter so concurrent callers
+                // do not retry in lockstep (thundering herd).
+                let delay = jittered(config.delay_for_attempt(attempt));
                 warn!(
                     attempt = attempt + 1,
                     max_retries = config.max_retries,
@@ -243,7 +257,7 @@ where
                     return Err(error);
                 }
 
-                let delay = config.delay_for_attempt(attempt);
+                let delay = jittered(config.delay_for_attempt(attempt));
                 warn!(
                     attempt = attempt + 1,
                     max_retries = config.max_retries,
@@ -296,6 +310,22 @@ mod tests {
 
         // Attempt 3: 1000 * 8 = 8000ms
         assert_eq!(config.delay_for_attempt(3), Duration::from_millis(8000));
+    }
+
+    #[test]
+    fn test_jittered_stays_in_0_to_10pct_band() {
+        // Sample many draws and assert the jittered delay never undershoots
+        // the base and never overshoots base * 1.10.
+        let base = Duration::from_millis(1000);
+        for _ in 0..200 {
+            let j = jittered(base);
+            assert!(j >= base, "jittered must never undershoot base");
+            assert!(
+                j <= Duration::from_millis(1100),
+                "jittered must stay within +10% of base, got {:?}",
+                j
+            );
+        }
     }
 
     #[test]

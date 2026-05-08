@@ -322,12 +322,12 @@ describe('Workflow Store', () => {
 			workflowStore.setSearchFilter('api');
 			let filtered = get(filteredWorkflows);
 			expect(filtered).toHaveLength(1);
-			expect(filtered[0].id).toBe('wf2');
+			expect(filtered[0]!.id).toBe('wf2');
 
 			workflowStore.setSearchFilter('migration');
 			filtered = get(filteredWorkflows);
 			expect(filtered).toHaveLength(1);
-			expect(filtered[0].id).toBe('wf1');
+			expect(filtered[0]!.id).toBe('wf1');
 		});
 
 		it('should show all workflows when filter is cleared', () => {
@@ -400,7 +400,7 @@ describe('Workflow Store', () => {
 
 			expect(get(workflowsError)).toBeNull();
 			expect(get(workflows)).toHaveLength(1);
-			expect(get(workflows)[0].name).toBe('Recovered Workflow');
+			expect(get(workflows)[0]!.name).toBe('Recovered Workflow');
 		});
 
 		it('should clear error at start of retry attempt', async () => {
@@ -458,7 +458,57 @@ describe('Workflow Store', () => {
 			// Error should be set, but existing workflows should remain
 			expect(get(workflowsError)).toBe('Transient error');
 			expect(get(workflows)).toHaveLength(1);
-			expect(get(workflows)[0].name).toBe('Existing Workflow');
+			expect(get(workflows)[0]!.name).toBe('Existing Workflow');
+		});
+	});
+
+	describe('CRUD error handling (commit 8)', () => {
+		it('renameWorkflow sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('rename failed'));
+			await expect(workflowStore.renameWorkflow('wf-1', 'new')).rejects.toThrow('rename failed');
+			expect(get(workflowsError)).toBe('rename failed');
+		});
+
+		it('deleteWorkflow sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('delete failed'));
+			await expect(workflowStore.deleteWorkflow('wf-1')).rejects.toThrow('delete failed');
+			expect(get(workflowsError)).toBe('delete failed');
+		});
+
+		it('deleteBatch sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('batch failed'));
+			await expect(workflowStore.deleteBatch(['a', 'b'])).rejects.toThrow('batch failed');
+			expect(get(workflowsError)).toBe('batch failed');
+		});
+
+		it('moveToFolder sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('move failed'));
+			await expect(workflowStore.moveToFolder('wf-1', 'fld-1')).rejects.toThrow('move failed');
+			expect(get(workflowsError)).toBe('move failed');
+		});
+
+		it('moveBatchToFolder sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('batch move failed'));
+			await expect(workflowStore.moveBatchToFolder(['a'], null)).rejects.toThrow(
+				'batch move failed'
+			);
+			expect(get(workflowsError)).toBe('batch move failed');
+		});
+
+		it('togglePinned sets error and re-throws when invoke rejects', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('pin failed'));
+			await expect(workflowStore.togglePinned('wf-1')).rejects.toThrow('pin failed');
+			expect(get(workflowsError)).toBe('pin failed');
+		});
+
+		it('clears error on the next successful CRUD action', async () => {
+			vi.mocked(invoke).mockRejectedValueOnce(new Error('boom'));
+			await expect(workflowStore.togglePinned('wf-1')).rejects.toThrow();
+			expect(get(workflowsError)).toBe('boom');
+
+			vi.mocked(invoke).mockResolvedValueOnce(createMockWorkflow('wf-1', 'wf'));
+			await workflowStore.togglePinned('wf-1');
+			expect(get(workflowsError)).toBeNull();
 		});
 	});
 
@@ -471,7 +521,7 @@ describe('Workflow Store', () => {
 
 			// Initial state
 			expect(states).toHaveLength(1);
-			expect(states[0].workflows).toEqual([]);
+			expect(states[0]!.workflows).toEqual([]);
 
 			// Load workflows
 			const mockWorkflows = [createMockWorkflow('wf1', 'Test')];
@@ -480,7 +530,7 @@ describe('Workflow Store', () => {
 
 			// Should have captured state changes
 			expect(states.length).toBeGreaterThan(1);
-			expect(states[states.length - 1].workflows).toEqual(mockWorkflows);
+			expect(states[states.length - 1]!.workflows).toEqual(mockWorkflows);
 
 			unsubscribe();
 		});

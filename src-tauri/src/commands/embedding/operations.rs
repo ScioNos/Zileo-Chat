@@ -15,6 +15,7 @@
 //! Memory CRUD, export/import, and embedding regeneration commands.
 
 use crate::{
+    db::sanitize_for_surrealdb,
     models::{ExportFormat, ImportResult, Memory, RegenerateResult},
     security::{serialize_for_query, validate_uuid_field},
     AppState,
@@ -194,7 +195,12 @@ pub async fn import_memories(
         let metadata = mem.get("metadata").cloned().unwrap_or_else(|| json!({}));
 
         let memory_id = uuid::Uuid::new_v4().to_string();
-        let sanitized_content = content.replace('\0', "");
+        // Use the centralized sanitizer rather than ad-hoc \0 stripping.
+        // It also enforces the depth limit and handles nested JSON consistently
+        // — required because `metadata` is opaque user-provided JSON that may
+        // contain null bytes anywhere in the tree (ERR_SURREAL_006).
+        let sanitized_content = sanitize_for_surrealdb(serde_json::json!(content));
+        let sanitized_metadata = sanitize_for_surrealdb(metadata.clone());
         let create_query = format!(
             "CREATE memory:`{}` CONTENT {{ type: $mtype, content: $content, metadata: $metadata }}",
             memory_id
@@ -206,8 +212,8 @@ pub async fn import_memories(
                 &create_query,
                 vec![
                     ("mtype".to_string(), serde_json::json!(memory_type)),
-                    ("content".to_string(), serde_json::json!(sanitized_content)),
-                    ("metadata".to_string(), metadata.clone()),
+                    ("content".to_string(), sanitized_content),
+                    ("metadata".to_string(), sanitized_metadata),
                 ],
             )
             .await
@@ -282,9 +288,20 @@ pub async fn regenerate_embeddings(
     for mem in &memories {
         processed += 1;
 
-        let id = match mem.get("id").and_then(|i| i.as_str()) {
+        let id_raw = match mem.get("id").and_then(|i| i.as_str()) {
             Some(i) => i,
             None => {
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Defense-in-depth: validate the id even though it comes from our DB.
+        // Skips rather than aborts the whole batch on malformed rows.
+        let id = match validate_uuid_field(id_raw, "memory_id") {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(memory_id = %id_raw, error = %e, "Skipping memory with invalid id");
                 failed += 1;
                 continue;
             }
