@@ -39,8 +39,6 @@
 -->
 <script lang="ts">
 	import type {
-		MCPAuthMetadata,
-		MCPAuthSecret,
 		MCPAuthType,
 		MCPDeploymentMethod,
 		MCPServerConfig,
@@ -58,6 +56,17 @@
 		validateBearerToken,
 		validateExtraHeaders
 	} from '$lib/utils/mcp-auth-validation';
+	import {
+		buildKeyValueMap,
+		buildMCPAuthMetadata,
+		buildMCPAuthSecret,
+		generateMCPServerId,
+		getLegacyApiKeyValue,
+		getLegacyHeaderEntries,
+		isBasicAuthOverPlainHttp,
+		parseArgs
+	} from './MCPServerForm.helpers';
+	import type { MCPServerFormData, MCPServerFormErrors } from './MCPServerForm.types';
 
 	/**
 	 * MCPServerForm props.
@@ -83,31 +92,9 @@
 		saving = false
 	}: Props = $props();
 
-	/**
-	 * Generates a unique ID for new servers.
-	 */
-	function generateId(): string {
-		return `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-	}
-
 	/** Form state initialised from props. */
-	let formData = $state<{
-		id: string;
-		name: string;
-		enabled: boolean;
-		command: MCPDeploymentMethod;
-		args: string;
-		env: Array<{ key: string; value: string }>;
-		description: string;
-		authType: MCPAuthType;
-		bearerToken: string;
-		apiKeyHeaderName: string;
-		apiKeyValue: string;
-		basicUser: string;
-		basicPass: string;
-		extraHeaders: Array<{ key: string; value: string }>;
-	}>({
-		id: generateId(),
+	let formData = $state<MCPServerFormData>({
+		id: generateMCPServerId(),
 		name: '',
 		enabled: true,
 		command: 'docker',
@@ -124,16 +111,7 @@
 	});
 
 	/** Validation errors state (each entry is an i18n key or already-resolved msg). */
-	let errors = $state<{
-		name?: string;
-		args?: string;
-		env?: string;
-		authBearer?: string;
-		authApiKeyHeader?: string;
-		authApiKeyValue?: string;
-		authBasic?: string;
-		extraHeaders?: string;
-	}>({});
+	let errors = $state<MCPServerFormErrors>({});
 
 	/** Whether the user has dismissed the legacy migration banner for this session. */
 	let migrationDismissed = $state(false);
@@ -143,7 +121,7 @@
 		const initialAuthType = server?.authType ?? 'none';
 		const meta = server?.authMetadata;
 		formData = {
-			id: server?.id ?? generateId(),
+			id: server?.id ?? generateMCPServerId(),
 			name: server?.name ?? '',
 			enabled: server?.enabled ?? true,
 			command: server?.command ?? 'docker',
@@ -186,12 +164,9 @@
 	);
 
 	/** Returns the value of the legacy `API_KEY` env var, or null. */
-	const legacyApiKeyValue = $derived.by((): string | null => {
-		if (!isHttp) return null;
-		if (formData.authType !== 'none') return null;
-		const entry = formData.env.find((e) => e.key.trim() === 'API_KEY');
-		return entry && entry.value ? entry.value : null;
-	});
+	const legacyApiKeyValue = $derived.by((): string | null =>
+		getLegacyApiKeyValue(isHttp, formData.authType, formData.env)
+	);
 
 	/**
 	 * Returns the legacy `HEADER_*` env entries (without the `HEADER_` prefix
@@ -199,13 +174,9 @@
 	 * backend `detect_legacy_http_auth_keys` so the in-form banner stays in
 	 * sync with the page-level one.
 	 */
-	const legacyHeaderEntries = $derived.by((): Array<{ key: string; value: string }> => {
-		if (!isHttp) return [];
-		if (formData.authType !== 'none') return [];
-		return formData.env.filter(
-			(e) => e.key.trim().startsWith('HEADER_') && e.value.length > 0
-		);
-	});
+	const legacyHeaderEntries = $derived.by(() =>
+		getLegacyHeaderEntries(isHttp, formData.authType, formData.env)
+	);
 
 	/** Whether the legacy migration banner should be shown right now. */
 	const showLegacyMigration = $derived(
@@ -214,11 +185,9 @@
 	);
 
 	/** Whether the current Basic auth selection runs over plain HTTP. */
-	const basicOverPlainHttp = $derived.by(() => {
-		if (formData.authType !== 'basic') return false;
-		const url = formData.args.split('\n').find((l) => l.trim().length > 0);
-		return Boolean(url && /^http:\/\//i.test(url.trim()));
-	});
+	const basicOverPlainHttp = $derived.by(() =>
+		isBasicAuthOverPlainHttp(formData.authType, formData.args)
+	);
 
 	/** Command options for select - reactive to locale changes. */
 	const commandOptions: SelectOption[] = $derived([
@@ -241,13 +210,7 @@
 	 * key is empty (used both for validation and for submit).
 	 */
 	function buildExtraHeadersMap(): Record<string, string> {
-		const map: Record<string, string> = {};
-		for (const row of formData.extraHeaders) {
-			const k = row.key.trim();
-			if (!k) continue;
-			map[k] = row.value;
-		}
-		return map;
+		return buildKeyValueMap(formData.extraHeaders);
 	}
 
 	/**
@@ -328,40 +291,16 @@
 	/**
 	 * Builds the optional `authMetadata` payload from the form state.
 	 */
-	function buildAuthMetadata(): MCPAuthMetadata | undefined {
-		switch (formData.authType) {
-			case 'apikey': {
-				const headerName = formData.apiKeyHeaderName.trim() || 'X-API-Key';
-				return { headerName };
-			}
-			case 'basic':
-				return { username: formData.basicUser.trim() };
-			default:
-				return undefined;
-		}
+	function buildAuthMetadata() {
+		return buildMCPAuthMetadata(formData);
 	}
 
 	/**
 	 * Builds the optional `authSecret` payload, respecting the edit-mode
 	 * "leave blank to keep" semantics.
 	 */
-	function buildAuthSecret(): MCPAuthSecret | undefined {
-		switch (formData.authType) {
-			case 'bearer':
-				return formData.bearerToken
-					? { token: formData.bearerToken }
-					: undefined;
-			case 'apikey':
-				return formData.apiKeyValue
-					? { value: formData.apiKeyValue }
-					: undefined;
-			case 'basic':
-				return formData.basicPass
-					? { password: formData.basicPass }
-					: undefined;
-			default:
-				return undefined;
-		}
+	function buildAuthSecret() {
+		return buildMCPAuthSecret(formData);
 	}
 
 	/**
@@ -371,15 +310,8 @@
 		event.preventDefault();
 		if (!validate()) return;
 
-		const args = formData.args
-			.split('\n')
-			.map((arg) => arg.trim())
-			.filter((arg) => arg.length > 0);
-
-		const env: Record<string, string> = {};
-		for (const item of formData.env) {
-			if (item.key.trim()) env[item.key.trim()] = item.value;
-		}
+		const args = parseArgs(formData.args);
+		const env = buildKeyValueMap(formData.env);
 
 		const extraHeadersMap = isHttp ? buildExtraHeadersMap() : {};
 
