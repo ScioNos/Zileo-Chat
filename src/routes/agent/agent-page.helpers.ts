@@ -71,7 +71,7 @@ agent_name: resolveAgentName(task.agent_name)
 }
 
 export function getDefaultFolderColor(folderCount: number): string {
-return DEFAULT_FOLDER_COLORS[folderCount % DEFAULT_FOLDER_COLORS.length];
+return DEFAULT_FOLDER_COLORS[folderCount % DEFAULT_FOLDER_COLORS.length]!;
 }
 
 export function shouldRestoreStatusFilter(savedFilter: string): boolean {

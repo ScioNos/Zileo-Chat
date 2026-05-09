@@ -109,8 +109,8 @@ const tasks = [displayTask({ agent_name: knownAgentId })];
 const resolved = resolveTaskAgentNames(tasks, (rawName) => rawName === knownAgentId ? 'Known Agent' : rawName);
 
 expect(resolved).toEqual([{ ...tasks[0], agent_name: 'Known Agent' }]);
-expect(tasks[0].agent_name).toBe(knownAgentId);
-expect(resolved[0]).not.toBe(tasks[0]);
+expect(tasks[0]!.agent_name).toBe(knownAgentId);
+expect(resolved[0]!).not.toBe(tasks[0]);
 });
 
 it('returns default folder colors with modulo cycling', () => {

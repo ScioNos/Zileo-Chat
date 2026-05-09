@@ -1,6 +1,6 @@
 {
   "name": "zileo-chat",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Zileo Chat - Multi-agent AI desktop application",
   "license": "Apache-2.0",
   "author": {
@@ -29,7 +29,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json --threshold warning",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint .",
     "test": "vitest",
     "test:e2e": "playwright test",

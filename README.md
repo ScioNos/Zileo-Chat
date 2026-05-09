@@ -1,6 +1,6 @@
 # Zileo Chat
 
-[![Version](https://img.shields.io/badge/version-0.23.0-orange)](https://github.com/assistance-micro-design/zileo-chat)
+[![Version](https://img.shields.io/badge/version-0.23.1-orange)](https://github.com/assistance-micro-design/zileo-chat)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/assistance-micro-design/zileo-chat)
 
@@ -14,7 +14,7 @@
 
 ## Beta Warning
 
-**This software is currently in beta (v0.23.0).**
+**This software is currently in beta (v0.23.1).**
 
 Before using Zileo Chat, please be aware of the following risks:
 
@@ -115,11 +115,11 @@ Use [Docker MCP Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/tool
 
 ## Build Requirements
 
-- **Node.js** 20.19+ or 22.12+
+- **Node.js** 22.12+ or 24+ (Node 20 EOL April 2026)
 - **Rust** 1.80.1+
 
 ```bash
-node --version    # >= 20.19
+node --version    # >= 22.12
 rustc --version   # >= 1.80.1
 ```
 
@@ -149,7 +149,7 @@ npm run tauri:build
 | Layer | Technology |
 |-------|------------|
 | Frontend | SvelteKit 2.55 + Svelte 5.55 |
-| Backend | Rust + Tauri 2.10 |
+| Backend | Rust + Tauri 2.11 |
 | Database | SurrealDB 2.6 (embedded) |
 | LLM | Rig.rs 0.34 + direct HTTP |
 

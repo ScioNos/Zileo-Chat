@@ -92,8 +92,8 @@ const conflicts: ImportConflict[] = [
 { entityType: 'model', entityName: 'same-name', existingId: '2' }
 ];
 
-expect(getConflictKey(conflicts[0])).toBe('agent:same-name');
-expect(getConflictKey(conflicts[1])).toBe('model:same-name');
+expect(getConflictKey(conflicts[0]!)).toBe('agent:same-name');
+expect(getConflictKey(conflicts[1]!)).toBe('model:same-name');
 expect(areConflictsResolved(conflicts, { 'agent:same-name': 'skip' })).toBe(false);
 expect(areConflictsResolved(conflicts, {
 'agent:same-name': 'skip',

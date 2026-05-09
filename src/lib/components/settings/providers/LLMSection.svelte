@@ -60,6 +60,7 @@ Combines Providers and Models sections.
 	import { createModalController } from '$lib/utils/modal.svelte';
 	import type { ModalController } from '$lib/utils/modal.svelte';
 	import { getErrorMessage } from '$lib/utils/error';
+	import { dispatchSettingsRefresh } from '$lib/utils/settings-refresh';
 	import { toastStore } from '$lib/stores/toast';
 	import type { ToastType } from '$types/background-workflow';
 
@@ -153,6 +154,7 @@ Combines Providers and Models sections.
 			notify('success', $i18n('settings_provider_deleted', { name: deletedName }));
 			showProviderDeleteConfirm = false;
 			providerToDelete = null;
+			dispatchSettingsRefresh();
 		} catch (err) {
 			notify('error', $i18n('settings_provider_delete_failed', { error: getErrorMessage(err) }));
 		} finally {
@@ -185,6 +187,7 @@ Combines Providers and Models sections.
 		} else {
 			notify('success', $i18n('llm_custom_provider_created'));
 		}
+		dispatchSettingsRefresh();
 	}
 
 	/**
@@ -203,6 +206,7 @@ Combines Providers and Models sections.
 				notify('success', $i18n('settings_model_updated', { name: model.name }));
 			}
 			modelModal.close();
+			dispatchSettingsRefresh();
 		} catch (err) {
 			notify('error', $i18n('settings_model_save_failed', { error: getErrorMessage(err) }));
 		} finally {
@@ -231,6 +235,7 @@ Combines Providers and Models sections.
 			notify('success', $i18n('settings_model_deleted', { name: deletedName }));
 			showModelDeleteConfirm = false;
 			modelToDelete = null;
+			dispatchSettingsRefresh();
 		} catch (err) {
 			notify('error', $i18n('settings_model_delete_failed', { error: getErrorMessage(err) }));
 		} finally {
@@ -259,6 +264,7 @@ Combines Providers and Models sections.
 			);
 			llmState = setProviderSettings(llmState, model.provider, updatedSettings);
 			notify('success', $i18n('settings_model_set_default', { name: model.name }));
+			dispatchSettingsRefresh();
 		} catch (err) {
 			notify('error', $i18n('settings_model_set_default_failed', { error: getErrorMessage(err) }));
 		}

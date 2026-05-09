@@ -42,6 +42,7 @@ import type { ChatBlock } from "$types/chat-block";
 import { MessageService } from "./message.service";
 import { WorkflowService } from "./workflow.service";
 import { streamingStore, activeSubAgents } from "$lib/stores/streaming";
+import { generateUuid } from "$lib/utils/uuid";
 import { get } from "svelte/store";
 import { tokenStore } from "$lib/stores/tokens";
 import { workflowStore } from "$lib/stores/workflows";
@@ -113,7 +114,7 @@ export interface ExecutionCallbacks {
  */
 function createUserMessage(workflowId: string, content: string): Message {
   return {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     workflow_id: workflowId,
     role: "user",
     content,
@@ -162,7 +163,7 @@ function createAssistantMessage(
  */
 function createErrorMessage(workflowId: string, error: string): Message {
   return {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     workflow_id: workflowId,
     role: "system",
     content: `Error: ${error}`,
@@ -348,11 +349,9 @@ export const WorkflowExecutorService = {
       const errorMsg = getErrorMessage(error);
       try {
         await MessageService.saveSystem(workflowId, `Error: ${errorMsg}`);
-      } catch (saveError) {
-        console.warn(
-          "Failed to persist workflow error message:",
-          getErrorMessage(saveError),
-        );
+      } catch {
+        // Best-effort persistence: if saving the system error row itself
+        // fails, the original errorMsg is still pushed to the UI below.
       }
 
       // Only push error to UI if still viewing this workflow
