@@ -26,9 +26,8 @@ Displays memories with filtering, search, and action buttons.
 	import { onMount, onDestroy } from 'svelte';
 	import { tauriInvoke, saveDialog, isTauriRuntime } from '$lib/tauri';
 	import { Button, Card, Input, Select, Badge, StatusIndicator, Modal, DeleteConfirmModal } from '$lib/components/ui';
-	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type { Memory, MemoryType, MemorySearchResult } from '$types/memory';
-	import type { ExportFormat, ImportResult, RegenerateResult } from '$types/embedding';
+	import type { ImportResult, RegenerateResult } from '$types/embedding';
 	import MemoryForm from './MemoryForm.svelte';
 	import { Trash2, Edit, Eye, Download, Upload, RefreshCw } from '@lucide/svelte';
 	import { i18n, t } from '$lib/i18n';
@@ -36,6 +35,16 @@ Displays memories with filtering, search, and action buttons.
 	import { downloadBrowserFile } from '$lib/utils/browser-download';
 	import { toastStore } from '$lib/stores/toast';
 	import type { ToastType } from '$types/background-workflow';
+	import {
+		buildMemoryTypeOptions,
+		formatDate,
+		formatImportFailureMessage,
+		formatRegenerateResultMessage,
+		formatScope,
+		getExportMetadata,
+		getTypeVariant,
+		truncate
+	} from './MemoryList.helpers';
 
 	function notify(type: ToastType, text: string): void {
 		toastStore.add({ type, title: text, message: '', persistent: false, duration: 5000 });
@@ -78,57 +87,13 @@ Displays memories with filtering, search, and action buttons.
 	let regenerating = $state(false);
 
 	/** Memory type options (reactive to locale) */
-	const typeOptions = $derived<SelectOption[]>([
-		{ value: '', label: t('memory_type_all') },
-		{ value: 'user_pref', label: t('memory_type_user_pref') },
-		{ value: 'context', label: t('memory_type_context') },
-		{ value: 'knowledge', label: t('memory_type_knowledge') },
-		{ value: 'decision', label: t('memory_type_decision') }
-	]);
-
-	/**
-	 * Truncates text to specified length
-	 */
-	function truncate(text: string, maxLength: number): string {
-		if (text.length <= maxLength) return text;
-		return text.slice(0, maxLength) + '...';
-	}
-
-	/**
-	 * Formats date for display
-	 */
-	function formatDate(dateStr: string): string {
-		const date = new Date(dateStr);
-		return date.toLocaleDateString(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		});
-	}
-
-	/**
-	 * Gets badge variant for memory type
-	 */
-	function getTypeVariant(type: MemoryType): 'primary' | 'success' | 'warning' | 'error' {
-		const variants: Record<MemoryType, 'primary' | 'success' | 'warning' | 'error'> = {
-			user_pref: 'primary',
-			context: 'success',
-			knowledge: 'warning',
-			decision: 'error'
-		};
-		return variants[type] || 'primary';
-	}
-
-	/**
-	 * Formats scope (workflow_id or General)
-	 */
-	function formatScope(workflowId: string | undefined | null): string {
-		if (!workflowId) return t('memory_scope_general');
-		// Truncate long workflow IDs
-		return workflowId.length > 12 ? workflowId.slice(0, 12) + '...' : workflowId;
-	}
+	const typeOptions = $derived(buildMemoryTypeOptions({
+		all: t('memory_type_all'),
+		userPref: t('memory_type_user_pref'),
+		context: t('memory_type_context'),
+		knowledge: t('memory_type_knowledge'),
+		decision: t('memory_type_decision')
+	}));
 
 	/**
 	 * Loads memories from backend (both workflow and general scope)
@@ -267,25 +232,21 @@ Displays memories with filtering, search, and action buttons.
 	async function handleExport(format: 'json' | 'csv'): Promise<void> {
 		actionLoading = true;
 		try {
-			const exportFormat: ExportFormat = format === 'json' ? 'json' : 'csv';
+			const exportMetadata = getExportMetadata(format);
 			const data = await tauriInvoke<string>('export_memories', {
-				format: exportFormat,
+				format: exportMetadata.exportFormat,
 				typeFilter: typeFilter || undefined
 			});
 
-			const defaultFilename = `memories-${new Date().toISOString().slice(0, 10)}.${format}`;
-			const filterName = format === 'json' ? 'JSON' : 'CSV';
-
 			if (!isTauriRuntime()) {
-				const mimeType = format === 'json' ? 'application/json' : 'text/csv';
-				downloadBrowserFile(defaultFilename, data, mimeType);
+				downloadBrowserFile(exportMetadata.defaultFilename, data, exportMetadata.mimeType);
 				notify('success', t('memory_exported').replace('{count}', String(memories.length)));
 				return;
 			}
 
 			const filePath = await saveDialog({
-				defaultPath: defaultFilename,
-				filters: [{ name: filterName, extensions: [format] }],
+				defaultPath: exportMetadata.defaultFilename,
+				filters: [{ name: exportMetadata.filterName, extensions: [exportMetadata.extension] }],
 				title: t('memory_export_title')
 			});
 
@@ -328,10 +289,7 @@ Displays memories with filtering, search, and action buttons.
 				}
 
 				if (result.failed > 0) {
-					notify(
-						'error',
-						t('memory_import_failed').replace('{count}', String(result.failed)).replace('{errors}', result.errors.slice(0, 3).join(', '))
-					);
+					notify('error', formatImportFailureMessage(t('memory_import_failed'), result.failed, result.errors));
 				}
 			} catch (err) {
 				notify('error', t('memory_import_failed_generic').replace('{error}', getErrorMessage(err)));
@@ -359,13 +317,7 @@ Displays memories with filtering, search, and action buttons.
 			const result = await tauriInvoke<RegenerateResult>('regenerate_embeddings', {
 				typeFilter: typeFilter || undefined
 			});
-			notify(
-				'success',
-				t('memory_regenerate_result')
-					.replace('{processed}', String(result.processed))
-					.replace('{success}', String(result.success))
-					.replace('{failed}', String(result.failed))
-			);
+			notify('success', formatRegenerateResultMessage(t('memory_regenerate_result'), result));
 			showRegenerateConfirm = false;
 			onchange?.();
 		} catch (err) {
@@ -502,7 +454,7 @@ Displays memories with filtering, search, and action buttons.
 						</div>
 						<div class="table-cell cell-scope" title={memory.workflow_id || $i18n('memory_scope_general')}>
 							<span class="scope-badge" class:workflow={memory.workflow_id}>
-								{formatScope(memory.workflow_id)}
+								{formatScope(memory.workflow_id, t('memory_scope_general'))}
 							</span>
 						</div>
 						<div class="table-cell cell-content">
