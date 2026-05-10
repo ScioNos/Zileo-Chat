@@ -38,7 +38,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		setModels,
 		setProviderSettings
 	} from '$lib/stores/llm';
-	import type { ProviderType, LLMState } from '$types/llm';
+	import type { LLMState } from '$types/llm';
 	import type { ProviderInfo } from '$types/custom-provider';
 	import type { AgentConfig, AgentConfigCreate, Lifecycle, ReasoningEffort } from '$types/agent';
 	import type { SkillSummary } from '$types/skill';
@@ -51,6 +51,15 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		getReasoningOptions,
 		normalizeReasoningEffortForProvider
 	} from '$lib/utils/agent-reasoning';
+	import {
+		buildAvailableMcpServers,
+		buildAvailableSkills,
+		buildProviderOptions,
+		formatContextWindow,
+		toProviderType,
+		toggleSelection,
+		validateAgentForm
+	} from './AgentForm.helpers';
 	import {
 		attachSettingsRefreshListener,
 		dispatchSettingsRefresh
@@ -127,27 +136,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	]);
 
 	/** Provider options with details - reactive to locale, includes custom providers */
-	const providerOptions = $derived.by(() => {
-		if (providerList.length > 0) {
-			return providerList.map((p) => ({
-				value: p.id,
-				label: p.displayName,
-				type: p.isCloud ? $i18n('llm_provider_cloud_api') : $i18n('agents_provider_ollama_type')
-			}));
-		}
-		// Fallback when providerList hasn't loaded yet
-		return [
-			{ value: 'mistral', label: $i18n('agents_provider_mistral'), type: $i18n('agents_provider_mistral_type') },
-			{ value: 'ollama', label: $i18n('agents_provider_ollama'), type: $i18n('agents_provider_ollama_type') }
-		];
-	});
-
-	/**
-	 * Converts provider name to ProviderType (lowercase)
-	 */
-	function toProviderType(providerName: string): ProviderType {
-		return providerName.toLowerCase() as ProviderType;
-	}
+	const providerOptions = $derived.by(() => buildProviderOptions(providerList, $i18n));
 
 	/** Reactive model list based on selected provider (full model objects) */
 	const availableModels = $derived.by(() => {
@@ -184,23 +173,11 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	});
 
 	/** Available skills (enabled only) */
-	const availableSkills = $derived(
-		availableSkillSummaries
-			.filter((s) => s.enabled)
-			.map((s) => ({
-				value: s.name,
-				label: s.name,
-				description: s.description
-			}))
-	);
+	const availableSkills = $derived(buildAvailableSkills(availableSkillSummaries));
 
 	/** Available MCP servers from store */
 	const availableMcpServers = $derived(
-		mcpState.servers.map((s) => ({
-			value: s.name,
-			label: s.name,
-			description: s.description || $i18n('agents_mcp_no_description')
-		}))
+		buildAvailableMcpServers(mcpState.servers, $i18n('agents_mcp_no_description'))
 	);
 
 	/**
@@ -287,37 +264,17 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	 * Validates form fields
 	 */
 	function validate(): boolean {
-		errors = {};
-
-		if (!name.trim() || name.length < 1 || name.length > 64) {
-			errors.name = t('agents_name_error');
-		} else {
-			const trimmedLower = name.trim().toLowerCase();
-			const isDuplicate = $agents.some(
-				(a) => a.name.toLowerCase() === trimmedLower && a.id !== agent?.id
-			);
-			if (isDuplicate) {
-				errors.name = t('agents_name_duplicate');
-			}
-		}
-
-		if (availableModels.length === 0) {
-			errors.model = t('agents_no_models_error');
-		} else if (!model) {
-			errors.model = t('agents_model_required');
-		} else if (!selectedModel) {
-			errors.model = t('agents_model_not_found');
-		}
-
-		if (maxToolIterations < 1 || maxToolIterations > 200) {
-			errors.maxToolIterations = t('agents_max_iterations_error');
-		}
-
-		if (!systemPrompt.trim()) {
-			errors.systemPrompt = t('agents_system_prompt_required');
-		} else if (systemPrompt.length > 10000) {
-			errors.systemPrompt = t('agents_system_prompt_max');
-		}
+		errors = validateAgentForm({
+			name,
+			agentId: agent?.id,
+			existingAgents: $agents,
+			availableModelsCount: availableModels.length,
+			model,
+			selectedModel,
+			maxToolIterations,
+			systemPrompt,
+			translate: t
+		});
 
 		return Object.keys(errors).length === 0;
 	}
@@ -372,46 +329,21 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	 * Toggles tool selection
 	 */
 	function toggleTool(toolValue: string): void {
-		if (selectedTools.includes(toolValue)) {
-			selectedTools = selectedTools.filter((t) => t !== toolValue);
-		} else {
-			selectedTools = [...selectedTools, toolValue];
-		}
+		selectedTools = toggleSelection(selectedTools, toolValue);
 	}
 
 	/**
 	 * Toggles skill selection
 	 */
 	function toggleSkill(skillName: string): void {
-		if (selectedSkills.includes(skillName)) {
-			selectedSkills = selectedSkills.filter((s) => s !== skillName);
-		} else {
-			selectedSkills = [...selectedSkills, skillName];
-		}
+		selectedSkills = toggleSelection(selectedSkills, skillName);
 	}
 
 	/**
 	 * Toggles MCP server selection
 	 */
 	function toggleMcpServer(serverName: string): void {
-		if (selectedMcpServers.includes(serverName)) {
-			selectedMcpServers = selectedMcpServers.filter((s) => s !== serverName);
-		} else {
-			selectedMcpServers = [...selectedMcpServers, serverName];
-		}
-	}
-
-	/**
-	 * Formats context window for display (e.g., "128K" for 128000)
-	 */
-	function formatContextWindow(tokens: number): string {
-		if (tokens >= 1_000_000) {
-			return `${(tokens / 1_000_000).toFixed(1)}M`;
-		}
-		if (tokens >= 1_000) {
-			return `${Math.round(tokens / 1_000)}K`;
-		}
-		return tokens.toLocaleString();
+		selectedMcpServers = toggleSelection(selectedMcpServers, serverName);
 	}
 
 	/**

@@ -41,10 +41,22 @@
   import { dispatchSettingsRefresh } from '$lib/utils/settings-refresh';
   import type { ToastType } from '$types/background-workflow';
   import ValidationInfoCard from './ValidationInfoCard.svelte';
+  import {
+    RETENTION_MAX,
+    RETENTION_MIN,
+    TIMEOUT_MAX,
+    TIMEOUT_MIN,
+    clampRetention,
+    clampTimeout,
+    createValidationSettingsUpdateRequest,
+    getAutoManualModeDisplay,
+    modeOptions,
+    splitAvailableTools,
+    timeoutBehaviorOptions
+  } from './ValidationSettings.helpers';
   import type {
     ValidationMode,
     TimeoutBehavior,
-    UpdateValidationSettingsRequest,
     AvailableToolInfo
   } from '$types/validation';
   import type { MCPServer } from '$types/mcp';
@@ -66,31 +78,11 @@
   // Timeout + audit local state.
   // Bounds mirror the backend constants (validation::VALIDATION_TIMEOUT_MIN/MAX_SECS,
   // audit::RETENTION_MIN/MAX_DAYS).
-  const TIMEOUT_MIN = 5;
-  const TIMEOUT_MAX = 600;
-  const RETENTION_MIN = 7;
-  const RETENTION_MAX = 90;
   let localTimeoutSeconds = $state(60);
   let localTimeoutBehavior = $state<TimeoutBehavior>('reject');
   let localEnableLogging = $state(true);
   let localRetentionDays = $state(30);
   let purging = $state(false);
-
-  const timeoutBehaviorOptions: Array<{ value: TimeoutBehavior; labelKey: string }> = [
-    { value: 'reject', labelKey: 'validation_timeout_behavior_reject' },
-    { value: 'approve', labelKey: 'validation_timeout_behavior_approve' },
-    { value: 'skip', labelKey: 'validation_timeout_behavior_skip' }
-  ];
-
-  function clampTimeout(v: number): number {
-    if (Number.isNaN(v)) return TIMEOUT_MIN;
-    return Math.min(TIMEOUT_MAX, Math.max(TIMEOUT_MIN, Math.round(v)));
-  }
-
-  function clampRetention(v: number): number {
-    if (Number.isNaN(v)) return RETENTION_MIN;
-    return Math.min(RETENTION_MAX, Math.max(RETENTION_MIN, Math.round(v)));
-  }
 
   async function handlePurgeNow(): Promise<void> {
     purging = true;
@@ -118,30 +110,10 @@
   let errorMessage = $state<string | null>(null);
   let hasChanges = $state(false);
 
-  // Mode options for card selector (using translation keys)
-  const modeOptions: Array<{ value: ValidationMode; labelKey: string; descKey: string }> = [
-    {
-      value: 'auto',
-      labelKey: 'validation_mode_auto',
-      descKey: 'validation_mode_auto_desc'
-    },
-    {
-      value: 'manual',
-      labelKey: 'validation_mode_manual',
-      descKey: 'validation_mode_manual_desc'
-    },
-    {
-      value: 'selective',
-      labelKey: 'validation_mode_selective',
-      descKey: 'validation_mode_selective_desc'
-    }
-  ];
-
-  // Derived: basic tools (local tools that don't require context)
-  let basicTools = $derived(availableTools.filter(t => t.category === 'basic'));
-
-  // Derived: sub-agent tools
-  let subAgentTools = $derived(availableTools.filter(t => t.category === 'sub_agent'));
+  // Derived: available tools split by validation category
+  const splitTools = $derived(splitAvailableTools(availableTools));
+  const basicTools = $derived(splitTools.basicTools);
+  const subAgentTools = $derived(splitTools.subAgentTools);
 
   // Load settings and resources on mount
   onMount(async () => {
@@ -204,23 +176,17 @@
   async function handleSave(): Promise<void> {
     errorMessage = null;
     try {
-      const updateRequest: UpdateValidationSettingsRequest = {
+      const updateRequest = createValidationSettingsUpdateRequest({
         mode: localMode,
-        selectiveConfig: {
-          subAgents: localSubAgentsValidation,
-          tools: localToolsValidation,
-          mcp: localMcpValidation,
-          fileOps: false,
-          dbOps: false
-        },
+        subAgentsValidation: localSubAgentsValidation,
+        toolsValidation: localToolsValidation,
+        mcpValidation: localMcpValidation,
         riskThresholds: localRiskThresholds,
-        timeoutSeconds: clampTimeout(localTimeoutSeconds),
+        timeoutSeconds: localTimeoutSeconds,
         timeoutBehavior: localTimeoutBehavior,
-        audit: {
-          enableLogging: localEnableLogging,
-          retentionDays: clampRetention(localRetentionDays)
-        }
-      };
+        enableLogging: localEnableLogging,
+        retentionDays: localRetentionDays
+      });
       await validationSettingsStore.updateSettings(updateRequest);
       notify('success', $i18n('validation_saved'));
       hasChanges = false;
@@ -324,11 +290,12 @@
 
     <!-- Auto/Manual Mode Information (merged - identical structure, different variant) -->
     {#if localMode === 'auto' || localMode === 'manual'}
-      {@const variant = localMode === 'auto' ? 'approved' : 'validation-required'}
-      {@const icon = localMode === 'auto' ? '\u2713' : '\u26A0'}
-      {@const statusKey = localMode === 'auto' ? 'validation_auto_approved' : 'validation_requires_approval'}
-      {@const sectionTitleKey = localMode === 'auto' ? 'validation_auto_title' : 'validation_manual_title'}
-      {@const sectionHelpKey = localMode === 'auto' ? 'validation_auto_help' : 'validation_manual_help'}
+      {@const modeDisplay = getAutoManualModeDisplay(localMode)}
+      {@const variant = modeDisplay.variant}
+      {@const icon = modeDisplay.icon}
+      {@const statusKey = modeDisplay.statusKey}
+      {@const sectionTitleKey = modeDisplay.sectionTitleKey}
+      {@const sectionHelpKey = modeDisplay.sectionHelpKey}
 
       <div class="settings-section">
         <h3 class="section-title">{$i18n(sectionTitleKey)}</h3>

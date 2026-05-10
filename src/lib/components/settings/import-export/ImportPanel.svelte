@@ -38,7 +38,6 @@ Orchestrates the multi-step import process:
 	import type {
 		ImportValidation,
 		ImportSelection,
-		ImportConflict,
 		ImportWarning,
 		ConflictResolution,
 		MCPAdditions,
@@ -46,6 +45,16 @@ Orchestrates the multi-step import process:
 		ExportPackage
 	} from '$types/import-export';
 	import { MAX_IMPORT_FILE_SIZE } from '$types/import-export';
+	import {
+		areConflictsResolved,
+		areRequiredMcpEnvVarsFilled,
+		createEmptyImportSelection,
+		createMcpAdditionsMap,
+		createSelectionFromValidation,
+		filterConflictsForSelection,
+		filterMissingMcpEnvForSelection,
+		hasImportSelection
+	} from './ImportPanel.helpers';
 	import { Upload, CheckCircle, AlertCircle } from '@lucide/svelte';
 
 	/** Props */
@@ -63,14 +72,7 @@ Orchestrates the multi-step import process:
 	/** Import data state */
 	let importData = $state<ExportPackage | null>(null);
 	let validation = $state<ImportValidation | null>(null);
-	let selection = $state<ImportSelection>({
-		agents: [],
-		mcpServers: [],
-		models: [],
-		prompts: [],
-		skills: [],
-		customProviders: []
-	});
+	let selection = $state<ImportSelection>(createEmptyImportSelection());
 	let resolutions = $state<Record<string, ConflictResolution>>({});
 	let mcpAdditionsMap = $state<Record<string, MCPAdditions>>({});
 
@@ -86,24 +88,7 @@ Orchestrates the multi-step import process:
 	 */
 	const filteredConflicts = $derived(() => {
 		if (!validation) return [];
-		return validation.conflicts.filter((conflict) => {
-			switch (conflict.entityType) {
-				case 'agent':
-					return selection.agents.includes(conflict.entityName);
-				case 'mcp':
-					return selection.mcpServers.includes(conflict.entityName);
-				case 'model':
-					return selection.models.includes(conflict.entityName);
-				case 'prompt':
-					return selection.prompts.includes(conflict.entityName);
-				case 'skill':
-					return selection.skills.includes(conflict.entityName);
-				case 'custom_provider':
-					return selection.customProviders.includes(conflict.entityName);
-				default:
-					return false;
-			}
-		});
+		return filterConflictsForSelection(validation.conflicts, selection);
 	});
 
 	/**
@@ -112,14 +97,7 @@ Orchestrates the multi-step import process:
 	 */
 	const filteredMissingMcpEnv = $derived(() => {
 		if (!validation) return {};
-		const filtered: Record<string, string[]> = {};
-		// missingMcpEnv is now keyed by server NAME (not ID)
-		for (const [serverName, keys] of Object.entries(validation.missingMcpEnv)) {
-			if (selection.mcpServers.includes(serverName)) {
-				filtered[serverName] = keys;
-			}
-		}
-		return filtered;
+		return filterMissingMcpEnvForSelection(validation.missingMcpEnv, selection);
 	});
 
 	/**
@@ -158,25 +136,10 @@ Orchestrates the multi-step import process:
 				}
 
 				// Initialize selection with all entities - using NAME as identifier (not ID)
-				selection = {
-					agents: validation.entities.agents.map((a) => a.name),
-					mcpServers: validation.entities.mcpServers.map((s) => s.name),
-					models: validation.entities.models.map((m) => m.name),
-					prompts: validation.entities.prompts.map((p) => p.name),
-					skills: (validation.entities.skills || []).map((s) => s.name),
-					customProviders: (validation.entities.customProviders || []).map((p) => p.name)
-				};
+				selection = createSelectionFromValidation(validation);
 
 				// Initialize MCP additions for servers with missing env
-				mcpAdditionsMap = {};
-				for (const [serverId, missingKeys] of Object.entries(validation.missingMcpEnv)) {
-					if (missingKeys.length > 0) {
-						mcpAdditionsMap[serverId] = {
-							addEnv: {},
-							addArgs: []
-						};
-					}
-				}
+				mcpAdditionsMap = createMcpAdditionsMap(validation.missingMcpEnv);
 
 				currentStep = 'preview';
 			} catch (err) {
@@ -293,7 +256,7 @@ Orchestrates the multi-step import process:
 		currentStep = 'upload';
 		importData = null;
 		validation = null;
-		selection = { agents: [], mcpServers: [], models: [], prompts: [], skills: [], customProviders: [] };
+		selection = createEmptyImportSelection();
 		resolutions = {};
 		mcpAdditionsMap = {};
 		error = null;
@@ -344,15 +307,6 @@ Orchestrates the multi-step import process:
 	}
 
 	/**
-	 * Generate composite key for conflict resolution.
-	 * Uses entityType:entityName to avoid collisions between different entity types.
-	 * NOTE: entityName is the unique identifier (IDs are not exported).
-	 */
-	function getConflictKey(conflict: ImportConflict): string {
-		return `${conflict.entityType}:${conflict.entityName}`;
-	}
-
-	/**
 	 * Check if next button should be enabled
 	 */
 	const canProceed = $derived(() => {
@@ -360,33 +314,17 @@ Orchestrates the multi-step import process:
 
 		if (currentStep === 'preview') {
 			// At least one entity must be selected
-			const hasSelection =
-				selection.agents.length + selection.mcpServers.length +
-				selection.models.length + selection.prompts.length +
-				selection.skills.length + selection.customProviders.length > 0;
-			return hasSelection;
+			return hasImportSelection(selection);
 		}
 
 		if (currentStep === 'conflicts') {
 			// All filtered conflicts must be resolved
-			const conflicts = filteredConflicts();
-			return conflicts.every((c) => resolutions[getConflictKey(c)]);
+			return areConflictsResolved(filteredConflicts(), resolutions);
 		}
 
 		if (currentStep === 'mcp_env') {
 			// All required env vars must be filled for selected MCP servers
-			const missingEnv = filteredMissingMcpEnv();
-			return Object.entries(missingEnv).every(([serverId, keys]) => {
-				const additions = mcpAdditionsMap[serverId];
-				if (!additions) return false;
-				// Check sensitive keys are filled
-				const sensitiveKeys = keys.filter((key) =>
-					['API_KEY', 'SECRET', 'TOKEN', 'PASSWORD', 'CREDENTIAL', 'PRIVATE_KEY'].some((pattern) =>
-						key.toUpperCase().includes(pattern)
-					)
-				);
-				return sensitiveKeys.every((key) => additions.addEnv[key]?.trim());
-			});
+			return areRequiredMcpEnvVarsFilled(filteredMissingMcpEnv(), mcpAdditionsMap);
 		}
 
 		return false;

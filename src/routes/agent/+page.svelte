@@ -90,9 +90,17 @@ Uses extracted components, services, and stores for clean architecture.
 	} from '$lib/stores/folders';
 	import { withToastError } from '$lib/utils/async';
 	import { getErrorMessage } from '$lib/utils/error';
-	import { isUuid } from '$lib/utils/uuid';
 	import { ITERATIONS_LIMITS } from '$lib/utils/constants';
 	import { attachSettingsRefreshListener } from '$lib/utils/settings-refresh';
+	import {
+		getDefaultFolderColor,
+		getInitialWorkflowSelectionDecision,
+		mapPersistedTasksToDisplay,
+		resolveAgentDisplayName,
+		resolveTaskAgentNames,
+		selectDisplayTasksSource,
+		shouldRestoreStatusFilter
+	} from './agent-page.helpers';
 	import type { Workflow, WorkflowFolder, PersistedTask } from '$types/workflow';
 	import type { ProviderType } from '$types/llm';
 
@@ -106,21 +114,6 @@ Uses extracted components, services, and stores for clean architecture.
 		selectedAgentId: string | null;
 		currentMaxIterations: number;
 		messagesLoading: boolean;
-	}
-
-	/**
-	 * Maps persisted tasks from Rust snake_case format to TodoTaskDisplay.
-	 */
-	function mapPersistedTasks(tasks: PersistedTask[]): TodoTaskDisplay[] {
-		return tasks.map((t) => ({
-			id: t.id,
-			name: t.name,
-			description: t.description,
-			status: t.status,
-			priority: t.priority,
-			agent_name: t.agent_assigned,
-			duration_ms: t.duration_ms
-		}));
 	}
 
 	/** Initial page state with localStorage restoration */
@@ -161,23 +154,26 @@ Uses extracted components, services, and stores for clean architecture.
 	 * - Orphan UUIDs (deleted agents) fall back to a localized "Unknown agent" label.
 	 */
 	function resolveAgentName(rawName: string | undefined): string | undefined {
-		if (!rawName) return undefined;
-		if (!isUuid(rawName)) return rawName;
-		const found = $agents.find((a) => a.id === rawName);
-		if (found) return found.name;
-		return $i18n('agent_unknown');
+		return resolveAgentDisplayName({
+			rawName,
+			agents: $agents,
+			unknownAgentLabel: $i18n('agent_unknown')
+		});
 	}
 
 	/** Resolved tasks: real-time store during execution of THIS workflow, persisted otherwise.
 	 *  Resolves agent UUIDs to display names with orphan-safe fallback. */
 	let resolvedTasks = $derived(
-		($isExecuting$ && $executionWorkflowId$ === pageState.selectedWorkflowId
-			? $executionTasks$
-			: persistedTasks
-		).map((t) => ({
-			...t,
-			agent_name: resolveAgentName(t.agent_name)
-		}))
+		resolveTaskAgentNames(
+			selectDisplayTasksSource({
+				isExecuting: $isExecuting$,
+				executionWorkflowId: $executionWorkflowId$,
+				selectedWorkflowId: pageState.selectedWorkflowId,
+				executionTasks: $executionTasks$,
+				persistedTasks
+			}),
+			resolveAgentName
+		)
 	);
 
 	/**
@@ -219,7 +215,7 @@ Uses extracted components, services, and stores for clean architecture.
 				try {
 					const tasks = await tauriInvoke<PersistedTask[]>('list_workflow_tasks', { workflowId });
 					if (!isStillSelected()) return;
-					persistedTasks = mapPersistedTasks(tasks);
+					persistedTasks = mapPersistedTasksToDisplay(tasks);
 				} catch {
 					// Non-blocking: render the page without persisted tasks.
 				}
@@ -403,9 +399,7 @@ Uses extracted components, services, and stores for clean architecture.
 	 * Create a new folder with a default name and color.
 	 */
 	const handleCreateFolder = withToastError(async () => {
-		const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
-		// Index is always in range — modulo by colors.length.
-		const color = colors[($folders$).length % colors.length]!;
+		const color = getDefaultFolderColor($folders$.length);
 		await folderStore.createFolder($i18n('sidebar_folder_create'), color);
 	});
 
@@ -548,7 +542,7 @@ Uses extracted components, services, and stores for clean architecture.
 						workflowId: executionWorkflowId
 					});
 					if (isStillSelected()) {
-						persistedTasks = mapPersistedTasks(tasks);
+						persistedTasks = mapPersistedTasksToDisplay(tasks);
 					}
 				} catch {
 					// Non-blocking: the page already shows the live tasks from
@@ -679,7 +673,7 @@ Uses extracted components, services, and stores for clean architecture.
 
 		// Restore status filter from localStorage
 		const savedFilter = LocalStorage.get(STORAGE_KEYS.STATUS_FILTER, 'all');
-		if (savedFilter !== 'all') {
+		if (shouldRestoreStatusFilter(savedFilter)) {
 			workflowStore.setStatusFilter(savedFilter);
 		}
 
@@ -687,11 +681,16 @@ Uses extracted components, services, and stores for clean architecture.
 		// If the active status filter would hide it, clear the filter so the
 		// restored workflow remains visible in the sidebar.
 		const lastWorkflowId = LocalStorage.get(STORAGE_KEYS.SELECTED_WORKFLOW_ID, null);
-		if (lastWorkflowId && $workflows.find(w => w.id === lastWorkflowId)) {
-			if (!$filteredWorkflows.find(w => w.id === lastWorkflowId)) {
+		const initialSelection = getInitialWorkflowSelectionDecision({
+			lastWorkflowId,
+			workflows: $workflows,
+			filteredWorkflows: $filteredWorkflows
+		});
+		if (initialSelection.workflowIdToSelect) {
+			if (initialSelection.shouldResetStatusFilter) {
 				workflowStore.setStatusFilter('all');
 			}
-			await selectWorkflow(lastWorkflowId);
+			await selectWorkflow(initialSelection.workflowIdToSelect);
 		}
 
 		// Initialize validation and user question stores

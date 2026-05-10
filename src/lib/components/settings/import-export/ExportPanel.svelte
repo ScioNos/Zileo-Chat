@@ -24,13 +24,13 @@ Multi-step process: entity selection, options, preview, and export.
 
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { tauriInvoke } from '$lib/tauri';
-	import { saveDialog } from '$lib/tauri';
+	import { tauriInvoke, saveDialog, isTauriRuntime } from '$lib/tauri';
 	import { Button, Card, Badge, StatusIndicator } from '$lib/components/ui';
 	import EntitySelector from './EntitySelector.svelte';
 	import ExportPreview from './ExportPreview.svelte';
 	import { i18n } from '$lib/i18n';
 	import { getErrorMessage } from '$lib/utils/error';
+	import { downloadBrowserFile } from '$lib/utils/browser-download';
 	import type {
 		ExportSelection,
 		ExportOptions,
@@ -195,6 +195,13 @@ Multi-step process: entity selection, options, preview, and export.
 			});
 
 			const defaultFilename = `zileo-export-${new Date().toISOString().slice(0, 10)}.json`;
+
+			if (!isTauriRuntime()) {
+				downloadBrowserFile(defaultFilename, exportData, 'application/json');
+				onexport?.(true);
+				resetWizard();
+				return;
+			}
 
 			// Show native save dialog
 			const filePath = await saveDialog({
