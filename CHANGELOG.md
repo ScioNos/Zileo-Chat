@@ -33,6 +33,12 @@ Cleanup of the chat zone and agent page (`refactor/cleanup-zone-chat`). 26 atomi
 
 - **Tool `error_message` propagation**: now streams live via `StreamChunk` instead of waiting for the next reload (Rust + TS).
 
+### Tooling
+
+- **Prettier + `prettier-plugin-svelte`** wired in (`chore/prettier-plugin-svelte`). New devDependencies (`prettier@3.8.3`, `prettier-plugin-svelte@3.5.1`), config files (`.prettierrc.json`, `.prettierignore`), and npm scripts (`format`, `format:check`). First project-wide run reformatted 193 files (tabs, single quotes, no trailing comma, 100-char width) — 100% cosmetic, lint + svelte-check + 435 Vitest stay green. `.git-blame-ignore-revs` registers the reformatting commit so `git blame` keeps crediting the original logic authors. CI integration into `validate.yml` is intentionally deferred to a follow-up PR.
+- **`src/routes/agent/+page.svelte`** mosaic indent (4 functions broken by the `refactor/cleanup-zone-chat` rebase over PR #140) is now fixed via Prettier instead of a manual sed pass.
+- **`src/lib/tauri/*.ts`** zero-indent legacy from PR #130 is normalized — this subsumes the formatting follow-up that was tracked in `docs/specs/eslint-tauri-import-restriction.md`.
+
 ---
 
 ## [0.23.1] - 2026-05-08
@@ -554,7 +560,7 @@ Audit hardening release. Backend defense-in-depth on every SurrealQL interpolati
 ### Removed
 
 - ActivitySidebar component and related 22 files (-5585 lines)
-- 171 OPT-* traceability markers from codebase
+- 171 OPT-\* traceability markers from codebase
 - `once_cell` and `futures` crate dependencies (replaced by std)
 - Unused `Default` impls in LLM providers
 
@@ -641,7 +647,7 @@ Audit hardening release. Backend defense-in-depth on every SurrealQL interpolati
   - Auto-scoping: `user_pref`/`knowledge` memories are general, `context`/`decision` are workflow-scoped
   - Importance scoring (1-10) and TTL (time-to-live) for automatic expiry
   - `describe` operation for agents to discover memory stats before searching
-  - Composite scoring: cosine_similarity*0.7 + importance*0.15 + recency*0.15
+  - Composite scoring: cosine_similarity*0.7 + importance*0.15 + recency\*0.15
   - Compact list mode with truncated content for token efficiency
   - Shared helper functions between tool and commands (`search_memories_core`, `describe_memories_core`)
   - Stateless tool design with immutable `default_workflow_id`
@@ -854,31 +860,37 @@ Audit hardening release. Backend defense-in-depth on every SurrealQL interpolati
 ## Project History
 
 ### Phase 0 - Project Setup
+
 - Initial Tauri + SvelteKit + Rust configuration
 - SurrealDB embedded integration
 - TypeScript/Rust type synchronization
 
 ### Phase 1-2 - Database Foundation
+
 - SurrealDB schema design (SCHEMAFULL tables)
 - Agent, Workflow, Memory persistence
 - Query patterns and utilities
 
 ### Phase 3 - Multi-Agent Infrastructure
+
 - Agent lifecycle management
 - Tool registry and factory patterns
 - MCP client/server architecture
 
 ### Phase 4 - Command Layer
+
 - Tauri IPC commands
 - Frontend-backend communication
 - Error handling patterns
 
 ### Phase 5 - Frontend Implementation
+
 - SvelteKit routing and stores
 - Component library (atomic design)
 - Theme system and i18n
 
 ### Phase 6-9 - Optimization Sprints
+
 - Performance profiling and fixes
 - Security hardening
 - Documentation sync
