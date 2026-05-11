@@ -42,13 +42,8 @@
 //! Server configurations are stored in the `mcp_server` table and
 //! automatically loaded on startup. Tool calls are logged to `mcp_call_log`.
 
-// Manager sub-modules contain public API items used by the lib crate,
-// but not all methods are reachable from the binary target.
-#[allow(dead_code)]
 mod db;
-#[allow(dead_code)]
 mod lifecycle;
-#[allow(dead_code)]
 mod tools;
 
 #[cfg(test)]
@@ -62,14 +57,11 @@ use crate::models::mcp::{MCPServer, MCPServerStatus, MCPTool};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 /// Tool cache TTL (1 hour)
 pub(crate) const TOOL_CACHE_TTL: Duration = Duration::from_secs(3600);
-
-/// Default health check interval (5 minutes)
-pub(crate) const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Maximum retry attempts for transient MCP errors
 pub(crate) const MCP_MAX_RETRY_ATTEMPTS: u32 = 2;
@@ -86,7 +78,6 @@ pub(crate) const MCP_INITIAL_RETRY_DELAY_MS: u64 = 500;
 ///
 /// The manager uses `RwLock` internally and is safe to share
 /// across threads via `Arc<MCPManager>`.
-#[allow(dead_code)] // Fields used by sub-modules (lifecycle, tools, db) not all reachable from binary
 pub struct MCPManager {
     /// Connected clients indexed by server name
     pub(crate) clients: RwLock<HashMap<String, MCPClient>>,
@@ -98,8 +89,6 @@ pub struct MCPManager {
     pub(crate) circuit_breakers: RwLock<HashMap<String, CircuitBreaker>>,
     /// ID to Name lookup table for O(1) access (server_id -> server_name)
     pub(crate) id_to_name: RwLock<HashMap<String, String>>,
-    /// Shutdown signal sender for health check task
-    pub(crate) health_check_shutdown: broadcast::Sender<()>,
 }
 
 impl MCPManager {
@@ -116,16 +105,12 @@ impl MCPManager {
     pub async fn new(db: Arc<DBClient>) -> MCPResult<Self> {
         info!("Creating MCP manager");
 
-        // Create shutdown channel for health check task (capacity 1 is enough)
-        let (shutdown_tx, _) = broadcast::channel(1);
-
         Ok(Self {
             clients: RwLock::new(HashMap::new()),
             db,
             tool_cache: RwLock::new(HashMap::new()),
             circuit_breakers: RwLock::new(HashMap::new()),
             id_to_name: RwLock::new(HashMap::new()),
-            health_check_shutdown: shutdown_tx,
         })
     }
 
