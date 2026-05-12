@@ -29,28 +29,17 @@
 export type EmbeddingProviderType = 'mistral' | 'ollama';
 
 /**
- * Chunking strategy for text processing
- */
-export type ChunkingStrategy = 'fixed' | 'semantic' | 'recursive';
-
-/**
- * Embedding configuration settings
+ * Embedding configuration settings.
+ *
+ * Chunking parameters and vector dimension are no longer user-configurable:
+ * chunking is fixed by `tools/memory/chunker.rs` constants (512/50) and the
+ * dimension is locked at 1024 by the HNSW index schema.
  */
 export interface EmbeddingConfig {
 	/** Embedding provider: 'mistral' or 'ollama' */
 	provider: EmbeddingProviderType;
-	/** Embedding model name (e.g., 'mistral-embed', 'nomic-embed-text') */
+	/** Embedding model name (e.g., 'mistral-embed', 'mxbai-embed-large') */
 	model: string;
-	/** Vector dimension (auto-set based on model) */
-	dimension: number;
-	/** Maximum tokens per input (provider-specific) */
-	max_tokens: number;
-	/** Characters per chunk for long texts */
-	chunk_size: number;
-	/** Overlap between chunks in characters */
-	chunk_overlap: number;
-	/** Chunking strategy for text processing */
-	strategy?: ChunkingStrategy;
 }
 
 /**
@@ -117,26 +106,6 @@ export interface ImportResult {
 }
 
 /**
- * Parameters for regenerating embeddings
- */
-export interface RegenerateEmbeddingsParams {
-	/** Optional type filter (regenerate only this type) */
-	type_filter?: string;
-}
-
-/**
- * Result of embedding regeneration
- */
-export interface RegenerateResult {
-	/** Number of memories processed */
-	processed: number;
-	/** Number of embeddings successfully generated */
-	success: number;
-	/** Number of failures */
-	failed: number;
-}
-
-/**
  * Result of embedding test operation
  */
 export interface EmbeddingTestResult {
@@ -189,17 +158,37 @@ export interface MemoryTokenStats {
 }
 
 /**
- * Available embedding models per provider
+ * Status snapshot of a `reindex_memory_chunks` background job.
+ *
+ * Mirrors the Rust `ReindexJobStatus` struct (camelCase via serde rename).
+ * `status` transitions: "running" → ("completed" | "cancelled" | "error").
+ * `currentMemoryId` is populated only between two processed parents.
+ */
+export interface ReindexJobStatus {
+	jobId: string;
+	status: 'running' | 'completed' | 'cancelled' | 'error';
+	processed: number;
+	total: number;
+	chunksCreated: number;
+	currentMemoryId?: string;
+	errorMessage?: string;
+	startedAt: string;
+	finishedAt?: string;
+}
+
+/**
+ * Available embedding models per provider.
+ *
+ * All listed models produce 1024-dimensional vectors to match the HNSW
+ * index schema (`memory_chunk_vec_idx DIMENSION 1024`). `nomic-embed-text`
+ * (768D) was removed because it is incompatible with this index.
  */
 export const EMBEDDING_MODELS: Record<
 	EmbeddingProviderType,
 	{ value: string; label: string; dimension: number }[]
 > = {
 	mistral: [{ value: 'mistral-embed', label: 'Mistral Embed (1024D)', dimension: 1024 }],
-	ollama: [
-		{ value: 'nomic-embed-text', label: 'Nomic Embed Text (768D)', dimension: 768 },
-		{ value: 'mxbai-embed-large', label: 'MxBai Embed Large (1024D)', dimension: 1024 }
-	]
+	ollama: [{ value: 'mxbai-embed-large', label: 'MxBai Embed Large (1024D)', dimension: 1024 }]
 };
 
 /**
@@ -207,10 +196,5 @@ export const EMBEDDING_MODELS: Record<
  */
 export const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
 	provider: 'mistral',
-	model: 'mistral-embed',
-	dimension: 1024,
-	max_tokens: 8192,
-	chunk_size: 512,
-	chunk_overlap: 50,
-	strategy: 'fixed'
+	model: 'mistral-embed'
 };

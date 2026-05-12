@@ -199,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
             commands::memory::delete_memory,
             commands::memory::search_memories,
             commands::memory::clear_memories_by_type,
+            commands::memory::purge_expired_memories,
             commands::streaming::execution::execute_workflow_streaming,
             commands::streaming::execution::cancel_workflow_streaming,
             commands::message::save_message,
@@ -242,7 +243,6 @@ async fn main() -> anyhow::Result<()> {
             commands::mcp::tools::list_mcp_tools,
             commands::mcp::tools::call_mcp_tool,
             commands::mcp::tools::get_mcp_latency_metrics,
-            commands::migration::migrate_memory_schema,
             commands::migration::get_memory_schema_status,
             commands::migration::migrate_mcp_http_schema,
             commands::migration::migrate_memory_v2_schema,
@@ -252,12 +252,15 @@ async fn main() -> anyhow::Result<()> {
             commands::migration::migrate_token_cost_accuracy_v1,
             commands::embedding::config::get_embedding_config,
             commands::embedding::config::save_embedding_config,
+            commands::embedding::config::delete_embedding_config,
             commands::embedding::config::reinit_embedding_service,
             commands::embedding::config::test_embedding,
             commands::embedding::operations::update_memory,
             commands::embedding::operations::export_memories,
             commands::embedding::operations::import_memories,
-            commands::embedding::operations::regenerate_embeddings,
+            commands::embedding::operations::reindex_memory_chunks,
+            commands::embedding::operations::cancel_reindex_job,
+            commands::embedding::operations::get_reindex_job_status,
             commands::embedding::stats::get_memory_stats,
             commands::embedding::stats::get_memory_token_stats,
             // Prompt commands (Prompt Library)
@@ -497,7 +500,6 @@ async fn main() -> anyhow::Result<()> {
             api.prevent_exit();
 
             let mcp_manager = app_handle.state::<AppState>().mcp_manager.clone();
-            let app_handle = app_handle.clone();
             let shutdown_done = shutdown_done.clone();
 
             tauri::async_runtime::spawn(async move {
@@ -514,7 +516,19 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 shutdown_done.store(true, std::sync::atomic::Ordering::SeqCst);
-                app_handle.exit(0);
+
+                // `app_handle.exit(0)` lets Tauri unwind the drop chain
+                // (AppState -> Arc<DBClient> -> Surreal<RocksDb> -> RocksDB
+                // C++ destructors) while the tokio runtime is still
+                // tearing down. RocksDB 2.6 systematically aborts with
+                // `free(): corrupted unsorted chunks` on this path. We
+                // sidestep the race with std::process::exit(0): MCP
+                // children are already terminated (logged above), MCP
+                // HTTP clients are disconnected, and the RocksDB
+                // write-ahead log handles crash recovery on the next
+                // startup so data integrity is preserved.
+                tracing::info!("Exiting process after MCP cleanup");
+                std::process::exit(0);
             });
         }
     });

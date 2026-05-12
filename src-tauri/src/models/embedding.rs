@@ -17,6 +17,7 @@
 //! These types are synchronized with TypeScript types (src/types/embedding.ts)
 //! for IPC communication via Tauri commands.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -24,22 +25,16 @@ use std::collections::HashMap;
 ///
 /// This struct mirrors `EmbeddingConfig` from `llm/embedding.rs`
 /// but is designed for frontend serialization.
+///
+/// Chunking parameters live in `tools/memory/chunker.rs` (constants) and the
+/// vector dimension is fixed by the HNSW schema (1024D) — neither is user
+/// configurable and both have been removed from this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfigSettings {
     /// Embedding provider: "mistral" or "ollama"
     pub provider: String,
-    /// Embedding model name (e.g., "mistral-embed", "nomic-embed-text")
+    /// Embedding model name (e.g., "mistral-embed", "mxbai-embed-large")
     pub model: String,
-    /// Vector dimension (auto-set based on model)
-    pub dimension: usize,
-    /// Maximum tokens per input (provider-specific)
-    pub max_tokens: usize,
-    /// Characters per chunk for long texts
-    pub chunk_size: usize,
-    /// Overlap between chunks in characters
-    pub chunk_overlap: usize,
-    /// Chunking strategy: "fixed", "semantic", or "recursive"
-    pub strategy: Option<String>,
 }
 
 impl Default for EmbeddingConfigSettings {
@@ -47,11 +42,6 @@ impl Default for EmbeddingConfigSettings {
         Self {
             provider: "mistral".to_string(),
             model: "mistral-embed".to_string(),
-            dimension: 1024,
-            max_tokens: 8192,
-            chunk_size: 512,
-            chunk_overlap: 50,
-            strategy: Some("fixed".to_string()),
         }
     }
 }
@@ -80,17 +70,6 @@ pub struct ImportResult {
     pub failed: usize,
     /// Error messages for failed imports
     pub errors: Vec<String>,
-}
-
-/// Result of embedding regeneration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegenerateResult {
-    /// Number of memories processed
-    pub processed: usize,
-    /// Number of embeddings successfully generated
-    pub success: usize,
-    /// Number of failures
-    pub failed: usize,
 }
 
 /// Result of embedding test operation
@@ -143,6 +122,38 @@ pub struct CategoryTokenStats {
     pub with_embeddings: usize,
 }
 
+/// Snapshot of a running or recently-finished reindex job.
+///
+/// Mirrored verbatim by the frontend `ReindexJobStatus` interface so the
+/// in-memory job map (`AppState.reindex_jobs`) can be queried by the UI on
+/// remount. `serde(rename_all = "camelCase")` keeps the IPC contract aligned
+/// with TS conventions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReindexJobStatus {
+    /// Job identifier returned by `reindex_memory_chunks` at spawn time.
+    pub job_id: String,
+    /// One of "running" | "completed" | "cancelled" | "error".
+    pub status: String,
+    /// Number of parent memories processed so far.
+    pub processed: usize,
+    /// Total number of pending parents at job start (`0` until first emit).
+    pub total: usize,
+    /// Cumulative count of chunks created across all processed parents.
+    pub chunks_created: usize,
+    /// UUID of the memory currently being processed (`None` between rows).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_memory_id: Option<String>,
+    /// Error message when `status == "error"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Job spawn timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Terminal timestamp (`None` while running).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
 /// Memory export format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -163,9 +174,6 @@ mod tests {
         let config = EmbeddingConfigSettings::default();
         assert_eq!(config.provider, "mistral");
         assert_eq!(config.model, "mistral-embed");
-        assert_eq!(config.dimension, 1024);
-        assert_eq!(config.chunk_size, 512);
-        assert_eq!(config.chunk_overlap, 50);
     }
 
     #[test]
@@ -174,7 +182,26 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"provider\":\"mistral\""));
         assert!(json.contains("\"model\":\"mistral-embed\""));
-        assert!(json.contains("\"dimension\":1024"));
+    }
+
+    #[test]
+    fn test_embedding_config_tolerates_legacy_fields_in_db() {
+        // Existing installs may still have rows that include the legacy
+        // decorative fields (dimension/max_tokens/chunk_size/chunk_overlap/
+        // strategy). serde_json must accept and ignore them so users do not
+        // hit a deserialization failure after upgrading.
+        let legacy_json = r#"{
+            "provider": "mistral",
+            "model": "mistral-embed",
+            "dimension": 1024,
+            "max_tokens": 8192,
+            "chunk_size": 512,
+            "chunk_overlap": 50,
+            "strategy": "fixed"
+        }"#;
+        let config: EmbeddingConfigSettings = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(config.provider, "mistral");
+        assert_eq!(config.model, "mistral-embed");
     }
 
     #[test]

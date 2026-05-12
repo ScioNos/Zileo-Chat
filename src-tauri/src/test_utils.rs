@@ -89,6 +89,8 @@ pub async fn setup_test_state() -> (AppState, TempDir) {
         )),
         embedding_service,
         streaming_cancellations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        reindex_cancellations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        reindex_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         app_handle: Arc::new(std::sync::RwLock::new(None)),
         audit_cleanup_handle: Arc::new(tokio::sync::Mutex::new(None)),
     };
@@ -167,38 +169,6 @@ pub async fn seed_test_memory(db: &DBClient) -> String {
         .await
         .expect("Query execution failed");
     response.check().expect("CREATE memory failed validation");
-    id
-}
-
-/// Seeds a test memory WITH a 1024-dimension embedding vector.
-///
-/// Used for testing migration guards to verify
-/// that embeddings survive when migrations are re-run.
-pub async fn seed_test_memory_with_embedding(db: &DBClient) -> String {
-    let id = uuid::Uuid::new_v4().to_string();
-    // Create a 1024-dimension embedding (matching HNSW index)
-    let embedding: Vec<f64> = (0..1024).map(|i| (i as f64) * 0.001).collect();
-    let data = serde_json::json!({
-        "type": "knowledge",
-        "content": "Memory with embedding for migration guard test.",
-        "metadata": {
-            "tags": ["test", "embedding"],
-            "priority": null,
-            "agent_source": null
-        },
-        "importance": 0.7,
-        "embedding": embedding,
-        "workflow_id": null
-    });
-    let response = db
-        .db
-        .query(format!("CREATE memory:`{}` CONTENT $data", id))
-        .bind(("data", data))
-        .await
-        .expect("Query execution failed");
-    response
-        .check()
-        .expect("CREATE memory with embedding failed validation");
     id
 }
 

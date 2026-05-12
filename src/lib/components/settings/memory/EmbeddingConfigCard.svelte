@@ -23,7 +23,7 @@ Extracted from MemorySettings.svelte.
 -->
 
 <script lang="ts">
-	import { Card, Button } from '$lib/components/ui';
+	import { Card, Button, Badge } from '$lib/components/ui';
 	import type { SelectOption } from '$lib/components/ui/Select.svelte';
 	import type { EmbeddingConfig } from '$types/embedding';
 	import { Settings, Pencil, Trash2, Plus } from '@lucide/svelte';
@@ -36,22 +36,13 @@ Extracted from MemorySettings.svelte.
 		configExists: boolean;
 		/** Provider options for label lookup */
 		providerOptions: SelectOption[];
-		/** Strategy options for label lookup */
-		strategyOptions: SelectOption[];
 		/** Callback to open the config edit modal */
 		onOpenConfigModal: () => void;
 		/** Callback to delete the config */
 		onDelete: () => void;
 	}
 
-	let {
-		config,
-		configExists,
-		providerOptions,
-		strategyOptions,
-		onOpenConfigModal,
-		onDelete
-	}: Props = $props();
+	let { config, configExists, providerOptions, onOpenConfigModal, onDelete }: Props = $props();
 
 	/**
 	 * Get provider display name
@@ -59,19 +50,23 @@ Extracted from MemorySettings.svelte.
 	function getProviderLabel(provider: string): string {
 		return providerOptions.find((p) => p.value === provider)?.label || provider;
 	}
-
-	/**
-	 * Get strategy display name
-	 */
-	function getStrategyLabel(strategy: string): string {
-		return strategyOptions.find((s) => s.value === strategy)?.label || strategy;
-	}
 </script>
 
 <Card>
 	{#snippet header()}
 		<div class="card-header-row">
-			<h3 class="card-title">{$i18n('memory_embedding_config')}</h3>
+			<div class="card-header-text">
+				<div class="title-row">
+					<Settings size={18} aria-hidden="true" />
+					<h3 class="card-title">{$i18n('memory_embedding_config')}</h3>
+					<Badge variant={configExists ? 'success' : 'warning'}>
+						{configExists
+							? $i18n('memory_status_configured')
+							: $i18n('memory_status_not_configured')}
+					</Badge>
+				</div>
+				<p class="card-subtitle">{$i18n('memory_config_subtitle')}</p>
+			</div>
 			{#if configExists}
 				<div class="header-actions">
 					<button
@@ -108,22 +103,6 @@ Extracted from MemorySettings.svelte.
 						<span class="config-label">{$i18n('memory_model')}</span>
 						<span class="config-value">{config.model}</span>
 					</div>
-					<div class="config-item">
-						<span class="config-label">{$i18n('memory_dimensions')}</span>
-						<span class="config-value">{config.dimension}D</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">{$i18n('memory_strategy')}</span>
-						<span class="config-value">{getStrategyLabel(config.strategy || 'fixed')}</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">{$i18n('memory_chunk_size')}</span>
-						<span class="config-value">{config.chunk_size} {$i18n('memory_chars')}</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">{$i18n('memory_overlap')}</span>
-						<span class="config-value">{config.chunk_overlap} {$i18n('memory_chars')}</span>
-					</div>
 				</div>
 			</div>
 		{:else}
@@ -149,9 +128,31 @@ Extracted from MemorySettings.svelte.
 
 	.card-header-row {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		justify-content: space-between;
+		gap: var(--spacing-md);
 		width: 100%;
+	}
+
+	.card-header-text {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-2xs);
+		min-width: 0;
+	}
+
+	.title-row {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-sm);
+		color: var(--color-text-primary);
+		flex-wrap: wrap;
+	}
+
+	.card-subtitle {
+		margin: 0;
+		font-size: var(--font-size-sm);
+		color: var(--color-text-secondary);
 	}
 
 	.header-actions {

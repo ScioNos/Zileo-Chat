@@ -17,6 +17,7 @@ use crate::db::DBClient;
 use crate::llm::embedding::EmbeddingService;
 use crate::llm::ProviderManager;
 use crate::mcp::MCPManager;
+use crate::models::ReindexJobStatus;
 use crate::tools::ToolFactory;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -47,6 +48,13 @@ pub struct AppState {
     pub embedding_service: Arc<RwLock<Option<Arc<EmbeddingService>>>>,
     /// Cancellation tokens for streaming workflows (workflow_id -> CancellationToken)
     pub streaming_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// Cancellation tokens for background reindex jobs (job_id -> CancellationToken).
+    /// Mirror of `streaming_cancellations` for the memory-reindex flow.
+    pub reindex_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// Live snapshot of every reindex job spawned during this app session.
+    /// In-memory only — a restart wipes the map, which is fine because the
+    /// resumable WHERE clause picks up unindexed parents from scratch.
+    pub reindex_jobs: Arc<Mutex<HashMap<String, ReindexJobStatus>>>,
     /// Tauri app handle for event emission (set after app initialization)
     /// Uses std::sync::RwLock for synchronous access in setup hook
     pub app_handle: Arc<StdRwLock<Option<AppHandle>>>,
@@ -70,6 +78,18 @@ impl AppState {
             tracing::warn!(
                 error = %e,
                 "token_cost_accuracy_v1 backfill failed; new fields will read as NONE on legacy rows"
+            );
+        }
+
+        // Best-effort cleanup of memories past their TTL (and their chunks).
+        // Non-fatal — search-time filtering already hides them, but purging
+        // keeps the HNSW index lean and frees DB space.
+        let purge = crate::db::queries::cleanup::purge_expired_memories(&db).await;
+        if purge.memories_purged > 0 {
+            tracing::info!(
+                memories_purged = purge.memories_purged,
+                chunks_purged = purge.chunks_purged,
+                "Expired memories purged at startup"
             );
         }
 
@@ -98,6 +118,10 @@ impl AppState {
         // Initialize streaming cancellation token map
         let streaming_cancellations = Arc::new(Mutex::new(HashMap::new()));
 
+        // Reindex job tracking + cancellation maps (in-memory, per-session).
+        let reindex_cancellations = Arc::new(Mutex::new(HashMap::new()));
+        let reindex_jobs = Arc::new(Mutex::new(HashMap::new()));
+
         // Initialize app handle as None (set later in setup hook)
         let app_handle = Arc::new(StdRwLock::new(None));
 
@@ -113,6 +137,8 @@ impl AppState {
             tool_factory,
             embedding_service,
             streaming_cancellations,
+            reindex_cancellations,
+            reindex_jobs,
             app_handle,
             audit_cleanup_handle,
         })
@@ -272,10 +298,14 @@ impl AppState {
 
         // Create embedding provider based on config
         let provider = match config.provider.as_str() {
-            "ollama" => Some(EmbeddingProvider::ollama_with_config(
-                "http://localhost:11434",
-                &config.model,
-            )),
+            "ollama" => {
+                let base_url =
+                    crate::commands::embedding::config::load_ollama_base_url(&self.db).await;
+                Some(EmbeddingProvider::ollama_with_config(
+                    &base_url,
+                    &config.model,
+                ))
+            }
             "mistral" => {
                 // Get API key from SecureKeyStore
                 if let Some(api_key) = keystore.get_key("Mistral") {
