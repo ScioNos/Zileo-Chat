@@ -44,6 +44,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		SubAgentBlockData,
 		TodoTaskDisplay
 	} from '$types/chat-block';
+	import { countInternalBlocks } from './chat-container-helpers';
 
 	interface Props {
 		messages: Message[];
@@ -58,6 +59,12 @@ Main chat area with message display, execution blocks inline, and input controls
 		spinnerContext?: string | null;
 		/** Active tasks from TodoTool (displayed after spinner) */
 		executionTasks?: TodoTaskDisplay[];
+		/**
+		 * Workflow's primary agent id (orchestrator). Forwarded to ToolCallBlock
+		 * and ThinkingBlock so they can apply the sub-agent visual treatment
+		 * when a block's `agent_id` differs from this value.
+		 */
+		primaryAgentId?: string;
 		disabled: boolean;
 		onsend: (message: string) => void;
 		oncancel?: () => void;
@@ -71,6 +78,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		isExecuting = false,
 		spinnerContext = null,
 		executionTasks = [],
+		primaryAgentId,
 		disabled,
 		onsend,
 		oncancel
@@ -164,10 +172,17 @@ Main chat area with message display, execution blocks inline, and input controls
 		{#if messagesLoading}
 			<MessageListSkeleton count={3} />
 		{:else}
-			{#snippet renderBlock(block: ChatBlock)}
+			{#snippet renderBlock(block: ChatBlock, allBlocks: ChatBlock[])}
 				{#if block.block_type === 'thinking'}
 					{@const data = block.data as ThinkingBlockData}
-					<ThinkingBlock content={data.content} source={data.source} sequence={block.sequence} />
+					<ThinkingBlock
+						content={data.content}
+						source={data.source}
+						sequence={block.sequence}
+						agentId={data.agent_id}
+						agentName={data.agent_name}
+						{primaryAgentId}
+					/>
 				{:else if block.block_type === 'tool_call'}
 					{@const data = block.data as ToolCallBlockData}
 					<ToolCallBlock
@@ -180,6 +195,9 @@ Main chat area with message display, execution blocks inline, and input controls
 						errorMessage={data.error_message}
 						durationMs={data.duration_ms}
 						sequence={block.sequence}
+						agentId={data.agent_id}
+						agentName={data.agent_name}
+						{primaryAgentId}
 					/>
 				{:else if block.block_type === 'sub_agent'}
 					{@const data = block.data as SubAgentBlockData}
@@ -191,6 +209,7 @@ Main chat area with message display, execution blocks inline, and input controls
 						tokensOutput={data.tokens_output}
 						reportSummary={data.report_summary}
 						sequence={block.sequence}
+						internalBlockCount={countInternalBlocks(allBlocks, data._sub_agent_id)}
 					/>
 				{/if}
 			{/snippet}
@@ -223,7 +242,7 @@ Main chat area with message display, execution blocks inline, and input controls
 						{#if message.role === 'assistant' && getBlocksForMessage(message.id).length > 0}
 							<div class="persisted-blocks">
 								{#each getBlocksForMessage(message.id) as block (`${block.block_type}-${block.sequence}`)}
-									{@render renderBlock(block)}
+									{@render renderBlock(block, getBlocksForMessage(message.id))}
 								{/each}
 							</div>
 						{/if}
@@ -235,7 +254,7 @@ Main chat area with message display, execution blocks inline, and input controls
 			{#if isExecuting || executionBlocks.length > 0}
 				<div class="execution-blocks">
 					{#each executionBlocks as block (`${block.block_type}-${block.sequence}`)}
-						{@render renderBlock(block)}
+						{@render renderBlock(block, executionBlocks)}
 					{/each}
 
 					{#if isExecuting}
@@ -268,7 +287,7 @@ Main chat area with message display, execution blocks inline, and input controls
 	<!-- Chat Input with Cancel Button -->
 	<div class="input-area">
 		<ChatInput
-			disabled={isExecuting || disabled}
+			{disabled}
 			loading={isExecuting}
 			onsend={isExecuting ? undefined : onsend}
 			oncancel={isExecuting ? oncancel : undefined}

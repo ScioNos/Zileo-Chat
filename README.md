@@ -1,6 +1,6 @@
 # Zileo Chat
 
-[![Version](https://img.shields.io/badge/version-0.23.1-orange)](https://github.com/assistance-micro-design/zileo-chat)
+[![Version](https://img.shields.io/badge/version-0.24.0-orange)](https://github.com/assistance-micro-design/zileo-chat)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/assistance-micro-design/zileo-chat)
 
@@ -14,7 +14,7 @@
 
 ## Beta Warning
 
-**This software is currently in beta (v0.23.1).**
+**This software is currently in beta (v0.24.0).**
 
 Before using Zileo Chat, please be aware of the following risks:
 
@@ -148,7 +148,7 @@ npm run tauri:build
 
 | Layer    | Technology                   |
 | -------- | ---------------------------- |
-| Frontend | SvelteKit 2.55 + Svelte 5.55 |
+| Frontend | SvelteKit 2.59 + Svelte 5.55 |
 | Backend  | Rust + Tauri 2.11            |
 | Database | SurrealDB 2.6 (embedded)     |
 | LLM      | Rig.rs 0.34 + direct HTTP    |

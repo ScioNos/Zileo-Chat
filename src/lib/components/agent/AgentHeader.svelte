@@ -19,15 +19,14 @@ Copyright 2025 Zileo-Chat-3 Contributors
 SPDX-License-Identifier: Apache-2.0
 
 AgentHeader Component
-Displays workflow title, agent selector, iteration controls, and context information.
+Read-only single-line header: workflow title + assigned agent + max iterations + link to Settings.
+Agent and iterations are configured in Settings > Agents (source of truth).
 -->
 
 <script lang="ts">
-	import { Bot } from '@lucide/svelte';
-	import AgentSelector from '$lib/components/workflow/AgentSelector.svelte';
+	import { ExternalLink } from '@lucide/svelte';
 	import { HelpButton } from '$lib/components/ui';
 	import { i18n } from '$lib/i18n';
-	import { ITERATIONS_LIMITS } from '$lib/utils/constants';
 	import type { AgentSummary } from '$types/agent';
 	import type { Workflow } from '$types/workflow';
 
@@ -38,8 +37,6 @@ Displays workflow title, agent selector, iteration controls, and context informa
 		maxIterations: number;
 		agentsLoading?: boolean;
 		messagesLoading?: boolean;
-		onagentchange: (agentId: string) => void;
-		oniterationschange: (value: number) => void;
 	}
 
 	let {
@@ -48,62 +45,47 @@ Displays workflow title, agent selector, iteration controls, and context informa
 		selectedAgentId,
 		maxIterations,
 		agentsLoading = false,
-		messagesLoading = false,
-		onagentchange,
-		oniterationschange
+		messagesLoading = false
 	}: Props = $props();
 
-	function handleIterationsInput(e: Event) {
-		const target = e.target as HTMLInputElement;
-		const value = Math.max(
-			ITERATIONS_LIMITS.MIN,
-			Math.min(ITERATIONS_LIMITS.MAX, parseInt(target.value) || ITERATIONS_LIMITS.DEFAULT)
-		);
-		oniterationschange(value);
-	}
+	let selectedAgentName = $derived(agents.find((a) => a.id === selectedAgentId)?.name ?? null);
 </script>
 
 <header class="agent-header">
 	<div class="header-content">
-		<Bot size={24} class="agent-icon" />
 		<h2 class="agent-title">{workflow?.name ?? $i18n('agent_header_default_title')}</h2>
 		<HelpButton
 			titleKey="help_agent_header_title"
 			descriptionKey="help_agent_header_description"
 			tutorialKey="help_agent_header_tutorial"
 		/>
-		<span class="header-separator"></span>
 
 		{#if agentsLoading}
-			<span class="agents-loading">{$i18n('agent_header_loading')}</span>
+			<span class="meta-text">{$i18n('agent_header_loading')}</span>
 		{:else if agents.length === 0}
-			<span class="no-agents">
-				<a href="/settings" class="settings-link">{$i18n('agent_header_add_agent')}</a>
+			<span class="meta-text">
+				<a href="/settings/agents" class="settings-link">{$i18n('agent_header_add_agent')}</a>
 			</span>
 		{:else}
-			<div class="agent-controls">
-				<AgentSelector
-					{agents}
-					selected={selectedAgentId ?? agents[0]?.id ?? ''}
-					onselect={onagentchange}
-					label=""
-				/>
-				<div class="iterations-control">
-					<label for="max-iterations" class="iterations-label"
-						>{$i18n('agent_header_iterations')}</label
-					>
-					<input
-						type="number"
-						id="max-iterations"
-						class="iterations-input"
-						min={ITERATIONS_LIMITS.MIN}
-						max={ITERATIONS_LIMITS.MAX}
-						value={maxIterations}
-						oninput={handleIterationsInput}
-						title={$i18n('agent_header_iterations_tooltip')}
-					/>
-				</div>
-			</div>
+			<span class="separator" aria-hidden="true">·</span>
+			<span class="meta-text">
+				<span class="meta-label">{$i18n('agent_header_agent_label')}</span>
+				<span class="meta-value">{selectedAgentName ?? $i18n('agent_header_unknown_agent')}</span>
+			</span>
+			<span class="separator" aria-hidden="true">·</span>
+			<span class="meta-text" title={$i18n('agent_header_iterations_tooltip')}>
+				<span class="meta-label">{$i18n('agent_header_iterations_label')}</span>
+				<span class="meta-value">{maxIterations}</span>
+			</span>
+			<a
+				href="/settings/agents"
+				class="settings-link edit-link"
+				aria-label={$i18n('agent_header_edit_aria')}
+				title={$i18n('agent_header_edit_aria')}
+			>
+				{$i18n('agent_header_edit_link')}
+				<ExternalLink size={12} aria-hidden="true" />
+			</a>
 		{/if}
 
 		{#if messagesLoading}
@@ -116,17 +98,13 @@ Displays workflow title, agent selector, iteration controls, and context informa
 
 <style>
 	.agent-header {
-		padding: var(--spacing-md) var(--spacing-lg);
+		padding: var(--spacing-xs) var(--spacing-lg);
 		border-bottom: 1px solid var(--color-border);
-		background: linear-gradient(
-			180deg,
-			var(--color-bg-secondary) 0%,
-			var(--color-bg-tertiary) 100%
-		);
+		background: var(--color-bg-secondary);
 		display: flex;
 		justify-content: center;
 		align-items: center;
-		min-height: 56px;
+		min-height: 36px;
 	}
 
 	.header-content {
@@ -134,79 +112,82 @@ Displays workflow title, agent selector, iteration controls, and context informa
 		align-items: center;
 		justify-content: center;
 		gap: var(--spacing-sm);
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		max-width: 100%;
-	}
-
-	.header-content :global(.agent-icon) {
-		color: var(--color-accent);
-		flex-shrink: 0;
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.agent-title {
-		font-size: var(--font-size-lg);
+		font-size: var(--font-size-sm);
 		font-weight: var(--font-weight-semibold);
 		margin: 0;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		max-width: clamp(80px, 18vw, 200px);
+		flex-shrink: 1;
 	}
 
-	.header-separator {
-		width: 1px;
-		height: 20px;
-		background: var(--color-border);
+	.separator {
+		color: var(--color-text-tertiary);
+		font-size: var(--font-size-sm);
 		flex-shrink: 0;
 	}
 
-	.agent-controls {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-md);
-		flex-shrink: 0;
-	}
-
-	.iterations-control {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-xs);
-		padding-left: var(--spacing-sm);
-		border-left: 1px solid var(--color-border);
-	}
-
-	.iterations-label {
-		font-size: var(--font-size-xs);
+	.meta-text {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 4px;
+		font-size: var(--font-size-sm);
 		color: var(--color-text-secondary);
 		white-space: nowrap;
+		min-width: 0;
+		flex-shrink: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.iterations-input {
-		width: 52px;
-		padding: var(--spacing-xs);
-		font-size: var(--font-size-sm);
-		border: 1px solid var(--color-border);
-		border-radius: var(--border-radius-md);
-		background: var(--color-bg-primary);
+	.meta-label {
+		color: var(--color-text-tertiary);
+	}
+
+	.meta-value {
 		color: var(--color-text-primary);
-		text-align: center;
+		font-weight: var(--font-weight-medium);
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.iterations-input:focus {
-		outline: none;
-		border-color: var(--color-accent);
-		box-shadow: 0 0 0 2px var(--color-accent-light);
+	.settings-link {
+		color: var(--color-accent);
+		text-decoration: none;
+		font-size: var(--font-size-sm);
 	}
 
-	.iterations-input::-webkit-inner-spin-button,
-	.iterations-input::-webkit-outer-spin-button {
-		opacity: 1;
+	.settings-link:hover {
+		color: var(--color-accent-hover);
+		text-decoration: underline;
+	}
+
+	.settings-link:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+		border-radius: var(--border-radius-sm);
+	}
+
+	.edit-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		flex-shrink: 0;
 	}
 
 	.loading-indicator {
 		display: flex;
 		align-items: center;
 		margin-left: var(--spacing-sm);
+		flex-shrink: 0;
 	}
 
 	.loading-spinner {
@@ -227,25 +208,10 @@ Displays workflow title, agent selector, iteration controls, and context informa
 		}
 	}
 
-	.agents-loading,
-	.no-agents {
-		font-size: var(--font-size-sm);
-		color: var(--color-text-tertiary);
-	}
-
-	.settings-link {
-		color: var(--color-accent);
-		text-decoration: underline;
-	}
-
-	.settings-link:hover {
-		color: var(--color-accent-hover);
-	}
-
-	/* Responsive: Medium screens - tighter spacing */
+	/* Responsive: Medium screens — tighter spacing, hide labels */
 	@media (max-width: 900px) {
 		.agent-header {
-			padding: var(--spacing-sm) var(--spacing-md);
+			padding: var(--spacing-xs) var(--spacing-md);
 		}
 
 		.header-content {
@@ -254,46 +220,21 @@ Displays workflow title, agent selector, iteration controls, and context informa
 
 		.agent-title {
 			max-width: clamp(60px, 12vw, 120px);
-			font-size: var(--font-size-base);
-		}
-
-		.header-separator {
-			display: none;
-		}
-
-		.iterations-label {
-			display: none;
-		}
-
-		.iterations-control {
-			border-left: none;
-			padding-left: 0;
-		}
-
-		.agent-controls {
-			gap: var(--spacing-sm);
 		}
 	}
 
-	/* Responsive: Small screens - stack vertically */
+	/* Responsive: Small screens — drop iterations + label prefixes */
 	@media (max-width: 550px) {
 		.agent-header {
-			padding: var(--spacing-sm);
-			min-height: auto;
-		}
-
-		.header-content {
-			flex-direction: column;
-			gap: var(--spacing-xs);
+			padding: var(--spacing-xs);
 		}
 
 		.agent-title {
-			max-width: 180px;
+			max-width: 140px;
 		}
 
-		.agent-controls {
-			flex-wrap: wrap;
-			justify-content: center;
+		.meta-label {
+			display: none;
 		}
 	}
 </style>
