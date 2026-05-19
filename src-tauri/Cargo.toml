@@ -45,13 +45,10 @@ async-trait = "0.1"
 regex = "1.10"
 globset = "0.4"
 # Used to add jitter to retry backoff and avoid thundering-herd on transient LLM errors.
-rand = "0.8"
+rand = "0.9"
 
 # Async utilities for cancellation tokens
 tokio-util = { version = "0.7", features = ["rt"] }
-
-# LLM Integration (Rig.rs)
-rig-core = "0.34.0"
 
 # HTTP client for provider connectivity tests and MCP HTTP transport
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
