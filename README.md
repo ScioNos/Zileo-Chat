@@ -1,6 +1,6 @@
 # Zileo Chat
 
-[![Version](https://img.shields.io/badge/version-0.24.0-orange)](https://github.com/assistance-micro-design/zileo-chat)
+[![Version](https://img.shields.io/badge/version-0.25.0-orange)](https://github.com/assistance-micro-design/zileo-chat)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](https://github.com/assistance-micro-design/zileo-chat)
 
@@ -14,7 +14,7 @@
 
 ## Beta Warning
 
-**This software is currently in beta (v0.24.0).**
+**This software is currently in beta (v0.25.0).**
 
 Before using Zileo Chat, please be aware of the following risks:
 
@@ -40,6 +40,7 @@ Zileo Chat is a desktop application for orchestrating AI agents through a conver
 - **Real-time Streaming** - Token-by-token response display with usage metrics and prompt caching
 - **Tool Execution** - Memory, Todo, Calculator, FileManager (with `read_image` for vision), Skills, and sub-agent tools
 - **Multimodal Vision** - Attach images to messages (paste, picker, drag&drop) for vision-capable models, cross-provider (OpenAI / Mistral / Ollama / Custom)
+- **Voice Dictation** - Push-to-talk transcription via Mistral Voxtral (hold mic button or `Ctrl+Shift+Space`, release to insert at cursor)
 - **Human-in-the-Loop** - Approve critical operations before execution with risk-based validation
 - **Custom Providers** - Add any OpenAI-compatible LLM endpoint alongside built-in Mistral and Ollama
 - **Reasoning Effort** - Granular thinking control (low/medium/high) for supported models
