@@ -16,6 +16,7 @@
 //!
 //! Tauri IPC commands for managing skill documents (markdown instructions for agents).
 
+use crate::commands::skill_version::snapshot_skill_version_core;
 use crate::models::skill::{
     validate_skill_content, validate_skill_description, validate_skill_name, Skill, SkillCreate,
     SkillSummary, SkillUpdate,
@@ -25,29 +26,53 @@ use crate::AppState;
 use tauri::State;
 use tracing::{error, info, instrument, warn};
 
-/// List all skills (returns lightweight summaries with content_length)
+/// List skills (lightweight summaries). Optional `kind` filter:
+/// - `None` / `Some("")` → all skills (used by Settings → Skills page)
+/// - `Some("standard")` → skills with kind IS NONE (for standard agents)
+/// - `Some("kanban")` → skills with kind = 'kanban'
 #[tauri::command]
 #[instrument(name = "list_skills", skip(state))]
-pub async fn list_skills(state: State<'_, AppState>) -> Result<Vec<SkillSummary>, String> {
-    info!("Listing all skills");
+pub async fn list_skills(
+    kind: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillSummary>, String> {
+    info!(?kind, "Listing skills");
 
-    let query = r#"
+    let (where_clause, params): (&str, Vec<(String, serde_json::Value)>) = match kind.as_deref() {
+        Some("standard") => ("WHERE kind IS NONE", vec![]),
+        Some("kanban") => (
+            "WHERE kind = $kind",
+            vec![("kind".to_string(), serde_json::json!("kanban"))],
+        ),
+        _ => ("", vec![]),
+    };
+
+    let query = format!(
+        r#"
         SELECT
             meta::id(id) AS id,
             name,
             description,
             category,
             enabled,
+            kind,
             string::len(content) AS content_length,
             updated_at
         FROM skill
+        {}
         ORDER BY updated_at DESC
-    "#;
+        "#,
+        where_clause
+    );
 
-    let results: Vec<serde_json::Value> = state.db.query_json(query).await.map_err(|e| {
-        error!(error = %e, "Failed to list skills");
-        format!("Failed to list skills: {}", e)
-    })?;
+    let results: Vec<serde_json::Value> = state
+        .db
+        .query_json_with_params(&query, params)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to list skills");
+            format!("Failed to list skills: {}", e)
+        })?;
 
     let skills: Vec<SkillSummary> = results
         .into_iter()
@@ -74,6 +99,7 @@ pub async fn get_skill(skill_id: String, state: State<'_, AppState>) -> Result<S
             category,
             content,
             enabled,
+            kind,
             created_at,
             updated_at
         FROM skill:`{}`
@@ -113,6 +139,12 @@ pub async fn create_skill(
 
     let skill_id = uuid::Uuid::new_v4().to_string();
 
+    let kind_value = config
+        .kind
+        .as_ref()
+        .map(|k| serde_json::to_value(k).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null);
+
     let query = format!(
         r#"CREATE skill:`{}` CONTENT {{
             name: $name,
@@ -120,6 +152,7 @@ pub async fn create_skill(
             category: $category,
             content: $content,
             enabled: true,
+            kind: $kind,
             created_at: time::now(),
             updated_at: time::now()
         }}"#,
@@ -138,6 +171,7 @@ pub async fn create_skill(
                     serde_json::json!(config.category.to_string()),
                 ),
                 ("content".to_string(), serde_json::json!(content)),
+                ("kind".to_string(), kind_value),
             ],
         )
         .await
@@ -156,9 +190,12 @@ pub async fn create_skill(
 pub async fn update_skill(
     skill_id: String,
     config: SkillUpdate,
+    edited_by: Option<String>,
+    edit_summary: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Skill, String> {
     let skill_id = validate_uuid_field(&skill_id, "skill_id")?;
+    let edited_by = edited_by.unwrap_or_else(|| "user".to_string());
     info!("Updating skill");
 
     let mut set_clauses = Vec::new();
@@ -194,6 +231,10 @@ pub async fn update_skill(
         warn!("No fields to update");
         return get_skill(skill_id, state).await;
     }
+
+    // Snapshot the current state BEFORE applying the update so the change
+    // remains reversible via the versions panel.
+    snapshot_skill_version_core(&state.db, &skill_id, &edited_by, edit_summary).await?;
 
     set_clauses.push("updated_at = time::now()".to_string());
 

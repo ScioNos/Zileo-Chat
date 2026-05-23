@@ -35,6 +35,26 @@ where
     Ok(Some(Option::<T>::deserialize(deserializer)?))
 }
 
+/// Treats JSON `null` as the bool default (true) rather than rejecting it.
+/// Older agent rows in the DB store `null` for `require_file_confirmation`
+/// because the column was added after they were written; without this helper
+/// `serde_json::from_value` would fail with "invalid type: null, expected a
+/// boolean" and `main.rs` would drop the agent on startup.
+pub(crate) fn deserialize_bool_default_true<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(true))
+}
+
+/// Same as above but defaults to `false` (for opt-in flags).
+pub(crate) fn deserialize_bool_default_false<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
+
 /// Reasoning effort level for thinking models.
 ///
 /// Controls how much reasoning/thinking the model performs.
@@ -81,6 +101,17 @@ pub enum Lifecycle {
     Temporary,
 }
 
+/// Agent specialization kind (meta-role).
+///
+/// Standard agents have `kind = None`. Specialized agents (e.g. Kanban
+/// composer) carry a `kind` flag so the UI and orchestration code can
+/// surface specific affordances (badge, scheduler eligibility, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Kanban,
+}
+
 /// Agent configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -114,8 +145,12 @@ pub struct AgentConfig {
     /// Authorized directory paths for FileManagerTool
     #[serde(default)]
     pub folders: Vec<String>,
-    /// Require user confirmation for destructive file operations (default: true)
-    #[serde(default = "default_require_file_confirmation")]
+    /// Require user confirmation for destructive file operations (default: true).
+    /// Tolerates `null` in legacy DB rows by falling back to the default.
+    #[serde(
+        default = "default_require_file_confirmation",
+        deserialize_with = "deserialize_bool_default_true"
+    )]
     pub require_file_confirmation: bool,
     /// System prompt
     #[serde(default = "default_system_prompt")]
@@ -127,6 +162,23 @@ pub struct AgentConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Agent specialization kind. None = standard agent.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentKind>,
+    /// When true and `kind = Some(Kanban)`, the agent automatically analyzes
+    /// workflow reports on completion (and may propose prompt/skill edits).
+    /// Tolerates `null` in legacy DB rows by falling back to `false`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_bool_default_false",
+        skip_serializing_if = "is_false"
+    )]
+    pub auto_analyze_reports: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Default value for max_tool_iterations
@@ -229,6 +281,13 @@ pub struct AgentConfigCreate {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Agent specialization kind. None = standard agent.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentKind>,
+    /// Auto-analyze workflow reports on completion (only meaningful for Kanban agents).
+    #[serde(default)]
+    pub auto_analyze_reports: bool,
 }
 
 /// Agent configuration for updates (all fields optional except lifecycle which cannot change)
@@ -276,6 +335,16 @@ pub struct AgentConfigUpdate {
         deserialize_with = "deserialize_explicit_option"
     )]
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    /// Agent specialization kind (tri-state PATCH: absent = keep, null = clear, value = set).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_explicit_option"
+    )]
+    pub kind: Option<Option<AgentKind>>,
+    /// Auto-analyze workflow reports flag (absent = keep, value = set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_analyze_reports: Option<bool>,
 }
 
 /// Agent summary for listing (lightweight representation)
@@ -301,6 +370,9 @@ pub struct AgentSummary {
     /// Number of authorized folders
     #[serde(default)]
     pub folders_count: usize,
+    /// Specialization, if any (e.g. `Kanban`). `None` = plain agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentKind>,
 }
 
 impl From<&AgentConfig> for AgentSummary {
@@ -315,6 +387,7 @@ impl From<&AgentConfig> for AgentSummary {
             mcp_servers_count: config.mcp_servers.len(),
             skills_count: config.skills.len(),
             folders_count: config.folders.len(),
+            kind: config.kind.clone(),
         }
     }
 }
@@ -399,6 +472,8 @@ mod tests {
             system_prompt: "Test".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: Some(ReasoningEffort::Medium),
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -430,6 +505,8 @@ mod tests {
             system_prompt: "Test".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -481,6 +558,8 @@ mod tests {
             system_prompt: "You are a helpful assistant.".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -535,6 +614,8 @@ mod tests {
             system_prompt: "Test".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         assert!(config.has_valid_tools());
@@ -567,6 +648,8 @@ mod tests {
             system_prompt: "Test".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         assert!(!config.has_valid_tools());
@@ -606,6 +689,8 @@ mod tests {
             system_prompt: "Test".to_string(),
             max_tool_iterations: 50,
             reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
         };
 
         assert!(config.has_valid_tools());

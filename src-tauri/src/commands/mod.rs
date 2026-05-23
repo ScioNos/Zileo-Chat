@@ -149,19 +149,27 @@
 //! to prevent injection attacks and ensure data integrity.
 
 pub mod agent;
+pub mod compose_card;
 pub mod custom_provider;
 pub mod embedding;
 pub mod file_manager;
 pub mod import_export;
+pub mod kanban_analyzer;
+pub mod kanban_card;
+pub mod kanban_interaction;
+pub mod kanban_schedule;
 pub mod llm_models;
 pub mod mcp;
 pub mod memory;
 pub mod message;
 pub mod migration;
 pub mod prompt;
+pub mod prompt_version;
+pub mod scheduler;
 pub mod security;
 pub mod settings_stt;
 pub mod skill;
+pub mod skill_version;
 pub mod streaming;
 pub mod stt;
 pub mod sub_agent_execution;
@@ -173,5 +181,6 @@ pub mod validation;
 pub mod validation_audit;
 pub mod workflow;
 pub mod workflow_folder;
+pub mod workflow_slots;
 
 pub use security::SecureKeyStore;

@@ -20,9 +20,12 @@ Displays in a modal with markdown content editor.
 -->
 
 <script lang="ts">
-	import { Button, Input, Textarea, Select } from '$lib/components/ui';
+	import { tauriInvoke } from '$lib/tauri';
+	import { Button, Input, Textarea, Select, Badge } from '$lib/components/ui';
+	import VersionsHistoryModal from '$lib/components/settings/versions/VersionsHistoryModal.svelte';
 	import type { Skill, SkillCreate, SkillCategory } from '$types/skill';
 	import { SKILL_CATEGORY_I18N_KEYS } from '$types/skill';
+	import type { AgentKind } from '$types/agent';
 	import { i18n, t } from '$lib/i18n';
 
 	/**
@@ -43,11 +46,27 @@ Displays in a modal with markdown content editor.
 
 	let { mode, skill = null, saving = false, onsave, oncancel }: Props = $props();
 
+	let showVersions = $state(false);
+	/** Number of historical versions for this skill; null while loading. */
+	let versionCount = $state<number | null>(null);
+
+	async function loadVersionCount(skillId: string): Promise<void> {
+		try {
+			const list = await tauriInvoke<Array<{ id: string }>>('list_skill_versions', { skillId });
+			versionCount = list.length;
+		} catch {
+			versionCount = null;
+		}
+	}
+
 	// Form state
 	let name = $state('');
 	let description = $state('');
 	let category = $state<SkillCategory>('custom');
 	let content = $state('');
+	// 'standard' = no specialization (undefined on the wire), 'kanban' = Kanban-only skill.
+	// Immutable after creation: the field is disabled in edit mode.
+	let kind = $state<'standard' | AgentKind>('standard');
 
 	// Sync form state when skill prop changes (e.g., switching between edit targets)
 	$effect(() => {
@@ -55,6 +74,17 @@ Displays in a modal with markdown content editor.
 		description = skill?.description ?? '';
 		category = skill?.category ?? 'custom';
 		content = skill?.content ?? '';
+		kind = skill?.kind ?? 'standard';
+	});
+
+	// Refresh the version count whenever the editing target changes or the
+	// history modal closes (a restore creates a new snapshot, bumping count).
+	$effect(() => {
+		if (mode === 'edit' && skill && !showVersions) {
+			void loadVersionCount(skill.id);
+		} else if (mode === 'create') {
+			versionCount = null;
+		}
 	});
 
 	// Derived state
@@ -70,6 +100,11 @@ Displays in a modal with markdown content editor.
 		}))
 	);
 
+	let kindOptions = $derived([
+		{ value: 'standard', label: t('skills_kind_standard') },
+		{ value: 'kanban', label: t('skills_kind_kanban') }
+	]);
+
 	/**
 	 * Handles form submission
 	 */
@@ -81,7 +116,8 @@ Displays in a modal with markdown content editor.
 			name: name.trim(),
 			description: description.trim(),
 			category,
-			content: content.trim()
+			content: content.trim(),
+			kind: kind === 'kanban' ? 'kanban' : undefined
 		});
 	}
 
@@ -135,6 +171,19 @@ Displays in a modal with markdown content editor.
 	</div>
 
 	<div class="form-field">
+		<Select
+			label={$i18n('skills_form_kind_label')}
+			value={kind}
+			onchange={(e) => (kind = e.currentTarget.value === 'kanban' ? 'kanban' : 'standard')}
+			options={kindOptions}
+			disabled={saving || mode === 'edit'}
+		/>
+		<span class="field-help">
+			{mode === 'edit' ? $i18n('skills_form_kind_locked') : $i18n('skills_form_kind_help')}
+		</span>
+	</div>
+
+	<div class="form-field">
 		<Textarea
 			label={$i18n('skills_form_content_label')}
 			value={content}
@@ -148,6 +197,20 @@ Displays in a modal with markdown content editor.
 	</div>
 
 	<div class="form-actions">
+		{#if mode === 'edit' && skill}
+			<Button
+				type="button"
+				variant="ghost"
+				onclick={() => (showVersions = true)}
+				disabled={saving || versionCount === 0}
+				ariaLabel={$i18n('versions_history_button')}
+			>
+				{$i18n('versions_history_button')}
+				{#if versionCount !== null && versionCount > 0}
+					<Badge variant="primary">{versionCount}</Badge>
+				{/if}
+			</Button>
+		{/if}
 		<Button type="button" variant="ghost" onclick={handleCancel} disabled={saving}>
 			{$i18n('common_cancel')}
 		</Button>
@@ -160,6 +223,10 @@ Displays in a modal with markdown content editor.
 		</Button>
 	</div>
 </form>
+
+{#if showVersions && skill}
+	<VersionsHistoryModal kind="skill" resourceId={skill.id} onclose={() => (showVersions = false)} />
+{/if}
 
 <style>
 	.skill-form {
@@ -184,6 +251,11 @@ Displays in a modal with markdown content editor.
 		font-size: var(--font-size-xs);
 		color: var(--color-text-tertiary);
 		text-align: right;
+	}
+
+	.field-help {
+		font-size: var(--font-size-xs);
+		color: var(--color-text-tertiary);
 	}
 
 	.validation-error {

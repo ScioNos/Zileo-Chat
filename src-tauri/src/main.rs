@@ -149,6 +149,26 @@ async fn main() -> anyhow::Result<()> {
             commands::workflow_folder::update_folder_color,
             commands::workflow_folder::delete_workflow_folder,
             commands::workflow_folder::reorder_workflow_folders,
+            // Kanban card commands
+            commands::kanban_card::create_kanban_card,
+            commands::kanban_card::get_kanban_card,
+            commands::kanban_card::list_kanban_cards,
+            commands::kanban_card::update_kanban_card,
+            commands::kanban_card::delete_kanban_card,
+            commands::kanban_card::move_kanban_card,
+            commands::kanban_card::duplicate_kanban_card_as_template,
+            commands::kanban_card::set_kanban_card_workflow_id,
+            commands::kanban_analyzer::analyze_card_report,
+            commands::kanban_interaction::load_card_interactions,
+            // Kanban schedule commands
+            commands::kanban_schedule::create_kanban_schedule,
+            commands::kanban_schedule::get_kanban_schedule,
+            commands::kanban_schedule::list_kanban_schedules,
+            commands::kanban_schedule::update_kanban_schedule,
+            commands::kanban_schedule::delete_kanban_schedule,
+            // Workflow slots (backend source of truth for max-concurrent)
+            commands::workflow_slots::get_workflow_slots_available,
+            commands::compose_card::compose_card_from_description,
             // Agent commands (CRUD)
             commands::agent::list_agents,
             commands::agent::get_agent_config,
@@ -270,12 +290,22 @@ async fn main() -> anyhow::Result<()> {
             commands::prompt::update_prompt,
             commands::prompt::delete_prompt,
             commands::prompt::search_prompts,
+            // Prompt version commands
+            commands::prompt_version::list_prompt_versions,
+            commands::prompt_version::get_prompt_version,
+            commands::prompt_version::restore_prompt_version,
+            commands::prompt_version::delete_prompt_version,
             // Skill commands (Tool Skills)
             commands::skill::list_skills,
             commands::skill::get_skill,
             commands::skill::create_skill,
             commands::skill::update_skill,
             commands::skill::delete_skill,
+            // Skill version commands
+            commands::skill_version::list_skill_versions,
+            commands::skill_version::get_skill_version,
+            commands::skill_version::restore_skill_version,
+            commands::skill_version::delete_skill_version,
             // FileManager commands
             commands::file_manager::validate_agent_folder,
             commands::file_manager::list_trash,
@@ -399,6 +429,137 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("App handle set in AppState for event emission");
             }
 
+            // Spawn the Kanban scheduler.
+            // The shutdown flag is polled on every tick; cleanup in
+            // RunEvent::ExitRequested flips it so the loop exits cleanly.
+            {
+                let db = state.inner().db.clone();
+                let app_handle = app.handle().clone();
+                let shutdown = state.inner().kanban_scheduler_shutdown.clone();
+                let handle = commands::scheduler::spawn_kanban_scheduler_task(
+                    db,
+                    app_handle,
+                    shutdown,
+                );
+                let slot = state.inner().kanban_scheduler_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    *slot.lock().await = Some(handle);
+                });
+                tracing::info!("Kanban scheduler task spawned");
+            }
+
+            // Listen for workflow_complete events to update kanban cards.
+            // When a workflow tied to a card finishes (success or failure), the
+            // card transitions to the review column and the error_summary is
+            // stamped on the failure path.
+            {
+                use tauri::Listener;
+                let db = state.inner().db.clone();
+                let llm_manager = state.inner().llm_manager.clone();
+                let tool_factory = state.inner().tool_factory.clone();
+                let mcp_manager = state.inner().mcp_manager.clone();
+                let app_handle_for_listener = app.handle().clone();
+                app.handle().listen("workflow_complete", move |evt| {
+                    let payload: serde_json::Value = match serde_json::from_str(evt.payload()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "workflow_complete payload not JSON");
+                            return;
+                        }
+                    };
+                    let workflow_id = match payload["workflow_id"].as_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            tracing::warn!("workflow_complete missing workflow_id");
+                            return;
+                        }
+                    };
+                    let status = payload["status"].as_str().unwrap_or("").to_string();
+                    let error_message = payload["error"].as_str().map(String::from);
+                    let success = status == "completed";
+                    let db = db.clone();
+                    let llm_manager = llm_manager.clone();
+                    let tool_factory = tool_factory.clone();
+                    let mcp_manager = mcp_manager.clone();
+                    let app_handle = app_handle_for_listener.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = commands::scheduler::mark_card_done_core(
+                            &db,
+                            &workflow_id,
+                            success,
+                            error_message.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                workflow_id = %workflow_id,
+                                error = %e,
+                                "Failed to update kanban card after workflow completion"
+                            );
+                            return;
+                        }
+
+                        // C: event-driven promotion. The card we just finished
+                        // freed a slot; immediately try to promote the next
+                        // ready card so the user does not wait up to 60 s for
+                        // the scheduler tick. Best-effort.
+                        if let Err(e) = commands::scheduler::start_next_pending_card_core(
+                            &db,
+                            &app_handle,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                workflow_id = %workflow_id,
+                                error = %e,
+                                "Event-driven promotion failed; will retry at next scheduler tick"
+                            );
+                        }
+
+                        // On success, trigger auto-analyze if the Kanban agent
+                        // has the flag enabled. Best-effort: any failure here is
+                        // logged but does not affect the user-visible flow.
+                        if !success {
+                            return;
+                        }
+                        let card_id = match commands::scheduler::card_id_for_workflow(
+                            &db,
+                            &workflow_id,
+                        )
+                        .await
+                        {
+                            Ok(Some(id)) => id,
+                            Ok(None) => return, // not a kanban-spawned workflow
+                            Err(e) => {
+                                tracing::warn!(
+                                    workflow_id = %workflow_id,
+                                    error = %e,
+                                    "Failed to resolve card_id for auto-analyze"
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = commands::kanban_analyzer::analyze_card_report_core(
+                            &db,
+                            &tool_factory,
+                            &mcp_manager,
+                            &llm_manager,
+                            &app_handle,
+                            &card_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                card_id = %card_id,
+                                error = %e,
+                                "Auto-analyze failed (non-fatal)"
+                            );
+                        }
+                    });
+                });
+                tracing::info!("Kanban workflow_complete listener registered");
+            }
+
             // Spawn the validation_audit cleanup task.
             // Honors `audit.retention_days` and runs every 24h.
             // The handle is parked in AppState so the runtime owns it (and a
@@ -432,7 +593,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // Load agents from database
-                let query = "SELECT meta::id(id) AS id, name, lifecycle, llm, tools, mcp_servers, skills, folders, require_file_confirmation, system_prompt, max_tool_iterations, reasoning_effort FROM agent";
+                let query = "SELECT meta::id(id) AS id, name, lifecycle, llm, tools, mcp_servers, skills, folders, require_file_confirmation, system_prompt, max_tool_iterations, reasoning_effort, kind, auto_analyze_reports FROM agent";
                 let results: Vec<serde_json::Value> = match db.db.query(query).await {
                     Ok(mut r) => r.take(0).unwrap_or_default(),
                     Err(e) => {
@@ -544,7 +705,16 @@ async fn main() -> anyhow::Result<()> {
             // timeout protects the UI from misbehaving MCP servers.
             api.prevent_exit();
 
-            let mcp_manager = app_handle.state::<AppState>().mcp_manager.clone();
+            // Flip the kanban scheduler shutdown flag so the loop exits on
+            // its next tick. The handle is owned by AppState; we don't need
+            // to abort() it explicitly — the std::process::exit(0) below
+            // tears down the runtime cleanly once MCP shutdown finishes.
+            let app_state = app_handle.state::<AppState>();
+            app_state
+                .kanban_scheduler_shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let mcp_manager = app_state.mcp_manager.clone();
             let shutdown_done = shutdown_done.clone();
 
             tauri::async_runtime::spawn(async move {

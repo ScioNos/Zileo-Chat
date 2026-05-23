@@ -15,7 +15,7 @@
  */
 
 /**
- * Drag & drop utilities for workflow sidebar.
+ * Drag & drop utilities for sidebar lists and board surfaces.
  * @module utils/dragDrop
  */
 

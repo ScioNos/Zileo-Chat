@@ -2,6 +2,7 @@ import type {
 	AgentConfig,
 	AgentConfigCreate,
 	AgentConfigUpdate,
+	AgentKind,
 	Lifecycle,
 	ReasoningEffort
 } from '$types/agent';
@@ -83,9 +84,21 @@ export function buildProviderOptions(
 	];
 }
 
-export function buildAvailableSkills(skillSummaries: SkillSummary[]): AgentFormOption[] {
+/**
+ * Builds the picker options for the agent's skill list.
+ *
+ * Strict kind filter: a standard agent (`agentKind = undefined`) only sees
+ * skills with `kind` undefined; a Kanban agent (`agentKind = 'kanban'`) only
+ * sees skills with `kind === 'kanban'`. This mirrors the backend invariant
+ * `skill.kind == agent.kind` enforced by `SkillManagerTool::create_skill`.
+ */
+export function buildAvailableSkills(
+	skillSummaries: SkillSummary[],
+	agentKind?: 'kanban'
+): AgentFormOption[] {
 	return skillSummaries
 		.filter((skill) => skill.enabled)
+		.filter((skill) => (skill.kind ?? null) === (agentKind ?? null))
 		.map((skill) => ({
 			value: skill.name,
 			label: skill.name,
@@ -176,6 +189,10 @@ export interface AgentSubmitInput {
 	maxToolIterations: number;
 	/** Selected reasoning effort, or undefined when "Off". */
 	reasoningEffort: ReasoningEffort | undefined;
+	/** Optional specialization (e.g. `kanban`). undefined = plain agent. */
+	kind: AgentKind | undefined;
+	/** When true, finished workflows are analyzed automatically by the agent. */
+	autoAnalyzeReports: boolean;
 }
 
 /**
@@ -203,7 +220,9 @@ export function buildAgentCreatePayload(input: AgentSubmitInput): AgentConfigCre
 		require_file_confirmation: input.requireFileConfirmation,
 		system_prompt: input.systemPrompt.trim(),
 		max_tool_iterations: input.maxToolIterations,
-		reasoning_effort: input.reasoningEffort
+		reasoning_effort: input.reasoningEffort,
+		kind: input.kind,
+		auto_analyze_reports: input.autoAnalyzeReports
 	};
 }
 
@@ -233,6 +252,8 @@ export function buildAgentUpdatePayload(input: AgentSubmitInput): AgentConfigUpd
 		require_file_confirmation: input.requireFileConfirmation,
 		system_prompt: input.systemPrompt.trim(),
 		max_tool_iterations: input.maxToolIterations,
-		reasoning_effort: input.reasoningEffort ?? null
+		reasoning_effort: input.reasoningEffort ?? null,
+		kind: input.kind ?? null,
+		auto_analyze_reports: input.autoAnalyzeReports
 	};
 }

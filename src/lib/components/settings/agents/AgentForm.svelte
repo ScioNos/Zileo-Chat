@@ -35,7 +35,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	} from '$lib/stores/llm';
 	import type { LLMState } from '$types/llm';
 	import type { ProviderInfo } from '$types/custom-provider';
-	import type { AgentConfig, Lifecycle, ReasoningEffort } from '$types/agent';
+	import type { AgentConfig, AgentKind, Lifecycle, ReasoningEffort } from '$types/agent';
 	import type { SkillSummary } from '$types/skill';
 	import { Button, Input, Textarea, Card, Badge, Select } from '$lib/components/ui';
 	import { tauriInvoke } from '$lib/tauri';
@@ -89,6 +89,8 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	let selectedFolders = $state<string[]>([]);
 	let requireFileConfirmation = $state(true);
 	let systemPrompt = $state('');
+	let kind = $state<AgentKind | undefined>(undefined);
+	let autoAnalyzeReports = $state(false);
 
 	// Sync form state when agent prop changes (e.g., switching between edit targets)
 	$effect(() => {
@@ -104,8 +106,46 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 		selectedFolders = agent?.folders ?? [];
 		requireFileConfirmation = agent?.require_file_confirmation ?? true;
 		systemPrompt = agent?.system_prompt ?? '';
+		kind = agent?.kind ?? undefined;
+		autoAnalyzeReports = agent?.auto_analyze_reports ?? false;
 		// Reset validation state when agent changes
 		errors = {};
+		previousKind = agent?.kind ?? undefined;
+	});
+
+	/**
+	 * Previous value of `kind` so we can detect a user-driven transition to
+	 * `'kanban'` (vs. the effect above resyncing from a loaded agent) and
+	 * seed an editable default system prompt template when the field is
+	 * blank. Never overwrites a non-empty prompt.
+	 */
+	let previousKind = $state<AgentKind | undefined>(undefined);
+
+	const KANBAN_DEFAULT_SYSTEM_PROMPT = `You are the Kanban orchestrator. Your role has two modes:
+
+# Compose mode
+When asked to compose a kanban card, read the user demand carefully. Discover \
+available worker agents (ListAgents) and reusable prompts (PromptManager) if \
+available. Pick the most fitting target_agent_id and either reference a \
+prompt_id or compose an inline_prompt. Call SubmitComposedCard exactly once \
+with the final payload, then end with a 2-3 sentence rationale.
+
+# Analyze mode
+When asked to analyze a worker's report, compare it against the user's \
+original demand. Pick a verdict: approve (report fulfils the demand), reject \
+(report is wrong and unsalvageable) or needs_improvement (provide a full \
+replacement prompt). Call SubmitAnalysis exactly once with your verdict and \
+reasoning.
+
+Be concise, factual, and conservative in your judgements.`;
+
+	$effect(() => {
+		// Inject the default template the first time the user flips `kind`
+		// to 'kanban' on a brand-new agent (empty prompt). Editable afterwards.
+		if (kind === 'kanban' && previousKind !== 'kanban' && systemPrompt.trim() === '') {
+			systemPrompt = KANBAN_DEFAULT_SYSTEM_PROMPT;
+		}
+		previousKind = kind;
 	});
 
 	/** UI state */
@@ -143,8 +183,56 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 			value: 'FileManagerTool',
 			label: $i18n('agents_tool_file_manager'),
 			description: $i18n('agents_tool_file_manager_desc')
+		},
+		{
+			value: 'PromptManagerTool',
+			label: $i18n('agents_tool_prompt_manager'),
+			description: $i18n('agents_tool_prompt_manager_desc')
+		},
+		{
+			value: 'SkillManagerTool',
+			label: $i18n('agents_tool_skill_manager'),
+			description: $i18n('agents_tool_skill_manager_desc')
+		},
+		{
+			value: 'WorkflowManagerTool',
+			label: $i18n('agents_tool_workflow_manager'),
+			description: $i18n('agents_tool_workflow_manager_desc')
 		}
 	]);
+
+	const KANBAN_ONLY_TOOLS = new Set([
+		'PromptManagerTool',
+		'SkillManagerTool',
+		'WorkflowManagerTool'
+	]);
+
+	const visibleTools = $derived(
+		kind === 'kanban'
+			? availableTools
+			: availableTools.filter((t) => !KANBAN_ONLY_TOOLS.has(t.value))
+	);
+
+	$effect(() => {
+		if (kind !== 'kanban') {
+			if (selectedTools.some((t) => KANBAN_ONLY_TOOLS.has(t))) {
+				selectedTools = selectedTools.filter((t) => !KANBAN_ONLY_TOOLS.has(t));
+			}
+			if (autoAnalyzeReports) {
+				autoAnalyzeReports = false;
+			}
+		}
+		// Purge skills that no longer match the current agent kind (strict invariant).
+		const validSkillNames = new Set(
+			availableSkillSummaries.filter((s) => (s.kind ?? null) === (kind ?? null)).map((s) => s.name)
+		);
+		if (
+			availableSkillSummaries.length > 0 &&
+			selectedSkills.some((name) => !validSkillNames.has(name))
+		) {
+			selectedSkills = selectedSkills.filter((name) => validSkillNames.has(name));
+		}
+	});
 
 	/** Lifecycle options with descriptions - reactive to locale */
 	const lifecycleOptions = $derived([
@@ -198,7 +286,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 	});
 
 	/** Available skills (enabled only) */
-	const availableSkills = $derived(buildAvailableSkills(availableSkillSummaries));
+	const availableSkills = $derived(buildAvailableSkills(availableSkillSummaries, kind));
 
 	/** Available MCP servers from store */
 	const availableMcpServers = $derived(
@@ -327,7 +415,9 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 			requireFileConfirmation,
 			systemPrompt,
 			maxToolIterations,
-			reasoningEffort
+			reasoningEffort,
+			kind,
+			autoAnalyzeReports
 		};
 
 		try {
@@ -444,6 +534,23 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 							<span class="field-help">{$i18n('agents_lifecycle_readonly')}</span>
 						{/if}
 					</div>
+
+					<div class="field-group" role="group" aria-label={$i18n('agents_kind')}>
+						<span class="field-label">{$i18n('agents_kind')}</span>
+						<select class="form-input" bind:value={kind} aria-label={$i18n('agents_kind')}>
+							<option value={undefined}>{$i18n('agents_kind_none')}</option>
+							<option value="kanban">{$i18n('agents_kind_kanban')}</option>
+						</select>
+						<span class="field-help">{$i18n('agents_kind_help')}</span>
+					</div>
+
+					{#if kind === 'kanban'}
+						<label class="checkbox-row">
+							<input type="checkbox" bind:checked={autoAnalyzeReports} />
+							<span class="checkbox-label">{$i18n('agents_auto_analyze')}</span>
+							<span class="field-help">{$i18n('agents_auto_analyze_desc')}</span>
+						</label>
+					{/if}
 				</div>
 
 				<!-- LLM Configuration -->
@@ -546,7 +653,7 @@ Includes LLM settings, tool selection, MCP server selection, and system prompt.
 					<p class="section-help">{$i18n('agents_tools_help')}</p>
 
 					<div class="checkbox-group">
-						{#each availableTools as tool (tool.value)}
+						{#each visibleTools as tool (tool.value)}
 							<label class="checkbox-item">
 								<input
 									type="checkbox"
