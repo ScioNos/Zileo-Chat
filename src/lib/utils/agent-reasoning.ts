@@ -35,22 +35,56 @@ export function isMistralProvider(provider: string): boolean {
 }
 
 /**
+ * Substrings (lowercase) that flag a model as supporting the `xhigh`
+ * reasoning tier on OpenAI-compatible gateways (OpenRouter primarily).
+ *
+ * Kept deliberately broad to absorb future versions without re-editing:
+ * `gpt-5.` matches every 5.x point release (5.1/5.2/5.5/...) without
+ * catching the base `gpt-5` that only exposes low/medium/high. `deepseek`,
+ * `grok` and `claude-opus` catch every variant of those families. If a
+ * gateway rejects `xhigh` on an older opus (4.5/4.6) the error surfaces
+ * cleanly — false positives are benign, false negatives would silently
+ * hide a tier from users.
+ */
+const XHIGH_MODEL_PATTERNS = ['deepseek', 'gpt-5.', 'grok', 'claude-opus'] as const;
+
+/**
+ * Returns true when the model's `api_name` matches a known family that
+ * exposes the `xhigh` reasoning tier (see {@link XHIGH_MODEL_PATTERNS}).
+ */
+export function supportsXhighReasoning(apiName: string | undefined | null): boolean {
+	if (!apiName) return false;
+	const lower = apiName.toLowerCase();
+	return XHIGH_MODEL_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+/**
  * Returns the reasoning-effort options to expose for the given provider.
  *
  * Mistral models do not expose intensity levels: only "Off" and "High" are
- * valid. All other providers keep the full range.
+ * valid. All other providers keep the full range. The `xhigh` tier ("Think
+ * Max") is only added when `modelApiName` matches a family known to expose
+ * it (see {@link supportsXhighReasoning}).
  */
-export function getReasoningOptions(provider: string, t: Translator): ReasoningOption[] {
+export function getReasoningOptions(
+	provider: string,
+	t: Translator,
+	modelApiName?: string | null
+): ReasoningOption[] {
 	const off: ReasoningOption = { value: '', label: t('agents_reasoning_off') };
 	if (isMistralProvider(provider)) {
 		return [off, { value: 'high', label: t('agents_reasoning_high') }];
 	}
-	return [
+	const base: ReasoningOption[] = [
 		off,
 		{ value: 'low', label: t('agents_reasoning_low') },
 		{ value: 'medium', label: t('agents_reasoning_medium') },
 		{ value: 'high', label: t('agents_reasoning_high') }
 	];
+	if (supportsXhighReasoning(modelApiName)) {
+		base.push({ value: 'xhigh', label: t('agents_reasoning_xhigh') });
+	}
+	return base;
 }
 
 /**
@@ -79,10 +113,19 @@ export function getReasoningHelp(provider: string, t: Translator): string {
  */
 export function normalizeReasoningEffortForProvider(
 	provider: string,
-	effort: ReasoningEffort | undefined
+	effort: ReasoningEffort | undefined,
+	modelApiName?: string | null
 ): ReasoningEffort | undefined {
 	if (!effort) return effort;
 	if (isMistralProvider(provider) && (effort === 'low' || effort === 'medium')) {
+		return 'high';
+	}
+	// `xhigh` is only exposed for the families listed in XHIGH_MODEL_PATTERNS;
+	// if the user switches to any other model while xhigh is selected, downgrade
+	// to `high` so the form state matches the option set. The backend would also
+	// collapse xhigh -> high on Mistral, but doing it here keeps the visible
+	// Select consistent.
+	if (effort === 'xhigh' && !supportsXhighReasoning(modelApiName)) {
 		return 'high';
 	}
 	return effort;
