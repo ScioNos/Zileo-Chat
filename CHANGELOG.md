@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-05-25
+
 Kanban auto-analyze stabilization (`fix/kanban-analyze-stabilization`). Fixes the root cause of a Kanban card finishing its worker workflow but never receiving a verdict, leaving it stuck in the `review` column. The agent tool loop hard-coded `tool_choice = Auto` on every iteration, so the analyze and compose flows -- which depend on the model emitting one mandatory submit call to capture their result -- could silently fail whenever the model replied in prose instead. The loop now forces a tool call on the opening turn only (reverting to `Auto` afterwards so it can still terminate once the result is submitted). A boot-time pass re-analyzes cards orphaned by an app closed mid-workflow or an earlier silent failure, the verdict is now produced in the UI language, and the analyze lifecycle survives navigation away from the board.
 
 ### Added
@@ -25,6 +27,8 @@ Kanban auto-analyze stabilization (`fix/kanban-analyze-stabilization`). Fixes th
 
 ### Fixed
 
+- **`xhigh` ("très élevé") reasoning effort lost on agent reopen** (`src/lib/utils/agent-reasoning.ts`) -- saving an agent with the "Think Max" tier then reopening its form showed "élevé" (high) instead. The form's normalization effect ran on first render, before the LLM model list finished loading, so the still-unknown model was wrongly treated as not supporting `xhigh` and the stored value was downgraded to `high`. The normalizer now downgrades `xhigh` only when the model is known and unsupported; while the list is loading (unknown model) the persisted value is preserved.
+- **SSE read timeout during reasoning thinking phase** (`src-tauri/src/constants.rs`, `llm/sse.rs`, `llm/manager.rs`) -- DeepSeek V4 pro/flash (and other reasoning models) emit their entire thinking trace before any answer token, so the streaming body can stay silent longer than the 30s per-read timeout. The read timed out mid-thinking and surfaced as reqwest's opaque "SSE stream read failed: error decoding response body". The per-read timeout is raised to 120s (it bounds only the gap between two SSE frames, never the total request, so fast models are unaffected), and the error message now distinguishes a read timeout from a connection drop via `reqwest::Error::is_timeout()` for an actionable hint.
 - **Onboarding language step** shows "EN" instead of "GB" for English.
 - **Navigation label** renamed from "Board" / "Tableau" to "Task board" / "Tableau de tâches".
 
@@ -1331,7 +1335,8 @@ Audit hardening release. Backend defense-in-depth on every SurrealQL interpolati
 
 ---
 
-[Unreleased]: https://github.com/assistance-micro-design/Zileo-Chat/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/assistance-micro-design/Zileo-Chat/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/assistance-micro-design/Zileo-Chat/releases/tag/v0.26.0
 [0.25.0]: https://github.com/assistance-micro-design/Zileo-Chat/releases/tag/v0.25.0
 [0.24.0]: https://github.com/assistance-micro-design/Zileo-Chat/releases/tag/v0.24.0
 [0.23.1]: https://github.com/assistance-micro-design/Zileo-Chat/releases/tag/v0.23.1
