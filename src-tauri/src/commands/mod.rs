@@ -156,6 +156,7 @@ pub mod file_manager;
 pub mod import_export;
 pub mod kanban_analyzer;
 pub mod kanban_card;
+pub mod kanban_card_chat;
 pub mod kanban_interaction;
 pub mod kanban_schedule;
 pub mod llm_models;
@@ -181,6 +182,5 @@ pub mod validation;
 pub mod validation_audit;
 pub mod workflow;
 pub mod workflow_folder;
-pub mod workflow_slots;
 
 pub use security::SecureKeyStore;

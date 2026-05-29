@@ -16,8 +16,9 @@
 
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { backgroundWorkflowsStore, runningCount } from '../background-workflows';
+import { backgroundWorkflowsStore, runningCount, canStartNew } from '../background-workflows';
 import { tauriListen } from '$lib/tauri';
+import type { StreamChunk } from '$types/streaming';
 
 vi.mock('$lib/tauri');
 
@@ -47,5 +48,106 @@ describe('backgroundWorkflowsStore lifecycle cleanup', () => {
 		expect(get(runningCount)).toBe(0);
 		expect(backgroundWorkflowsStore.getViewedWorkflowId()).toBeNull();
 		expect(backgroundWorkflowsStore.getExecution('workflow-1')).toBeUndefined();
+	});
+});
+
+describe('backgroundWorkflowsStore auto-register on unknown workflow', () => {
+	let chunkHandler: ((event: { payload: StreamChunk }) => void) | null = null;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		chunkHandler = null;
+		vi.mocked(tauriListen).mockImplementation(async (eventName, handler) => {
+			if (eventName === 'workflow_stream') {
+				chunkHandler = handler as (event: { payload: StreamChunk }) => void;
+			}
+			return () => {};
+		});
+		backgroundWorkflowsStore.destroy();
+	});
+
+	afterEach(() => {
+		backgroundWorkflowsStore.destroy();
+		vi.useRealTimers();
+		vi.clearAllMocks();
+	});
+
+	/**
+	 * Regression: a chunk for a workflow that was NOT registered (e.g. a
+	 * backend-initiated re-run via RerunWorkerTool) was silently dropped at
+	 * `if (!exec) return`. The page agent viewing that workflow would never
+	 * see the live blocks. Auto-registering on first chunk fixes that: the
+	 * execution becomes tracked and `onChunkForViewed` fires normally.
+	 */
+	it('auto-registers an unknown workflow on first chunk and applies it', async () => {
+		await backgroundWorkflowsStore.init();
+		expect(chunkHandler).not.toBeNull();
+
+		const chunk: StreamChunk = {
+			workflow_id: 'unknown-wf',
+			chunk_type: 'reasoning',
+			content: 'thinking...',
+			agent_id: 'agent-xyz'
+		};
+		chunkHandler!({ payload: chunk });
+
+		const exec = backgroundWorkflowsStore.getExecution('unknown-wf');
+		expect(exec).toBeDefined();
+		expect(exec?.agentId).toBe('agent-xyz');
+		expect(exec?.status).toBe('running');
+		// The chunk itself must also be applied (not just lost on register).
+		expect(exec?.chunkHistory.length).toBe(1);
+	});
+
+	/**
+	 * Rel-I1: a backend-initiated run (auto-registered on first chunk, e.g.
+	 * `RerunWorkerTool` re-running a worker detached from the frontend executor)
+	 * must NOT consume a concurrency slot. Otherwise, in non-auto validation
+	 * mode (MAX_CONCURRENT_OTHER = 1), an in-flight detached re-run would make
+	 * the next chat/agent turn fail the `canStart()` gate.
+	 */
+	it('backend-initiated runs do not consume a concurrency slot but frontend runs do', async () => {
+		await backgroundWorkflowsStore.init();
+
+		// A frontend-registered run consumes the single slot.
+		backgroundWorkflowsStore.register('fe-wf', 'agent', 'Frontend WF');
+		expect(backgroundWorkflowsStore.canStart()).toBe(false);
+		expect(get(canStartNew)).toBe(false);
+		backgroundWorkflowsStore.remove('fe-wf');
+
+		// A backend-initiated (auto-registered) run is still tracked + running…
+		const chunk: StreamChunk = {
+			workflow_id: 'be-wf',
+			chunk_type: 'reasoning',
+			content: 'detached rerun',
+			agent_id: 'agent-xyz'
+		};
+		chunkHandler!({ payload: chunk });
+		expect(backgroundWorkflowsStore.getExecution('be-wf')?.status).toBe('running');
+		// …but it must NOT block a fresh frontend turn.
+		expect(backgroundWorkflowsStore.canStart()).toBe(true);
+		expect(get(canStartNew)).toBe(true);
+	});
+
+	it('forwards chunks for auto-registered workflows when viewed', async () => {
+		await backgroundWorkflowsStore.init();
+		const forwarded: StreamChunk[] = [];
+		backgroundWorkflowsStore.setForwardCallbacks(
+			(c) => forwarded.push(c),
+			() => {},
+			() => {}
+		);
+		backgroundWorkflowsStore.setViewed('unknown-wf');
+
+		const chunk: StreamChunk = {
+			workflow_id: 'unknown-wf',
+			chunk_type: 'reasoning',
+			content: 'live block',
+			agent_id: 'agent-xyz'
+		};
+		chunkHandler!({ payload: chunk });
+
+		expect(forwarded.length).toBe(1);
+		expect(forwarded[0]?.content).toBe('live block');
 	});
 });

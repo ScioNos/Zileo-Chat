@@ -23,6 +23,9 @@ Technical documentation for the native tools available to agents in the multi-ag
 | **ListAgentsTool** | `src-tauri/src/tools/list_agents.rs` |
 | **SubmitComposedCardTool** | `src-tauri/src/tools/submit_composed_card.rs` |
 | **SubmitAnalysisTool** | `src-tauri/src/tools/submit_analysis.rs` |
+| **RerunWorkerTool** | `src-tauri/src/tools/rerun_worker.rs` |
+| **MoveCardTool** | `src-tauri/src/tools/move_card.rs` |
+| **ScheduleCardTool** | `src-tauri/src/tools/schedule_card.rs` |
 | **Tool Execution** | `src-tauri/src/agents/llm_agent.rs` |
 
 **Note**: DB tools (SurrealDBTool, QueryBuilderTool, AnalyticsTool) were removed -- DB access goes through Tauri IPC commands.
@@ -36,6 +39,7 @@ Technical documentation for the native tools available to agents in the multi-ag
 - **Hidden**: ReadSkillTool (auto-injected when agent has skills, not shown in UI)
 - **Kanban Supervisor** (Kanban-kind agents only): PromptManagerTool, SkillManagerTool, WorkflowManagerTool, ListAgentsTool
 - **Kanban Private** (auto-injected during compose / analyze, never visible in the UI catalogue): SubmitComposedCardTool, SubmitAnalysisTool
+- **Kanban Card-Chat** (auto-injected only inside a card review chat, self-gating, never visible in the UI catalogue): RerunWorkerTool, MoveCardTool, ScheduleCardTool. A Kanban agent is also confined as a delegation *caller*: `create_local_tools` strips Spawn/Delegate/Parallel for any `kind = Kanban` agent and never auto-injects the sub-agent tools.
 
 ### Sub-Agent Resilience
 
@@ -290,10 +294,10 @@ Loads an image file and surfaces it to the next LLM iteration as a multimodal us
 
 ### Operations
 
-- `list` -- List all prompt templates (id, name, description, category, variable names)
-- `get` -- Get a single prompt by id (full content + variables)
-- `create` -- Create a new prompt (`name`, `description`, `category`, `content`, `variables[]`)
-- `update` -- Partial update of an existing prompt (`prompt_id`, any subset of fields, optional `edit_summary`). Auto-snapshots a `prompt_version` row before applying.
+- `list_prompts` -- List all prompt templates (id, name, description, category, variable names)
+- `get_prompt` -- Get a single prompt by id (full content + variables)
+- `create_prompt` -- Create a new prompt (`name`, `description`, `category`, `content`, `variables[]`)
+- `update_prompt` -- Partial update of an existing prompt (`prompt_id`, any subset of fields, optional `edit_summary`). Auto-snapshots a `prompt_version` row before applying.
 
 ### Versioning
 
@@ -309,22 +313,22 @@ Every successful `update` writes a `prompt_version` row with the previous conten
 
 ### Operations
 
-- `list` -- List all skills (id, name, description, category, enabled)
-- `get` -- Get a single skill (full content)
-- `create` -- Create a new skill (`name`, `description`, `category`, `content`)
-- `update` -- Partial update (`skill_id`, any subset, optional `edit_summary`). Auto-snapshots a `skill_version` row before applying.
+- `list_skills` -- List all skills (id, name, description, category, enabled)
+- `read_skill` -- Get a single skill by name (full content)
+- `create_skill` -- Create a new skill (`name`, `description`, `category`, `content`)
+- `update_skill` -- Partial update (`skill_id`, any subset, optional `edit_summary`). Auto-snapshots a `skill_version` row before applying.
 - `grant_skill_to_agent` -- Attach an EXISTING skill (`skill_name`) to `target_agent_id`'s allowlist. The skill and agent must exist and share the same kind (a kanban skill only grants to a kanban agent, a standard skill to a standard agent); cross-kind grants are rejected. Idempotent. Distinct from `create_skill`, which auto-grants the freshly-created skill where the same-kind invariant holds by construction.
 - `revoke_skill_from_agent` -- Remove a skill from a target agent (`skill_name`, `target_agent_id`)
-- `list_versions` -- List version snapshots for a skill (most recent first)
-- `restore_version` -- Restore a prior version (writes a new snapshot of the current content before overwriting, so restore is itself versioned)
+- `list_skill_versions` -- List version snapshots for a skill (most recent first)
+- `restore_skill_version` -- Restore a prior version (writes a new snapshot of the current content before overwriting, so restore is itself versioned)
 
 ### Architecture
 
 Split into a folder for testability and clarity:
 - `mod.rs` -- Tool struct, top-level dispatch, ToolDefinition
-- `crud.rs` -- `list / get / create / update` against the `skill` table
-- `grant.rs` -- `grant / revoke` against `agent.skills`
-- `versions.rs` -- `list_versions / restore_version` against `skill_version`
+- `crud.rs` -- `list_skills / read_skill / create_skill / update_skill` against the `skill` table
+- `grant.rs` -- `grant_skill_to_agent / revoke_skill_from_agent` against `agent.skills`
+- `versions.rs` -- `list_skill_versions / restore_skill_version` against `skill_version`
 - `validators.rs` -- Shared input validation (name slug, category allowlist, content cap)
 - `tests.rs` -- Unit tests (~500 LOC)
 
@@ -332,16 +336,18 @@ Split into a folder for testability and clarity:
 
 ## 9. WorkflowManagerTool
 
-**Purpose**: Read-only access to historical workflow data so the Kanban analyzer can ground its verdict on real execution artefacts.
+**Purpose**: Access to historical workflow data and folder organisation so the Kanban analyzer can ground its verdict on real execution artefacts.
 
 **Access**: Kanban agents only.
 
 ### Operations
 
-- `list_workflows` -- List workflows (id, name, agent, status, timestamps, token totals)
+- `list_workflows` -- List workflows (id, name, agent, status, timestamps, token totals); hidden workflows excluded
 - `rename_workflow` -- Rename a workflow (`workflow_id`, `name`)
-- `folders_create / folders_list / folders_rename / folders_delete` -- Folder CRUD for organisation
-- `read_workflow` -- Fetch the full state of a workflow (messages, tool executions, thinking steps, sub-agent reports) for analysis
+- `list_workflow_folders` -- List all workflow folders
+- `create_workflow_folder` -- Create a new folder (`name`, `color`)
+- `move_workflow_to_folder` -- Move a workflow to a folder (`workflow_id`, `folder_id`)
+- `read_workflow` -- Fetch the full state of a workflow (messages, tool executions, thinking steps, sub-agent reports) for analysis; hidden workflows excluded
 - `list_workflow_errors` -- Extract just the tool errors and failure events of a workflow (cheaper than `read_workflow` when the analyzer only needs the failure surface)
 - `list_workflow_sub_agents` -- List sub-agent executions for a workflow with their final reports
 
@@ -379,7 +385,7 @@ Before persisting, the tool computes the set diff between the prompt template's 
 
 ### Auto-Injection
 
-The tool is added to the agent's toolkit only during the `compose_card_from_description` Tauri command's tool loop, never during normal Kanban-agent execution. Like the analyze flow, the loop forces a tool call on the opening turn (see section 13, `opening_tool_choice`) so the model engages `SubmitComposedCardTool` instead of finishing without a proposal.
+The tool is added to the agent's toolkit only during the `compose_card_from_description` Tauri command's tool loop, never during normal Kanban-agent execution. Like the analyze flow, the loop forces a tool call on the opening turn (see section 16, `opening_tool_choice`) so the model engages `SubmitComposedCardTool` instead of finishing without a proposal.
 
 ---
 
@@ -393,7 +399,7 @@ The tool is added to the agent's toolkit only during the `compose_card_from_desc
 
 ### Auto-Injection
 
-Injected during the `analyze_card_report` command's tool loop. The analyzer is wired to `WorkflowManagerTool` for evidence retrieval and `SubmitAnalysisTool` for the verdict; standard skills/tools are not in scope. The loop runs with a forced tool call on the opening turn (see section 13, `opening_tool_choice`), so a model that would otherwise reply in prose is compelled to submit a verdict rather than leaving the capture slot empty.
+Injected during the `analyze_card_report` command's tool loop. The analyzer is wired to `WorkflowManagerTool` for evidence retrieval and `SubmitAnalysisTool` for the verdict; standard skills/tools are not in scope. The loop runs with a forced tool call on the opening turn (see section 16, `opening_tool_choice`), so a model that would otherwise reply in prose is compelled to submit a verdict rather than leaving the capture slot empty.
 
 ### `auto_analyze_reports`
 
@@ -401,7 +407,48 @@ When the target agent on a card has `auto_analyze_reports: true`, the `workflow_
 
 ---
 
-## 13. Tool Execution (LLMAgent)
+## 13. RerunWorkerTool (private, card review chat only)
+
+**Purpose**: Re-run the worker workflow behind the current Kanban card with an extra instruction, so the worker regenerates or enriches its report before the supervisor validates the card.
+
+### Operation
+
+- `rerun` -- Input: `instruction` (non-empty). Replays the worker workflow's conversation history plus the instruction and runs the worker agent **detached** (`agent_context: None`), then returns a truncated excerpt of the refreshed report.
+
+### Self-Gating
+
+The tool carries no card id. It resolves its target via the back-reference `kanban_card.review_chat_workflow_id = <chat workflow id captured at construction>` (shared helper `resolve_card_id_by_review_chat`); outside a card review chat the lookup fails with "only usable inside a card review chat". The worker is `card.workflow_id`, the worker agent `card.target_agent_id`.
+
+### AppState resolution & self-persistence
+
+Re-running a full worker needs the provider manager, tool factory and MCP manager, which a plain tool (db-only) lacks. The tool captures the `AppHandle` at construction (mirrors TodoTool / SpawnAgentTool) and resolves `app_handle.state::<AppState>()` at execution. Because the normal streaming flow persists worker messages from the frontend, this detached path persists them itself: the instruction as a `user` message, the produced report as an `assistant` message (so `load_workflow_report` returns the refreshed report), plus the tool executions.
+
+---
+
+## 14. MoveCardTool (private, card review chat only)
+
+**Purpose**: Move the current card to a new column once the supervisor has reached a decision.
+
+### Operations
+
+- `validate` -- transitions the card to `done`.
+- `send_back` -- re-queues the card to `todo` (status reset to `ready`); the scheduler re-promotes it to `doing` automatically for a fresh run. `doing` is never a manual target.
+
+Wraps `move_kanban_card_core`. `is_transition_allowed` permits: `Review→Done` (validate), `Review→Todo` (re-queue), `Done→Todo` (re-queue a validated card). `Review→Doing` is not a valid transition. Self-gates via `resolve_card_id_by_review_chat` like RerunWorkerTool.
+
+---
+
+## 15. ScheduleCardTool (private, card review chat only)
+
+**Purpose**: Attach a weekly recurrence to the current card, turning it into a recurring template (the scheduler regenerates it on the chosen days).
+
+### Operation
+
+- `schedule` -- Input: `days` (non-empty list of weekdays) plus the recurrence parameters. Validates `days` is non-empty and calls `create_kanban_schedule_core` targeting the current card. Self-gates via `resolve_card_id_by_review_chat`.
+
+---
+
+## 16. Tool Execution (LLMAgent)
 
 **Purpose**: Autonomous tool execution loop for agents.
 

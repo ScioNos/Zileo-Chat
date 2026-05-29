@@ -347,7 +347,7 @@ Kanban card CRUD and column transitions.
 | `get_kanban_card` | Get a single card by id (full state including the linked `workflow_id` if execution started). |
 | `list_kanban_cards` | List all cards ordered by `column` then `column_order`. |
 | `update_kanban_card` | Partial update of a card. Status / column transitions go through the dedicated `move_kanban_card`. |
-| `delete_kanban_card` | Delete a card (cascade-removes linked `kanban_card_interaction` rows; the underlying `workflow` row is preserved). Force-delete is allowed even when the card is in `doing` (covers crashed workflows that never emitted `workflow_complete`). |
+| `delete_kanban_card` | Params: `card_id`, `also_delete_schedule?: bool` (default `false`). Delete a card: cascade-removes linked `kanban_card_interaction` rows AND the `review_chat_workflow_id` hidden workflow with all its rows (messages, tool executions, thinking steps); the worker `workflow` row is preserved. `also_delete_schedule=true` also deletes the linked `kanban_schedule` row. Force-delete is allowed even when the card is in `doing` (covers crashed workflows that never emitted `workflow_complete`). |
 | `set_kanban_card_workflow_id` | Link the card to an executing workflow. Used by the scheduler when it transitions a card from `ready` to `doing`. |
 | `duplicate_kanban_card_as_template` | Clone a card as a recurrence template (target of `create_kanban_schedule`). |
 | `move_kanban_card` | Move a card to a different column (`todo / doing / review / done`) and a new `column_order` index. |
@@ -380,6 +380,14 @@ Card report analysis.
 |---------|-------------|
 | `analyze_card_report` | Analyze the report of a completed card workflow. Dispatches to the configured Kanban agent with `WorkflowManagerTool` + `SubmitAnalysisTool` auto-injected. Runs the tool loop with a forced tool call on the opening turn until `SubmitAnalysisTool` is called. The verdict is produced in the language stamped on the workflow (`workflow.locale`). The full worker report is fed to the analyzer verbatim (never truncated). Returns the verdict (`approve | reject | needs_improvement`), summary, and optional `suggested_prompt_edit`. Triggered manually from the report viewer ("Re-analyze") or automatically by the `workflow_complete` listener when the target agent has `auto_analyze_reports: true`. A boot-time catch-up pass re-runs the analyzer for cards orphaned in `review` (finished, has a workflow, no analysis yet) by an app closed mid-workflow. |
 
+### Kanban Card Chat (`commands/kanban_card_chat.rs`)
+
+Per-card review chat with the supervisor agent.
+
+| Command | Description |
+|---------|-------------|
+| `open_card_review_chat` | Params: `card_id`, `locale`. Open (or resume) the review chat for a card. On first open, creates a hidden workflow (`workflow.hidden_from_list = true`, filtered out of the `/agent` sidebar), links it to the card via `kanban_card.review_chat_workflow_id`, and seeds it with a structured first assistant message (worker report + last analyze verdict + any `suggested_prompt_edit`, in the requested `locale`). Resume is idempotent — returns the same workflow. Inside this chat the supervisor gains three auto-injected, self-gating tools: `RerunWorkerTool`, `MoveCardTool`, `ScheduleCardTool`. |
+
 ### Kanban Interaction (`commands/kanban_interaction.rs`)
 
 Read-only access to the persisted compose / analyze interactions.
@@ -410,14 +418,6 @@ History of skill edits. Same contract as prompt versions.
 | `restore_skill_version` | Restore a prior version (writes a fresh snapshot first). |
 | `delete_skill_version` | Delete a version snapshot. Refuses the last remaining version. |
 
-### Workflow Slots (`commands/workflow_slots.rs`)
-
-Concurrency-slot introspection used by the Kanban scheduler.
-
-| Command | Description |
-|---------|-------------|
-| `get_workflow_slots_available` | Return the number of free concurrent execution slots given the current validation mode (1 in Manual / Selective, 3 in Auto, minus the count of running workflows). The scheduler consults this before transitioning `ready` cards to `doing`. |
-
 ### Scheduler (`commands/scheduler.rs`)
 
 Background tokio loop driving the Kanban board.
@@ -426,7 +426,7 @@ Background tokio loop driving the Kanban board.
 |---------|-------------|
 | `card_id_for_workflow` | Reverse lookup: given a `workflow_id`, return the linked `kanban_card_id` if any. Used by the `workflow_complete` listener to transition the card from `doing` to `review` and optionally trigger the analyzer. |
 
-The scheduler itself is not a Tauri command — it is a tokio task spawned at app startup that ticks every 60s. Three responsibilities per tick: (1) pull `ready` cards into `doing` through `WorkflowExecutorService` (gated by `get_workflow_slots_available`); (2) evaluate `kanban_schedule` rows whose `next_run_at <= now()` and `enabled = true`, clone the template card into a fresh `ready` card unless `skip_if_pending` is true and a sibling card is already in flight; (3) purge `done` cards older than 3 days that are NOT the template of any enabled schedule, cascading their `kanban_card_interaction` rows but preserving the underlying `workflow`. Emits `kanban:cards_purged` when purges happen.
+The scheduler itself is not a Tauri command — it is a tokio task spawned at app startup that ticks every 60s. Four responsibilities per tick: (1) reclaim orphaned `doing` cards (no `workflow_id` past a grace window) back to `ready` / `todo` so lost concurrency slots are freed (`reclaim_orphaned_doing_cards_core`); (2) pull `ready` cards into `doing` through `WorkflowExecutorService`, gated by `select_cards_to_promote_core` which uses an atomic `WHERE status = 'ready'` flip to prevent double-promotion; (3) evaluate `kanban_schedule` rows whose `next_run_at <= now()` and `enabled = true`, clone the template card into a fresh `ready` card unless `skip_if_pending` is true and a sibling card is already in flight; (4) purge `done` cards older than 3 days that are NOT the template of any enabled schedule, cascading their `kanban_card_interaction` rows but preserving the underlying `workflow`. Emits `kanban:cards_purged` when purges happen.
 
 ### Speech-to-Text (`commands/stt.rs` + `commands/settings_stt.rs`)
 

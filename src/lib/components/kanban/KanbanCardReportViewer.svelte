@@ -7,10 +7,11 @@
   Actions: validate (todo→done), improve prompt, delete.
 -->
 <script lang="ts">
-	import { i18n } from '$lib/i18n';
+	import { i18n, languageTag } from '$lib/i18n';
 	import { Modal, Button, Badge } from '$lib/components/ui';
 	import MarkdownRenderer from '$lib/components/ui/MarkdownRenderer.svelte';
 	import ToolCallBlock from '$lib/components/chat/ToolCallBlock.svelte';
+	import ChatContainer from '$lib/components/agent/ChatContainer.svelte';
 	import {
 		CheckCircle2,
 		Wand2,
@@ -20,11 +21,26 @@
 		RefreshCw
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
-	import type { KanbanCard } from '$types/kanban';
+	import { invoke } from '@tauri-apps/api/core';
+	import type { KanbanCard, CardReviewChatInit } from '$types/kanban';
 	import type { AgentSummary } from '$types/agent';
 	import type { PromptSummary } from '$types/prompt';
+	import type { Message, MessageAttachment } from '$types/message';
+	import type { ChatBlock } from '$types/chat-block';
 	import type { KanbanCardInteraction, InteractionIteration } from '$types/kanban_interaction';
 	import { loadCardInteractions } from '$lib/services/kanban_interaction.service';
+	import { WorkflowExecutorService } from '$lib/services/workflowExecutor.service';
+	import { BlockService } from '$lib/services/block.service';
+	import { backgroundWorkflowsStore } from '$lib/stores/background-workflows';
+	import {
+		executionBlocks,
+		isExecuting as executionIsExecuting,
+		spinnerContext as executionSpinnerContext,
+		executionTasks,
+		executionWorkflowId,
+		executionBlocksStore
+	} from '$lib/stores/execution-blocks';
+	import { SvelteMap } from 'svelte/reactivity';
 	import { getErrorMessage } from '$lib/utils/error';
 
 	interface Props {
@@ -37,6 +53,11 @@
 		onimprove?: (card: KanbanCard) => void;
 		ondelete?: (card: KanbanCard) => void;
 		onreanalyze?: (card: KanbanCard) => Promise<void>;
+		/**
+		 * Fired after a card-chat turn that may have mutated the board (worker
+		 * re-run, move, schedule). The parent refreshes the board + this card.
+		 */
+		onboardchanged?: () => void;
 	}
 
 	let {
@@ -48,7 +69,8 @@
 		onvalidate,
 		onimprove,
 		ondelete,
-		onreanalyze
+		onreanalyze,
+		onboardchanged
 	}: Props = $props();
 
 	/**
@@ -149,9 +171,205 @@
 	function isReasoningOpen(interactionId: string, iter: InteractionIteration): boolean {
 		return expandedReasoning[`${interactionId}:${iter.iteration_index}`] === true;
 	}
+
+	// ---------------------------------------------------------------------------
+	// Confined per-card review chat (review column only)
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * Chat is offered for cards in review (remediation) and done (follow-up),
+	 * AND for any card that already has a review chat — so a `send_back`
+	 * re-queue (which moves the card to todo, then the scheduler to doing) never
+	 * makes the conversation disappear. The backend (`open_card_review_chat`)
+	 * resumes the same hidden workflow regardless of the current column, so once
+	 * a chat exists it stays reachable whatever the column.
+	 */
+	const chatEnabled = $derived(
+		card?.column === 'review' || card?.column === 'done' || !!card?.review_chat_workflow_id
+	);
+
+	let chatWorkflowId = $state<string | null>(null);
+	let chatMessages = $state<Message[]>([]);
+	/** Persisted execution blocks per message (message_id -> blocks). */
+	const chatMessageBlocks = new SvelteMap<string, ChatBlock[]>();
+	let chatInitLoading = $state(false);
+	let chatError = $state<string | null>(null);
+	/** Card id whose chat we've already initialized this open session. */
+	let chatLoadedCardId = $state<string | null>(null);
+
+	/**
+	 * True while the shared execution timeline belongs to THIS chat workflow.
+	 * Gates the live blocks/spinner so a background run of another workflow
+	 * never bleeds into the card modal.
+	 */
+	const chatLive = $derived(chatWorkflowId !== null && $executionWorkflowId === chatWorkflowId);
+	const chatExecuting = $derived(chatLive && $executionIsExecuting);
+
+	/**
+	 * Tracks the chatExecuting edge so a turn that finishes while the modal is
+	 * open (typically one resumed after reopening mid-run) triggers a reload of
+	 * the authoritative conversation. Plain (non-reactive) bookkeeping.
+	 */
+	let chatWasExecuting = false;
+	/** Set while a locally-initiated turn is awaited so the completion effect
+	 * doesn't double-reload (sendChatTurn already reloads on resolve). */
+	let localTurnInFlight = false;
+
+	$effect(() => {
+		// Initialize (seed or resume) when the modal opens on a review/done card.
+		if (open && card && chatEnabled && card.id !== chatLoadedCardId) {
+			chatLoadedCardId = card.id;
+			void initChat(card.id);
+		}
+		if (!open) {
+			// Stop viewing this workflow so its chunks no longer route to the
+			// shared execution store — but never cancel: a supervisor turn keeps
+			// running detached and is picked back up on the next open.
+			if (chatWorkflowId && backgroundWorkflowsStore.getViewedWorkflowId() === chatWorkflowId) {
+				backgroundWorkflowsStore.setViewed(null);
+			}
+			chatLoadedCardId = null;
+			chatWorkflowId = null;
+			chatMessages = [];
+			chatMessageBlocks.clear();
+			chatError = null;
+		}
+	});
+
+	// Reload when a turn completes while the modal stays open. Covers the
+	// "reopened mid-run, then the supervisor finished" case; the local send
+	// path guards itself via localTurnInFlight to avoid a redundant reload.
+	$effect(() => {
+		const executingNow = chatExecuting;
+		const wf = chatWorkflowId;
+		const cid = chatLoadedCardId;
+		if (chatWasExecuting && !executingNow && open && wf && cid && !localTurnInFlight) {
+			void reloadChatConversation(wf, cid);
+		}
+		chatWasExecuting = executingNow;
+	});
+
+	async function initChat(cardId: string): Promise<void> {
+		chatInitLoading = true;
+		chatError = null;
+		try {
+			const init = await invoke<CardReviewChatInit>('open_card_review_chat', {
+				cardId,
+				locale: languageTag()
+			});
+			// Guard against a fast card switch while the await was in flight
+			// (ERR_FRONT_001): only apply if this is still the loaded card.
+			if (chatLoadedCardId !== cardId) return;
+			chatWorkflowId = init.workflow_id;
+			chatMessages = init.messages;
+			// Route this workflow's live chunks to the shared execution store so
+			// the modal can stream the supervisor's tool calls in real time.
+			backgroundWorkflowsStore.setViewed(init.workflow_id);
+			// Replay persisted blocks (tool calls + reasoning) from prior turns.
+			chatMessageBlocks.clear();
+			const blocks = await BlockService.loadForMessages(init.messages);
+			if (chatLoadedCardId !== cardId) return;
+			for (const [id, b] of blocks) chatMessageBlocks.set(id, b);
+			// If a turn is still running in the background, restore its live
+			// timeline so reopening mid-run shows the in-flight blocks + spinner.
+			const bg = backgroundWorkflowsStore.getExecution(init.workflow_id);
+			if (bg && bg.status === 'running') {
+				executionBlocksStore.restoreFromChunks(init.workflow_id, bg.chunkHistory);
+			}
+		} catch (e) {
+			if (chatLoadedCardId !== cardId) return;
+			chatError = getErrorMessage(e);
+		} finally {
+			if (chatLoadedCardId === cardId) chatInitLoading = false;
+		}
+	}
+
+	/** Pulls the authoritative persisted conversation + blocks, refreshes the
+	 * meta-history and the board (a turn may have re-run the worker, moved the
+	 * card or attached a schedule). */
+	async function reloadChatConversation(wf: string, cardId: string): Promise<void> {
+		try {
+			const reloaded = await invoke<Message[]>('load_workflow_messages', { workflowId: wf });
+			if (chatLoadedCardId !== cardId) return;
+			chatMessages = reloaded;
+			chatMessageBlocks.clear();
+			const blocks = await BlockService.loadForMessages(reloaded);
+			if (chatLoadedCardId !== cardId) return;
+			for (const [id, b] of blocks) chatMessageBlocks.set(id, b);
+			await fetchInteractions(cardId);
+			onboardchanged?.();
+		} catch (e) {
+			if (chatLoadedCardId === cardId) chatError = getErrorMessage(e);
+		}
+	}
+
+	async function sendChatTurn(text: string, attachments?: MessageAttachment[]): Promise<void> {
+		const trimmed = text.trim();
+		const wf = chatWorkflowId;
+		const c = card;
+		const hasAttachments = !!attachments && attachments.length > 0;
+		if ((!trimmed && !hasAttachments) || !wf || !c) return;
+		if (WorkflowExecutorService.isExecuting(wf)) return;
+		const cardId = c.id;
+		chatError = null;
+		localTurnInFlight = true;
+		// Make sure chunks for this turn stream into the modal timeline.
+		backgroundWorkflowsStore.setViewed(wf);
+		try {
+			// Run the supervisor turn through the same orchestration as /agent: it
+			// persists the user + assistant messages and the execution blocks to
+			// the DB regardless of whether the modal stays open, so the turn
+			// survives a close / navigation.
+			const result = await WorkflowExecutorService.execute(
+				{
+					workflowId: wf,
+					message: trimmed,
+					agentId: c.kanban_agent_id,
+					locale: languageTag(),
+					attachments
+				},
+				{
+					onUserMessage: (m) => {
+						if (chatLoadedCardId === cardId) chatMessages = [...chatMessages, m];
+					},
+					onAssistantMessage: (m) => {
+						if (chatLoadedCardId === cardId) chatMessages = [...chatMessages, m];
+					},
+					onError: (m) => {
+						if (chatLoadedCardId === cardId) chatMessages = [...chatMessages, m];
+					}
+				}
+			);
+			if (chatLoadedCardId !== cardId) return;
+			if (!result.success) {
+				chatError = result.error ?? null;
+				return;
+			}
+			// Show the freshly captured blocks immediately, then reconcile with
+			// the authoritative persisted state.
+			if (result.assistantMessageId && result.blocks && result.blocks.length > 0) {
+				chatMessageBlocks.set(result.assistantMessageId, result.blocks);
+			}
+			await reloadChatConversation(wf, cardId);
+		} finally {
+			localTurnInFlight = false;
+		}
+	}
+
+	async function cancelChatTurn(): Promise<void> {
+		const wf = chatWorkflowId;
+		if (!wf) return;
+		try {
+			await invoke('cancel_workflow_streaming', { workflowId: wf });
+		} catch (e) {
+			chatError = getErrorMessage(e);
+		} finally {
+			if (chatLive) executionBlocksStore.cancel();
+		}
+	}
 </script>
 
-<Modal {open} title={card?.title ?? ''} {onclose}>
+<Modal {open} title={card?.title ?? ''} {onclose} fullscreen={chatEnabled}>
 	{#snippet body()}
 		{#if card}
 			<div class="report-section">
@@ -316,6 +534,36 @@
 						</Button>
 					</section>
 				{/if}
+
+				{#if chatEnabled}
+					<section class="chat-section">
+						<h4>{$i18n('kanban_card_chat_title')}</h4>
+						{#if chatInitLoading}
+							<p class="muted">{$i18n('kanban_card_chat_loading')}</p>
+						{:else if chatError}
+							<div class="error-block" role="alert">
+								<p class="multiline">{chatError}</p>
+							</div>
+						{/if}
+						{#if chatWorkflowId}
+							<div class="chat-container-wrap">
+								<ChatContainer
+									messages={chatMessages}
+									messagesLoading={false}
+									messageBlocks={chatMessageBlocks}
+									executionBlocks={chatLive ? $executionBlocks : []}
+									isExecuting={chatExecuting}
+									spinnerContext={chatLive ? $executionSpinnerContext : null}
+									executionTasks={chatLive ? $executionTasks : []}
+									primaryAgentId={card?.kanban_agent_id}
+									disabled={chatExecuting}
+									onsend={(text, attachments) => sendChatTurn(text, attachments)}
+									oncancel={cancelChatTurn}
+								/>
+							</div>
+						{/if}
+					</section>
+				{/if}
 			</div>
 		{/if}
 	{/snippet}
@@ -471,6 +719,21 @@
 	}
 	.response-block {
 		margin-top: 0.4rem;
+	}
+	.chat-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		border-top: 1px solid var(--color-border);
+		padding-top: 0.75rem;
+	}
+	.chat-container-wrap {
+		display: flex;
+		flex-direction: column;
+		/* Bounded height so ChatContainer's internal scroll works inside the
+		   full-screen modal body and the conversation gets generous room. */
+		height: 65vh;
+		min-height: 0;
 	}
 	:global(.spin) {
 		animation: kanban-reanalyze-spin 1s linear infinite;
