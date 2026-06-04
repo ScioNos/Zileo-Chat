@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Import Commands (schema v1.1)
+//! Import Commands (schema v1.3)
 //!
 //! Tauri commands for importing configuration entities.
 //!
@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use tauri::State;
 use tracing::instrument;
 
-use super::helpers::{check_name_conflict, ImportTracking};
+use super::helpers::{check_model_conflict, check_name_conflict, ImportTracking};
 use super::import_ops::{
     import_agents, import_custom_providers, import_mcp_servers, import_models, import_prompts,
     import_skills,
@@ -94,7 +94,8 @@ pub async fn validate_import(
     let mut conflicts = Vec::new();
     let mut missing_mcp_env = HashMap::new();
 
-    let agent_summaries = validate_agents(&state.db, &package.agents, &mut conflicts).await;
+    let agent_summaries =
+        validate_agents(&state.db, &package.agents, &mut conflicts, &mut warnings).await;
     let mcp_summaries = validate_mcp_servers(
         &state.db,
         &package.mcp_servers,
@@ -276,11 +277,13 @@ pub async fn execute_import(
     })
 }
 
-/// Builds agent summaries and detects name conflicts.
+/// Builds agent summaries, detects name conflicts, and warns when an imported
+/// agent's MCP tool allowlist will be reset for security.
 async fn validate_agents(
     db: &DBClient,
     agents: &[AgentExportData],
     conflicts: &mut Vec<ImportConflict>,
+    warnings: &mut Vec<ImportWarning>,
 ) -> Vec<AgentExportSummary> {
     let mut summaries = Vec::new();
     for agent in agents {
@@ -295,6 +298,32 @@ async fn validate_agents(
             skills_count: agent.skills.len(),
             folders_count: agent.folders.len(),
         });
+
+        // Fail-closed: an imported MCP tool allowlist is
+        // never hydrated from a third-party file — it is an authorization
+        // boundary, and its `server_id` keys do not survive the round-trip. The
+        // import always resets it to empty; warn the user so they can re-arm it
+        // deliberately after verifying the servers.
+        if !agent.mcp_tool_allowlist.is_empty() {
+            let tool_count: usize = agent
+                .mcp_tool_allowlist
+                .iter()
+                .map(|entry| entry.tools.len())
+                .sum();
+            warnings.push(ImportWarning {
+                warning_type: ImportWarningType::McpAllowlistReset,
+                severity: "high".to_string(),
+                entity: format!("Agent '{}'", agent.name),
+                detail: format!(
+                    "{} pre-authorized MCP tools were reset for security on import",
+                    tool_count
+                ),
+                action:
+                    "Re-arm MCP tools manually in Settings > Agents after verifying the servers"
+                        .to_string(),
+            });
+        }
+
         if let Some(conflict) = check_name_conflict(db, "agent", "agent", &agent.name).await {
             conflicts.push(conflict);
         }
@@ -396,7 +425,12 @@ async fn validate_models(
                 action: "Review model settings after import if behavior differs".to_string(),
             });
         }
-        if let Some(conflict) = check_name_conflict(db, "llm_model", "model", &model.name).await {
+        // Models are unique on (provider, api_name), NOT name. Detect the real
+        // collision so Overwrite targets the right row and the user is warned
+        // even when the imported `name` differs from the existing one.
+        if let Some(conflict) =
+            check_model_conflict(db, &model.provider, &model.api_name, &model.name).await
+        {
             conflicts.push(conflict);
         }
     }
@@ -503,7 +537,7 @@ async fn validate_cross_dependencies(
             && !name_exists_in_db(db, "llm_model", &agent.llm.model).await
         {
             warnings.push(ImportWarning {
-                warning_type: ImportWarningType::MissingDependency,
+                warning_type: ImportWarningType::MissingModel,
                 severity: "high".to_string(),
                 entity: entity.clone(),
                 detail: format!(
@@ -521,7 +555,7 @@ async fn validate_cross_dependencies(
                 && !name_exists_in_db(db, "mcp_server", mcp).await
             {
                 warnings.push(ImportWarning {
-                    warning_type: ImportWarningType::MissingDependency,
+                    warning_type: ImportWarningType::MissingMcpServer,
                     severity: "medium".to_string(),
                     entity: entity.clone(),
                     detail: format!("MCP server '{}' not found", mcp),
@@ -538,7 +572,7 @@ async fn validate_cross_dependencies(
                 && !name_exists_in_db(db, "skill", skill).await
             {
                 warnings.push(ImportWarning {
-                    warning_type: ImportWarningType::MissingDependency,
+                    warning_type: ImportWarningType::MissingSkill,
                     severity: "medium".to_string(),
                     entity: entity.clone(),
                     detail: format!("skill '{}' not found", skill),
@@ -555,7 +589,7 @@ async fn validate_cross_dependencies(
                 && !name_exists_in_db(db, "custom_provider", &custom_name).await
             {
                 warnings.push(ImportWarning {
-                    warning_type: ImportWarningType::MissingDependency,
+                    warning_type: ImportWarningType::MissingProvider,
                     severity: "high".to_string(),
                     entity: entity.clone(),
                     detail: format!("custom provider '{}' not found", custom_name),
@@ -588,7 +622,7 @@ async fn validate_cross_dependencies(
                 && !name_exists_in_db(db, "custom_provider", &custom_name).await
             {
                 warnings.push(ImportWarning {
-                    warning_type: ImportWarningType::MissingDependency,
+                    warning_type: ImportWarningType::MissingProvider,
                     severity: "high".to_string(),
                     entity: format!("Model '{}'", model.name),
                     detail: format!("custom provider '{}' not found", custom_name),
@@ -602,7 +636,7 @@ async fn validate_cross_dependencies(
     // Custom providers in package: warn about API keys (never exported)
     if !package.custom_providers.is_empty() {
         warnings.push(ImportWarning {
-            warning_type: ImportWarningType::DefaultApplied,
+            warning_type: ImportWarningType::ApiKeyRequired,
             severity: "medium".to_string(),
             entity: format!("{} custom provider(s)", package.custom_providers.len()),
             detail: "API keys are never exported for security reasons".to_string(),

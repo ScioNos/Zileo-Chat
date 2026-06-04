@@ -36,19 +36,50 @@
 	interface Props {
 		/** Validation request data */
 		request: ValidationRequest | null;
-		/** Open state */
+		/** Open state — driven ONE-WAY by the store; never mutated locally. */
 		open?: boolean;
+		/** True while a decision is in flight to the backend (disables buttons). */
+		processing?: boolean;
+		/** Last validation error to surface in the modal (null when none). */
+		error?: string | null;
+		/** Number of pending validations in the FIFO queue (this one + waiting). */
+		queueCount?: number;
 		/** Approve handler */
 		onapprove?: (request: ValidationRequest) => void;
 		/** Reject handler */
 		onreject?: (request: ValidationRequest, reason?: string) => void;
-		/** Close handler */
-		onclose?: () => void;
 	}
 
-	let { request, open = $bindable(false), onapprove, onreject, onclose }: Props = $props();
+	let {
+		request,
+		open = false,
+		processing = false,
+		error = null,
+		queueCount = 1,
+		onapprove,
+		onreject
+	}: Props = $props();
 
 	let rejectReason = $state('');
+
+	/**
+	 * A `manager_write` request carries a backend-authored authority pair
+	 * (`tool_id` + `operation`) that is shown dominantly, plus an untrusted,
+	 * agent-supplied `agent_preview` shown with a clear "not trustworthy" label.
+	 */
+	let isManagerWrite = $derived(request?.type === 'manager_write');
+
+	function detailString(key: string): string {
+		const v = request?.details?.[key];
+		return typeof v === 'string' ? v : '';
+	}
+
+	// Reset the reject reason whenever a NEW request arrives, so a fresh
+	// validation starts with an empty field (mirrors UserQuestionModal). Never
+	// touches `open`: the modal's visibility is owned solely by the store.
+	$effect(() => {
+		if (request) rejectReason = '';
+	});
 
 	/**
 	 * Map risk level to badge variant
@@ -63,33 +94,24 @@
 		return variants[level];
 	}
 
-	/**
-	 * Handle approval
-	 */
+	// Emit the decision and let the STORE close the modal by clearing `pending`
+	// on success. On an IPC error the store keeps `pending` set (only lastError
+	// is posted), so the modal STAYS open and the user can retry — there is no
+	// local `open = false` that would hide a still-pending validation. This is
+	// what makes the error path fail-closed.
 	function handleApprove(): void {
-		if (request) {
-			onapprove?.(request);
-			handleClose();
-		}
+		if (request) onapprove?.(request);
 	}
 
-	/**
-	 * Handle rejection
-	 */
 	function handleReject(): void {
-		if (request) {
-			onreject?.(request, rejectReason || undefined);
-			handleClose();
-		}
+		if (request) onreject?.(request, rejectReason || undefined);
 	}
 
-	/**
-	 * Handle modal close
-	 */
-	function handleClose(): void {
-		open = false;
-		rejectReason = '';
-		onclose?.();
+	// Required by Modal but never fires: backdrop, Escape and the header close
+	// button are all disabled, so there is no dismiss path. Visibility is
+	// entirely store-driven.
+	function onCloseNoop(): void {
+		/* intentionally empty — the modal is non-dismissable */
 	}
 
 	/**
@@ -100,7 +122,24 @@
 	}
 </script>
 
-<Modal {open} title={$i18n('workflow_validation_title')} onclose={handleClose}>
+<!--
+	Fail-safe: this modal must NOT be dismissable without an explicit decision,
+	AND it must not close on a failed decision. Backdrop, Escape and the header
+	close button are all disabled, and the footer has no Cancel. The modal closes
+	ONLY when the STORE clears the pending entry — i.e. a decision that the
+	backend actually confirmed (success), or a backend resolution (timeout). An
+	IPC error keeps the pending entry set, so the modal stays open and the user
+	can retry. Reject is the explicit "no" (optional reason). Buttons are disabled
+	while a decision is in flight to prevent a double / approve-then-reject.
+-->
+<Modal
+	{open}
+	title={$i18n('workflow_validation_title')}
+	onclose={onCloseNoop}
+	closeOnBackdrop={false}
+	closeOnEscape={false}
+	showCloseButton={false}
+>
 	{#snippet body()}
 		{#if request}
 			<div class="validation-content">
@@ -116,22 +155,51 @@
 					{/if}
 					<div class="validation-info">
 						<span class="validation-type">{request.type.replace('_', ' ')}</span>
-						<Badge variant={getRiskBadgeVariant(request.risk_level)}>
-							{$i18n('workflow_validation_risk').replace('{level}', request.risk_level)}
-						</Badge>
+						<div class="validation-badges">
+							<Badge variant={getRiskBadgeVariant(request.risk_level)}>
+								{$i18n('workflow_validation_risk').replace('{level}', request.risk_level)}
+							</Badge>
+							<Badge variant="primary">{$i18n('workflow_validation_badge_attached')}</Badge>
+							{#if queueCount > 1}
+								<Badge variant="warning">
+									{$i18n('workflow_validation_queue_count').replace('{count}', String(queueCount))}
+								</Badge>
+							{/if}
+						</div>
 					</div>
 				</div>
 
-				<div class="validation-operation">
-					<h4>{$i18n('workflow_validation_operation')}</h4>
-					<p>{request.operation}</p>
-				</div>
-
-				{#if Object.keys(request.details).length > 0}
-					<div class="validation-details">
-						<h4>{$i18n('workflow_validation_details')}</h4>
-						<pre>{formatDetails(request.details)}</pre>
+				{#if isManagerWrite}
+					<!--
+						manager_write: the authority pair (tool + operation) is the
+						BACKEND-decided truth and is shown dominantly; the agent-supplied
+						preview below it is explicitly labeled untrusted.
+					-->
+					<div class="validation-authority">
+						<h4>{$i18n('workflow_validation_authority')}</h4>
+						<p class="authority-line">
+							<span class="authority-tool">{detailString('tool_id')}</span>
+							<span class="authority-op">{detailString('operation')}</span>
+						</p>
 					</div>
+					{#if detailString('agent_preview')}
+						<div class="validation-untrusted">
+							<h4>{$i18n('workflow_validation_untrusted_preview')}</h4>
+							<pre class="untrusted">{detailString('agent_preview')}</pre>
+						</div>
+					{/if}
+				{:else}
+					<div class="validation-operation">
+						<h4>{$i18n('workflow_validation_operation')}</h4>
+						<p>{request.operation}</p>
+					</div>
+
+					{#if Object.keys(request.details).length > 0}
+						<div class="validation-details">
+							<h4>{$i18n('workflow_validation_details')}</h4>
+							<pre>{formatDetails(request.details)}</pre>
+						</div>
+					{/if}
 				{/if}
 
 				<div class="validation-warning">
@@ -156,14 +224,20 @@
 						rows="2"
 					></textarea>
 				</div>
+
+				{#if error}
+					<p class="validation-error" role="alert">{error}</p>
+				{/if}
 			</div>
 		{/if}
 	{/snippet}
 
 	{#snippet footer()}
-		<Button variant="ghost" onclick={handleClose}>{$i18n('common_cancel')}</Button>
-		<Button variant="danger" onclick={handleReject}>{$i18n('workflow_validation_reject')}</Button>
-		<Button variant="primary" onclick={handleApprove}>{$i18n('workflow_validation_approve')}</Button
+		<Button variant="danger" onclick={handleReject} disabled={processing}
+			>{$i18n('workflow_validation_reject')}</Button
+		>
+		<Button variant="primary" onclick={handleApprove} disabled={processing}
+			>{$i18n('workflow_validation_approve')}</Button
 		>
 	{/snippet}
 </Modal>
@@ -212,6 +286,53 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--spacing-xs);
+	}
+
+	.validation-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--spacing-xs);
+		align-items: center;
+	}
+
+	.validation-authority h4,
+	.validation-untrusted h4 {
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		color: var(--color-text-secondary);
+		margin-bottom: var(--spacing-sm);
+	}
+
+	.authority-line {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--spacing-sm);
+		align-items: baseline;
+		margin: 0;
+	}
+
+	.authority-tool {
+		font-weight: var(--font-weight-bold, 700);
+		color: var(--color-text-primary);
+	}
+
+	.authority-op {
+		font-family: var(--font-mono);
+		font-size: var(--font-size-sm);
+		color: var(--color-accent);
+	}
+
+	.validation-untrusted pre.untrusted {
+		font-family: var(--font-mono);
+		font-size: var(--font-size-xs);
+		background: var(--color-bg-tertiary);
+		padding: var(--spacing-md);
+		border-radius: var(--border-radius-md);
+		border-left: 3px solid var(--color-warning);
+		overflow-x: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
+		margin: 0;
 	}
 
 	.validation-type {
@@ -288,5 +409,15 @@
 		outline: none;
 		border-color: var(--color-accent);
 		box-shadow: 0 0 0 3px var(--color-accent-light);
+	}
+
+	.validation-error {
+		margin: 0;
+		padding: var(--spacing-sm);
+		background: var(--color-danger-light);
+		border-left: 3px solid var(--color-danger);
+		border-radius: var(--border-radius-sm);
+		font-size: var(--font-size-sm);
+		color: var(--color-danger);
 	}
 </style>

@@ -93,6 +93,9 @@
   --color-primary-dark: #5ec7c6;
   --color-danger: var(--color-error);
   --color-danger-bg: rgba(239, 68, 68, 0.1);
+  /* Subtle danger surface for emphasis elements (badges, error banners) — a
+     touch stronger than --color-danger-bg so they read as accented, not flat. */
+  --color-danger-light: rgba(239, 68, 68, 0.12);
   --color-info: var(--color-status-running);
   --color-text-on-accent: var(--color-accent-text);
 
@@ -156,6 +159,9 @@
   --z-index-modal-backdrop: 1040;
   --z-index-modal: 1050;
   --z-index-popover: 1060;
+  /* A modal opened from within a popover-level modal (e.g. the delete
+     confirmation rendered inside VersionsHistoryModal) must stack above it. */
+  --z-index-modal-nested: 1065;
   --z-index-tooltip: 1070;
 
   /* Layout */
@@ -198,6 +204,9 @@
   --color-warning: #fbbf24;
   --color-warning-bg: rgba(234, 179, 8, 0.15);
   --color-danger-bg: rgba(239, 68, 68, 0.15);
+  /* Subtle danger surface for emphasis elements (badges, error banners) — a
+     touch stronger than --color-danger-bg so they read as accented, not flat. */
+  --color-danger-light: rgba(239, 68, 68, 0.18);
 }
 
 body {
@@ -417,6 +426,34 @@ body {
 }
 
 .btn-secondary:hover:not(:disabled) {
+  background: var(--color-secondary-hover);
+  border-color: var(--color-secondary-hover);
+}
+
+/* Navigation buttons reuse EXISTING palette tokens (no new colors): the Kanban
+   task board reads blue (the project's blue is --color-accent-hover, dark text
+   like .btn-primary) and the Agent workspace reuses the secondary (orange)
+   accent. The blue hover darkens via brightness so no extra hover token is
+   invented; orange uses its existing hover token. */
+.btn-nav-kanban {
+  background: var(--color-accent-hover);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent-hover);
+  font-weight: var(--font-weight-semibold);
+}
+
+.btn-nav-kanban:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.btn-nav-agent {
+  background: var(--color-secondary);
+  color: var(--color-text-inverse);
+  border-color: var(--color-secondary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.btn-nav-agent:hover:not(:disabled) {
   background: var(--color-secondary-hover);
   border-color: var(--color-secondary-hover);
 }
@@ -766,6 +803,13 @@ body {
   align-items: center;
   justify-content: center;
   padding: var(--spacing-xl);
+}
+
+/* Elevated backdrop for a modal nested inside another popover-level modal
+   (see the Modal `elevated` prop). Keeps the nested dialog — e.g. a delete
+   confirmation opened from VersionsHistoryModal — above its parent. */
+.modal-backdrop-elevated {
+  z-index: var(--z-index-modal-nested);
 }
 
 .modal {

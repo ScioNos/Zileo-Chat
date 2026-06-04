@@ -5,13 +5,14 @@
 -->
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { get } from 'svelte/store';
 	import { i18n } from '$lib/i18n';
 	import { tauriListen, tauriInvoke as invoke, type TauriUnlistenFn } from '$lib/tauri';
 	import { getErrorMessage } from '$lib/utils/error';
 	import { locale } from '$lib/stores/locale';
-	import { Badge, Button, DeleteConfirmModal } from '$lib/components/ui';
-	import { Plus, Activity } from '@lucide/svelte';
+	import { Badge, Button, DeleteConfirmModal, Spinner } from '$lib/components/ui';
+	import { Activity, Check, X, Pencil } from '@lucide/svelte';
 
 	import { kanbanStore, kanbanCardsByColumn, kanbanCards } from '$lib/stores/kanban';
 	import {
@@ -21,7 +22,9 @@
 		pendingVerdict,
 		pendingNeedsImprovement
 	} from '$lib/stores/kanban-events';
+	import { composingEntries, composingCount, proposedDirtySeq } from '$lib/stores/kanban-compose';
 	import { runningWorkflows, backgroundWorkflowsStore } from '$lib/stores/background-workflows';
+	import { maxConcurrentWorkflows } from '$lib/stores/kanban-runtime';
 	import { executionBlocksStore } from '$lib/stores/execution-blocks';
 	import { userQuestionStore } from '$lib/stores/user-question';
 	import { kanbanScheduleStore, kanbanSchedules } from '$lib/stores/kanban-schedule';
@@ -32,22 +35,15 @@
 
 	import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
 	import KanbanCardItem from '$lib/components/kanban/KanbanCardItem.svelte';
-	import KanbanCardCreator from '$lib/components/kanban/KanbanCardCreator.svelte';
 	import KanbanCardReportViewer from '$lib/components/kanban/KanbanCardReportViewer.svelte';
 	import KanbanFiltres from '$lib/components/kanban/KanbanFiltres.svelte';
 	import KanbanImprovePromptModal from '$lib/components/kanban/KanbanImprovePromptModal.svelte';
 	import KanbanScheduleModal from '$lib/components/kanban/KanbanScheduleModal.svelte';
 	import KanbanCardEditModal from '$lib/components/kanban/KanbanCardEditModal.svelte';
 
-	import type {
-		KanbanCard,
-		KanbanCardCreate,
-		KanbanColumn,
-		KanbanScheduleCreate
-	} from '$types/kanban';
+	import type { KanbanCard, KanbanColumn } from '$types/kanban';
 	import { WorkflowExecutorService } from '$lib/services/workflowExecutor.service';
 
-	let creatorOpen = $state(false);
 	let viewerOpen = $state(false);
 	let viewerCard = $state<KanbanCard | null>(null);
 	let improveOpen = $state(false);
@@ -296,8 +292,49 @@
 		return result;
 	});
 
+	/**
+	 * Generated cards awaiting human validation. Excluded from the board
+	 * (kanbanCardsByColumn skips `proposed`) but kept in the raw `$kanbanCards`
+	 * list, which this derives from — they surface only in the validation zone.
+	 */
+	const proposedCards = $derived($kanbanCards.filter((c) => c.status === 'proposed'));
+
+	/** True when there is anything to show in the validation zone. */
+	const hasComposeActivity = $derived(proposedCards.length > 0 || $composingCount > 0);
+
+	// Reload the board (and thus `proposedCards`) whenever a compose finishes —
+	// the root composingStore bumps `proposedDirtySeq` on each `compose_ready`,
+	// so a generation that completes while the user is on /kanban still surfaces
+	// its proposed card without a manual refresh.
+	$effect(() => {
+		void $proposedDirtySeq;
+		void kanbanStore.loadCards(agentFilter || undefined);
+	});
+
 	function agentName(id: string): string {
 		return $agentsStore.find((a) => a.id === id)?.name ?? '';
+	}
+
+	/** Validate a generated card → status='ready' so the scheduler runs it. */
+	async function approveProposedCard(card: KanbanCard): Promise<void> {
+		pageError = null;
+		try {
+			await invoke('approve_proposed_card', { cardId: card.id });
+			await kanbanStore.loadCards(agentFilter || undefined);
+		} catch (e) {
+			pageError = getErrorMessage(e);
+		}
+	}
+
+	/** Reject a generated card → delete it outright. */
+	async function rejectProposedCard(card: KanbanCard): Promise<void> {
+		pageError = null;
+		try {
+			await kanbanStore.deleteCard(card.id);
+			await kanbanStore.loadCards(agentFilter || undefined);
+		} catch (e) {
+			pageError = getErrorMessage(e);
+		}
 	}
 
 	function cardHasSchedule(cardId: string): boolean {
@@ -305,40 +342,28 @@
 	}
 
 	/**
-	 * Live slot accounting for the header indicator. Mirrors the backend
-	 * scheduler logic (`DEFAULT_MAX_CONCURRENT_WORKFLOWS = 3`).
+	 * Live slot accounting for the header indicator. The capacity is the backend
+	 * worker-promotion budget (`DEFAULT_MAX_CONCURRENT_WORKFLOWS`), loaded once at
+	 * boot via `get_max_concurrent_workflows` (root layout) — never a recopied
+	 * literal. `null` until that one-shot load resolves; the badge shows a
+	 * placeholder and `slotVariant` cannot be `error` until the cap is known.
 	 */
-	const SLOT_CAPACITY = 3;
+	const slotCapacity = $derived($maxConcurrentWorkflows);
 	const slotsUsed = $derived($kanbanCards.filter((c) => c.column === 'doing').length);
 	const queuedReady = $derived(
 		$kanbanCards.filter((c) => c.column === 'todo' && c.status === 'ready').length
 	);
 	const slotVariant = $derived(
-		slotsUsed >= SLOT_CAPACITY ? 'error' : slotsUsed > 0 ? 'warning' : 'success'
+		slotCapacity !== null && slotsUsed >= slotCapacity
+			? 'error'
+			: slotsUsed > 0
+				? 'warning'
+				: 'success'
 	);
 
 	function handleFilterChange(filters: { agentId: string; folderId: string }): void {
 		agentFilter = filters.agentId;
 		folderFilter = filters.folderId;
-	}
-
-	async function createCard(
-		payload: KanbanCardCreate,
-		schedule?: Omit<KanbanScheduleCreate, 'card_template_id'>
-	): Promise<void> {
-		const created = await kanbanStore.createCard(payload);
-		if (schedule) {
-			const cardTemplateId = typeof created === 'string' ? created : '';
-			if (cardTemplateId) {
-				await kanbanScheduleStore.createSchedule({
-					card_template_id: cardTemplateId,
-					days_of_week: schedule.days_of_week,
-					hour: schedule.hour,
-					minute: schedule.minute
-				});
-			}
-		}
-		await kanbanStore.loadCards(agentFilter || undefined);
 	}
 
 	/**
@@ -554,14 +579,37 @@
 		}
 	}
 
+	/** Cards whose worker launch is in flight — per-card reentrancy guard. */
+	const launchingCardIds = new SvelteSet<string>();
+
+	/**
+	 * Reentrancy-guarded entry point for launching a card's worker. Two triggers
+	 * can fire for the same card in quick succession — the mount reconciliation
+	 * (`reconcileOrphanedDoingCards`) and a `kanban:card_ready` event — and there
+	 * are several awaits inside `launchCardWorkflow` between the `!workflow_id`
+	 * re-check and the `set_kanban_card_workflow_id` that closes the window. Both
+	 * could otherwise pass the check and start two workflows for one card. Keyed
+	 * by cardId: WorkflowExecutorService's own double-submit guard is keyed by the
+	 * per-call workflowId (fresh each launch), so it cannot catch this.
+	 */
+	async function runCardWorkflow(cardId: string): Promise<void> {
+		if (launchingCardIds.has(cardId)) return;
+		launchingCardIds.add(cardId);
+		try {
+			await launchCardWorkflow(cardId);
+		} finally {
+			launchingCardIds.delete(cardId);
+		}
+	}
+
 	/**
 	 * When a card is promoted to "doing" by the scheduler, the page is
 	 * responsible for kicking off the workflow execution: create a workflow,
 	 * invoke execute_workflow_streaming with the resolved prompt + variables,
 	 * then update the card with the workflow_id so the report viewer can link
-	 * back to it.
+	 * back to it. Always reached through `runCardWorkflow` (reentrancy guard).
 	 */
-	async function runCardWorkflow(cardId: string): Promise<void> {
+	async function launchCardWorkflow(cardId: string): Promise<void> {
 		// Refresh first to get the new column/status from the scheduler.
 		await kanbanStore.loadCards(agentFilter || undefined);
 		const card = await kanbanStore.getCard(cardId);
@@ -633,12 +681,21 @@
 			// the workflow viewer reloaded blocks. The service also registers
 			// the workflow in the background store so navigating away no longer
 			// loses streaming state.
-			const result = await WorkflowExecutorService.execute({
-				workflowId,
-				message,
-				agentId: card.target_agent_id,
-				locale: $locale
-			});
+			//
+			// bypassConcurrencyGate: the backend already authorized this run by
+			// promoting the card (DEFAULT_MAX_CONCURRENT_WORKFLOWS is the sole
+			// authority). Re-applying the interactive /agent gate would refuse a
+			// legitimately promoted card, stranding it as a `doing` zombie.
+			const result = await WorkflowExecutorService.execute(
+				{
+					workflowId,
+					message,
+					agentId: card.target_agent_id,
+					locale: $locale
+				},
+				undefined,
+				{ bypassConcurrencyGate: true }
+			);
 			if (!result.success && result.error) {
 				pageError = result.error;
 			}
@@ -661,7 +718,10 @@
 			<div class="slot-indicators" aria-live="polite">
 				<Badge variant={slotVariant}>
 					<Activity size={11} aria-hidden="true" />
-					{$i18n('kanban_slot_active', { used: String(slotsUsed), max: String(SLOT_CAPACITY) })}
+					{$i18n('kanban_slot_active', {
+						used: String(slotsUsed),
+						max: slotCapacity !== null ? String(slotCapacity) : '—'
+					})}
 				</Badge>
 				{#if queuedReady > 0}
 					<Badge variant="primary">
@@ -669,10 +729,6 @@
 					</Badge>
 				{/if}
 			</div>
-			<Button variant="primary" onclick={() => (creatorOpen = true)}>
-				<Plus size={16} />
-				{$i18n('kanban_new_card')}
-			</Button>
 		</div>
 	</header>
 
@@ -687,6 +743,57 @@
 		selectedFolderId={folderFilter}
 		onchange={handleFilterChange}
 	/>
+
+	{#if hasComposeActivity}
+		<section class="proposed-zone" aria-labelledby="proposed-zone-title">
+			<h2 id="proposed-zone-title" class="proposed-zone-title">
+				{$i18n('kanban_proposed_zone_title')}
+			</h2>
+
+			{#each $composingEntries as entry (entry.cardId)}
+				<article class="composing-row" aria-live="polite">
+					<Spinner size="sm" />
+					<span class="composing-text">
+						{$i18n('kanban_composing_count', { count: String($composingCount) })}
+						{#if entry.titleHint}
+							— {entry.titleHint}
+						{/if}
+					</span>
+				</article>
+			{/each}
+
+			{#each proposedCards as card (card.id)}
+				<article class="proposed-card">
+					<div class="proposed-card-main">
+						<div class="proposed-card-head">
+							<h3 class="proposed-card-title">{card.title}</h3>
+							<Badge variant="warning">{$i18n('kanban_proposed_badge')}</Badge>
+						</div>
+						{#if agentName(card.target_agent_id)}
+							<p class="proposed-card-meta">{agentName(card.target_agent_id)}</p>
+						{/if}
+						{#if card.description}
+							<p class="proposed-card-desc">{card.description}</p>
+						{/if}
+					</div>
+					<div class="proposed-card-actions">
+						<Button variant="primary" size="sm" onclick={() => approveProposedCard(card)}>
+							<Check size={14} />
+							{$i18n('kanban_proposed_validate')}
+						</Button>
+						<Button variant="secondary" size="sm" onclick={() => openEdit(card)}>
+							<Pencil size={14} />
+							{$i18n('kanban_proposed_review')}
+						</Button>
+						<Button variant="ghost" size="sm" onclick={() => rejectProposedCard(card)}>
+							<X size={14} />
+							{$i18n('kanban_proposed_reject')}
+						</Button>
+					</div>
+				</article>
+			{/each}
+		</section>
+	{/if}
 
 	<KanbanBoard cardsByColumn={filteredByColumn}>
 		{#snippet card(c)}
@@ -706,16 +813,6 @@
 		{/snippet}
 	</KanbanBoard>
 </section>
-
-<KanbanCardCreator
-	open={creatorOpen}
-	agents={$agentsStore}
-	prompts={$promptsStore}
-	folders={$foldersStore}
-	defaultKanbanAgentId={agentFilter}
-	onclose={() => (creatorOpen = false)}
-	oncreated={createCard}
-/>
 
 <KanbanScheduleModal
 	open={scheduleModalOpen}
@@ -837,5 +934,79 @@
 	.page-error {
 		color: var(--color-error);
 		margin: 0;
+	}
+	.proposed-zone {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.75rem;
+		/* Blue like the "Tableau de tâches" button (project blue), dark text —
+		   reuses the existing accent tokens. */
+		border: 1px solid var(--color-accent-hover);
+		border-radius: 8px;
+		background: var(--color-accent-hover);
+		color: var(--color-accent-text);
+	}
+	.proposed-zone-title {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: var(--color-accent-text);
+	}
+	.composing-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.82rem;
+		font-style: italic;
+		color: var(--color-accent-text);
+	}
+	.proposed-card {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.6rem 0.7rem;
+		background: var(--color-bg-primary);
+		color: var(--color-text-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+	}
+	.proposed-card-main {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		min-width: 0;
+	}
+	.proposed-card-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+	.proposed-card-title {
+		margin: 0;
+		font-size: 0.9rem;
+		font-weight: 600;
+	}
+	.proposed-card-meta {
+		margin: 0;
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+	}
+	.proposed-card-desc {
+		margin: 0;
+		font-size: 0.82rem;
+		color: var(--color-text);
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.proposed-card-actions {
+		display: flex;
+		gap: 0.4rem;
+		flex-shrink: 0;
 	}
 </style>

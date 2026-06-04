@@ -49,29 +49,25 @@
 //! - [`client`]: High-level MCP client interface
 //! - [`manager`]: MCPManager for server registry and coordination
 
-// circuit_breaker + client expose test-only accessor methods (state(),
-// failure_count(), reset(), is_connected()) that observe real production
-// state mutations done by record_success/record_failure. Not reachable from
-// the binary target, hence the module-level allow.
-#[allow(dead_code)]
 pub mod circuit_breaker;
-#[allow(dead_code)]
 pub mod client;
+pub mod docker_guard;
 pub mod error;
 pub mod helpers;
 pub mod http_auth;
 pub mod http_handle;
 pub mod manager;
+pub mod network_settings;
 pub mod protocol;
 pub mod redact;
 pub mod secrets;
 pub mod server_handle;
+pub mod ssrf;
 
 // Re-export commonly used types
 pub use error::{MCPError, MCPResult};
 pub use manager::MCPManager;
-#[allow(unused_imports)]
 pub use protocol::{
-    JsonRpcRequest, JsonRpcResponse, MCPContent, MCPInitializeParams, MCPInitializeResult,
+    JsonRpcRequest, JsonRpcResponse, MCPInitializeParams, MCPInitializeResult,
     MCPResourcesListResult, MCPToolCallParams, MCPToolCallResponse, MCPToolsListResult,
 };

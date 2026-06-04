@@ -403,6 +403,7 @@ async fn test_create_and_wait_applies_user_timeout_seconds() {
             "user-timeout test",
             serde_json::json!({}),
             RiskLevel::Low,
+            false, // attended run
         )
         .await;
     let elapsed = started.elapsed();
@@ -427,6 +428,44 @@ async fn test_falls_back_to_default_when_settings_unavailable() {
     assert_eq!(loaded.timeout_behavior, TimeoutBehavior::Reject);
     // Sanity: clamp(60) is identity.
     assert_eq!(clamp_timeout_seconds(loaded.timeout_seconds), 60);
+}
+
+/// A validation-required operation in a DETACHED run must be refused
+/// IMMEDIATELY (no modal, no poll, no row), within milliseconds — the boot
+/// catch-up loop must never block. A `validation_request` row is NOT created.
+#[tokio::test]
+async fn test_create_and_wait_short_circuits_when_detached() {
+    let (helper, _tmp) = make_test_helper().await;
+
+    let id = "vh-detached-short-circuit";
+    let started = std::time::Instant::now();
+    let res = helper
+        .create_and_wait_validation(
+            id,
+            "wf-detached",
+            ValidationType::ManagerWrite,
+            "detached write that would need validation",
+            serde_json::json!({"tool_id": "PromptManagerTool", "operation": "update_prompt"}),
+            RiskLevel::High,
+            true, // detached: no human in the loop
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(res, Err(ToolError::PermissionDenied(_))),
+        "a detached validation-required op must be refused, got {res:?}"
+    );
+    // Must NOT block on the poll/timeout — refusal is immediate.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "detached refusal must be immediate (no poll), took {elapsed:?}"
+    );
+    // No validation_request row is created in the detached path.
+    assert!(
+        read_validation_status(&helper.db, id).await.is_none(),
+        "detached court-circuit must NOT create a validation_request row"
+    );
 }
 
 #[test]
@@ -576,4 +615,373 @@ fn test_file_op_details() {
     assert_eq!(details["operation"], "move");
     assert_eq!(details["path"], "/home/user/file.txt");
     assert_eq!(details["details"]["destination"], "/tmp/backup");
+}
+
+// =====================================================
+// Security-policy refusal audit
+// =====================================================
+
+/// Reads the raw audit rows (selected fields) for assertions.
+async fn read_audit_rows(db: &crate::db::DBClient) -> Vec<serde_json::Value> {
+    db.query_json(
+        "SELECT decision, decided_by, risk_level, tool_name, workflow_id, metadata \
+         FROM validation_audit",
+    )
+    .await
+    .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn record_security_refusal_persists_blocked_policy_entry() {
+    let (helper, _tmp) = make_test_helper().await;
+    helper
+        .record_security_refusal(
+            "mcp__files__delete",
+            Some("files-srv"),
+            "not armed for this agent in a detached run",
+            false,
+            "wf-detached-1",
+        )
+        .await;
+
+    let rows = read_audit_rows(&helper.db).await;
+    assert_eq!(rows.len(), 1, "one refusal must persist one audit row");
+    let r = &rows[0];
+    assert_eq!(r["decision"], "blocked");
+    assert_eq!(r["decided_by"], "policy");
+    assert_eq!(r["risk_level"], "high");
+    assert_eq!(r["tool_name"], "mcp__files__delete");
+    assert_eq!(r["workflow_id"], "wf-detached-1");
+}
+
+#[tokio::test]
+async fn record_security_refusal_writes_even_when_audit_logging_disabled() {
+    let (helper, _tmp) = make_test_helper().await;
+    // Seed validation settings with audit logging OFF. A security refusal must
+    // be traceable UNCONDITIONALLY: if record_security_refusal honored
+    // enable_logging, an attacker-relevant refusal would be silently dropped.
+    let disabled = crate::models::ValidationSettings {
+        audit: crate::models::AuditConfig {
+            enable_logging: false,
+            retention_days: 30,
+        },
+        ..Default::default()
+    };
+    let config = serde_json::to_string(&disabled).expect("serialize settings");
+    let seed = format!(
+        "UPSERT settings:`settings:validation` CONTENT {{ id: 'settings:validation', config: {} }}",
+        config
+    );
+    helper
+        .db
+        .execute(&seed)
+        .await
+        .expect("seed disabled settings");
+    // Sanity: the helper would indeed read logging as disabled.
+    assert!(!helper.load_validation_settings().await.audit.enable_logging);
+
+    helper
+        .record_security_refusal("mcp__x__y", Some("x"), "unarmed", true, "wf-2")
+        .await;
+
+    let rows = read_audit_rows(&helper.db).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "refusal must be logged even when audit logging is disabled (unconditional)"
+    );
+}
+
+#[tokio::test]
+async fn record_security_refusal_dedups_identical_refusals_within_a_run() {
+    let (helper, _tmp) = make_test_helper().await;
+    // Anti-flood (critique): at most ONE audit row per (server_id, tool_name)
+    // per run. A detached run that hammers the same blocked tool across many
+    // iterations must not inflate the audit table — the first refusal of a
+    // distinct (server, tool) is recorded, identical ones are skipped.
+    for _ in 0..5 {
+        helper
+            .record_security_refusal("mcp__a__b", Some("a"), "unarmed", false, "wf-3")
+            .await;
+    }
+
+    let rows = read_audit_rows(&helper.db).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "identical (server, tool) refusals in the same run collapse to one row"
+    );
+}
+
+#[tokio::test]
+async fn record_security_refusal_audits_distinct_tools_separately() {
+    let (helper, _tmp) = make_test_helper().await;
+    // Distinct (server, tool) pairs each keep their own security signal. Writing
+    // two rows also proves the fresh per-refusal uuid avoids the UNIQUE
+    // collision on validation_id (a constant id would fail the second CREATE).
+    helper
+        .record_security_refusal("mcp__a__b", Some("a"), "unarmed", false, "wf-3")
+        .await;
+    helper
+        .record_security_refusal("mcp__a__c", Some("a"), "unarmed", false, "wf-3")
+        .await;
+    helper
+        .record_security_refusal("mcp__z__b", Some("z"), "unarmed", false, "wf-3")
+        .await;
+
+    let rows = read_audit_rows(&helper.db).await;
+    assert_eq!(
+        rows.len(),
+        3,
+        "distinct (server, tool) pairs each produce one row"
+    );
+}
+
+#[tokio::test]
+async fn record_security_refusal_dedup_is_run_scoped_a_new_run_reaudits() {
+    // The dedup set lives on the per-run ValidationHelper. A SECOND run (new
+    // helper, same DB) re-records the same (server, tool): the signal is not
+    // suppressed across runs, only within one run.
+    let (helper1, _tmp) = make_test_helper().await;
+    let helper2 = ValidationHelper::new(helper1.db.clone(), None);
+
+    helper1
+        .record_security_refusal("mcp__a__b", Some("a"), "unarmed", false, "wf-3")
+        .await;
+    helper2
+        .record_security_refusal("mcp__a__b", Some("a"), "unarmed", false, "wf-3")
+        .await;
+
+    let rows = read_audit_rows(&helper1.db).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "each run re-audits the same blocked tool once"
+    );
+}
+
+#[tokio::test]
+async fn record_security_refusal_metadata_carries_reason_server_and_delegated() {
+    let (helper, _tmp) = make_test_helper().await;
+    helper
+        .record_security_refusal(
+            "mcp__srv__tool",
+            Some("srv-id"),
+            "not armed for this agent in a detached run",
+            true,
+            "wf-4",
+        )
+        .await;
+
+    let rows = read_audit_rows(&helper.db).await;
+    assert_eq!(rows.len(), 1);
+    // metadata is stored as a JSON string.
+    let meta_str = rows[0]["metadata"]
+        .as_str()
+        .expect("metadata is a JSON string");
+    let meta: serde_json::Value = serde_json::from_str(meta_str).expect("metadata parses");
+    assert_eq!(meta["reason"], "not armed for this agent in a detached run");
+    assert_eq!(meta["server_id"], "srv-id");
+    assert_eq!(meta["delegated"], true);
+}
+
+// =====================================================
+// GAP-1 — nominal path: the user decides BEFORE the timeout window.
+// Characterization tests locking the happy path (no test covered it before):
+// a user-set status must surface as a USER decision (via_timeout = false) and
+// the stored row must be left exactly as the user set it.
+// =====================================================
+
+#[tokio::test]
+async fn test_user_approves_before_timeout_returns_user_decision() {
+    let (helper, _tmp) = make_test_helper().await;
+    let id = "vh-user-approve-intime";
+    insert_pending_validation(&helper.db, id).await;
+    // User approves while the request is still pending.
+    helper
+        .db
+        .execute(&format!(
+            "UPDATE validation_request:`{}` SET status = 'approved'",
+            id
+        ))
+        .await
+        .expect("user approve");
+
+    // Generous timeout: the poll must see 'approved' immediately and return it
+    // as a USER decision, never reaching the timeout behavior.
+    let outcome = helper
+        .wait_for_validation(id, Duration::from_secs(30), TimeoutBehavior::Reject)
+        .await
+        .expect("wait returns Ok");
+
+    assert_eq!(outcome.decision, WaitDecision::Approved);
+    assert!(
+        !outcome.via_timeout,
+        "a user decision must not be flagged via_timeout"
+    );
+    assert_eq!(
+        read_validation_status(&helper.db, id).await.as_deref(),
+        Some("approved")
+    );
+}
+
+#[tokio::test]
+async fn test_user_rejects_before_timeout_returns_user_decision() {
+    let (helper, _tmp) = make_test_helper().await;
+    let id = "vh-user-reject-intime";
+    insert_pending_validation(&helper.db, id).await;
+    helper
+        .db
+        .execute(&format!(
+            "UPDATE validation_request:`{}` SET status = 'rejected'",
+            id
+        ))
+        .await
+        .expect("user reject");
+
+    let outcome = helper
+        .wait_for_validation(id, Duration::from_secs(30), TimeoutBehavior::Approve)
+        .await
+        .expect("wait returns Ok");
+
+    assert_eq!(outcome.decision, WaitDecision::Rejected);
+    assert!(
+        !outcome.via_timeout,
+        "a user decision must not be flagged via_timeout"
+    );
+    assert_eq!(
+        read_validation_status(&helper.db, id).await.as_deref(),
+        Some("rejected")
+    );
+}
+
+// =====================================================
+// GAP-2 — race / fail-open: the timeout behavior must NOT clobber a decision
+// the user already recorded in the final poll window. First-writer-wins.
+// These reproduce the clobber on the CURRENT code (unconditional UPDATE).
+// =====================================================
+
+#[tokio::test]
+async fn test_timeout_reject_does_not_clobber_user_approval() {
+    let (helper, _tmp) = make_test_helper().await;
+    let id = "vh-race-user-approved";
+    insert_pending_validation(&helper.db, id).await;
+    // The user approved in the last poll window (status already 'approved').
+    helper
+        .db
+        .execute(&format!(
+            "UPDATE validation_request:`{}` SET status = 'approved'",
+            id
+        ))
+        .await
+        .expect("user approve");
+
+    // Timeout fires with Reject behavior. It MUST observe the existing decision
+    // and leave it intact rather than overwriting 'approved' -> 'rejected'.
+    let outcome = helper
+        .apply_timeout_behavior(id, Duration::from_millis(1), &TimeoutBehavior::Reject)
+        .await;
+
+    assert_eq!(
+        read_validation_status(&helper.db, id).await.as_deref(),
+        Some("approved"),
+        "timeout Reject must not clobber the user's approval"
+    );
+    assert_eq!(
+        outcome.decision,
+        WaitDecision::Approved,
+        "outcome must reflect the surviving user decision"
+    );
+    assert!(
+        !outcome.via_timeout,
+        "a surviving user decision must not be audited as a timeout decision"
+    );
+}
+
+#[tokio::test]
+async fn test_timeout_approve_does_not_clobber_user_rejection() {
+    let (helper, _tmp) = make_test_helper().await;
+    let id = "vh-race-user-rejected";
+    insert_pending_validation(&helper.db, id).await;
+    // The user rejected in the last poll window (status already 'rejected').
+    helper
+        .db
+        .execute(&format!(
+            "UPDATE validation_request:`{}` SET status = 'rejected'",
+            id
+        ))
+        .await
+        .expect("user reject");
+
+    // Timeout fires with Approve behavior. It MUST NOT flip a security rejection
+    // into an approval.
+    let outcome = helper
+        .apply_timeout_behavior(id, Duration::from_millis(1), &TimeoutBehavior::Approve)
+        .await;
+
+    assert_eq!(
+        read_validation_status(&helper.db, id).await.as_deref(),
+        Some("rejected"),
+        "timeout Approve must not clobber the user's rejection"
+    );
+    assert_eq!(
+        outcome.decision,
+        WaitDecision::Rejected,
+        "outcome must reflect the surviving user decision"
+    );
+    assert!(
+        !outcome.via_timeout,
+        "a surviving user decision must not be audited as a timeout decision"
+    );
+}
+
+// =====================================================
+// GAP-2 — user-command side guard. `resolve_validation_if_pending` is the shared
+// first-writer-wins primitive used by both apply_timeout_behavior AND the user
+// approve/reject commands. This locks the inverse direction (a late user command
+// must not clobber a decision the timeout path already recorded).
+// =====================================================
+
+#[tokio::test]
+async fn test_resolve_if_pending_first_writer_wins() {
+    let (helper, _tmp) = make_test_helper().await;
+
+    // A still-pending row -> the resolver wins and the status is applied.
+    let id_win = "vh-resolve-pending";
+    insert_pending_validation(&helper.db, id_win).await;
+    let won = resolve_validation_if_pending(&helper.db, id_win, "approved", None, vec![])
+        .await
+        .expect("resolve ok");
+    assert!(won.won, "resolving a pending row must win");
+    assert_eq!(won.effective, "approved");
+    assert_eq!(
+        read_validation_status(&helper.db, id_win).await.as_deref(),
+        Some("approved")
+    );
+
+    // An already-resolved row -> a late competing resolve must NOT clobber it.
+    // Models a late user approve_validation arriving after a timeout auto-reject.
+    let id_late = "vh-resolve-already";
+    insert_pending_validation(&helper.db, id_late).await;
+    helper
+        .db
+        .execute(&format!(
+            "UPDATE validation_request:`{}` SET status = 'rejected'",
+            id_late
+        ))
+        .await
+        .expect("competing path wins first");
+    let late = resolve_validation_if_pending(&helper.db, id_late, "approved", None, vec![])
+        .await
+        .expect("resolve ok");
+    assert!(!late.won, "a late resolve on a decided row must not win");
+    assert_eq!(
+        late.effective, "rejected",
+        "effective status must reflect the first writer"
+    );
+    assert_eq!(
+        read_validation_status(&helper.db, id_late).await.as_deref(),
+        Some("rejected"),
+        "the first writer's decision must survive"
+    );
 }

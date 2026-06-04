@@ -35,6 +35,35 @@ pub mod workflow {
     pub const FULL_STATE_LOAD_TIMEOUT_SECS: u64 = 60;
 }
 
+/// Async card-compose constants.
+pub mod compose {
+    /// Maximum number of detached `start_compose_card` generations that may run
+    /// concurrently — a GLOBAL cap (not per-agent), distinct from the worker
+    /// scheduler's `DEFAULT_MAX_CONCURRENT_WORKFLOWS` (3).
+    ///
+    /// Each compose is a full LLM tool-loop, so this bounds the cumulative LLM /
+    /// resource load and acts as the anti-DoS gate against spamming the
+    /// "Générer l'aperçu" button. The in-memory registry is reset at reboot.
+    pub const MAX_CONCURRENT_COMPOSE: usize = 4;
+
+    /// Default hard wall-clock ceiling (seconds) for a single detached compose
+    /// run (M-3). A compose stuck on a pathological tool-loop holds its slot for
+    /// the whole duration; the timeout frees the slot (via the RAII guard) and
+    /// emits `kanban:compose_failed`, bounding cap saturation.
+    ///
+    /// User-configurable via `settings:kanban` (`compose_timeout_secs`), clamped
+    /// to `[COMPOSE_TIMEOUT_MIN_SECS, COMPOSE_TIMEOUT_MAX_SECS]`. The default is
+    /// generous (10 min) because reasoning models (xhigh) on large contexts can
+    /// legitimately run several minutes before capturing the card.
+    pub const COMPOSE_TIMEOUT_DEFAULT_SECS: u64 = 600;
+
+    /// Lower bound for the user-configurable compose timeout (seconds).
+    pub const COMPOSE_TIMEOUT_MIN_SECS: u64 = 60;
+
+    /// Upper bound for the user-configurable compose timeout (seconds).
+    pub const COMPOSE_TIMEOUT_MAX_SECS: u64 = 1800;
+}
+
 /// Validation flow constants.
 pub mod validation {
     /// Lower bound for user-configurable validation timeout.
@@ -42,6 +71,17 @@ pub mod validation {
 
     /// Upper bound for user-configurable validation timeout.
     pub const VALIDATION_TIMEOUT_MAX_SECS: u64 = 600;
+
+    /// Maximum number of *Manager content/privilege writes (create/update
+    /// prompt or skill, restore, grant/revoke) a single agent run may perform.
+    ///
+    /// Run-scoped volume cap (counted like `mcp_calls_made`) that bounds the DB
+    /// amplification a prompt-injected supervisor could trigger in Auto mode
+    /// (gonflement de `prompt_version` / `skill_version`). Sized well above any
+    /// legitimate self-improvement run: a supervisor refining a handful of
+    /// prompts/skills in one pass stays far under it, while a runaway/adversarial
+    /// loop is refused once the cap is reached. Self-grants count toward it.
+    pub const MANAGER_MAX_WRITES_PER_RUN: usize = 20;
 }
 
 /// Audit log constants.
@@ -80,6 +120,50 @@ pub mod query_limits {
     pub const DEFAULT_LIST_LIMIT: usize = 1000;
     /// Default limit for model list
     pub const DEFAULT_MODELS_LIMIT: usize = 100;
+}
+
+/// Per-run MCP resource budget.
+///
+/// A single agent run (one tool loop) is bounded independently of the
+/// per-iteration cap so a runaway model or a misbehaving / compromised MCP
+/// server cannot make unbounded calls or stream unbounded data into the
+/// prompt context. Both limits are sized well above any legitimate run and
+/// are enforced CHECK-BEFORE-REFUSE (an in-flight result is never truncated:
+/// the *next* call is refused once a limit is reached).
+pub mod mcp {
+    /// Maximum number of MCP tool calls a single agent run may make.
+    ///
+    /// Grounded well above a legitimate ceiling (the iteration cap clamped to a
+    /// few hundred, times a handful of calls each) so it only trips on a
+    /// runaway or adversarial loop, never on normal use.
+    pub const MCP_MAX_CALLS_PER_RUN: usize = 1000;
+
+    /// Maximum cumulative size, in bytes, of serialized MCP results a single
+    /// agent run may accumulate (50 MiB).
+    ///
+    /// Measured on each MCP result's post-strip sink byte size (serialized
+    /// result + error — the bytes that actually reach the LLM, the DB, and the
+    /// stream); image sidecar bytes are accounted for separately by the
+    /// attachment path. Bounds prompt-context inflation and memory growth from a
+    /// server returning very large payloads, whether as a success result or an
+    /// error.
+    pub const MCP_MAX_RESULT_BYTES_PER_RUN: usize = 50 * 1024 * 1024;
+
+    /// Maximum sink byte size (serialized result + error) of a SINGLE MCP tool
+    /// result (10 MiB).
+    ///
+    /// Closes the [`MCP_MAX_RESULT_BYTES_PER_RUN`] soft-ceiling: the
+    /// cumulative budget is a PRE-call gate, so the FIRST oversized result would
+    /// otherwise pass through whole (e.g. a compromised server's one-shot giant
+    /// payload injected into the prompt once). Any MCP result larger than this is
+    /// REPLACED by an error instead of being injected into the run context — never
+    /// truncated (truncation corrupts the JSON and hides info). SUCCESS-AGNOSTIC:
+    /// a giant ERROR payload (carried in `result.error`) is capped identically to
+    /// a giant success payload, since a compromised server controls both. Sized
+    /// generously for a large legitimate text result yet well under the 50 MiB
+    /// cumulative budget; past a few MiB a single result already overflows any
+    /// useful LLM context anyway. MCP-only (local tools are user-trusted).
+    pub const MCP_MAX_SINGLE_RESULT_BYTES: usize = 10 * 1024 * 1024;
 }
 
 /// Centralized validation constants for Tauri commands.

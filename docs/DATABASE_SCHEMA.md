@@ -1,6 +1,6 @@
 # Database Schema - SurrealDB
 
-> **Version**: 1.5
+> **Version**: 1.6
 > **SurrealDB**: ~2.6 (SCHEMAFULL)
 > **Tables**: 25
 
@@ -140,7 +140,7 @@ Vector chunks linked to a parent `memory` via record link. Created by the recurs
 | embedding | array\<float\> | | Vector (HNSW 1024D, COSINE) |
 | created_at | datetime | time::now() | |
 
-**Indexes**: `memory_chunk_vec_idx` (embedding, HNSW 1024D COSINE), `memory_chunk_parent_idx` (memory_id)
+**Indexes**: `memory_chunk_vec_idx` (embedding, HNSW 1024D COSINE -- defined with `IF NOT EXISTS` so the graph is built once and kept across restarts; to change its definition, ship a guarded `REMOVE INDEX IF EXISTS ...; DEFINE INDEX ...` migration), `memory_chunk_parent_idx` (memory_id)
 
 **Cascade semantics**: chunks MUST be deleted before their parent. The chunk DELETE WHERE clause must use a subquery (`memory_id IN (SELECT VALUE id FROM memory WHERE ...)`) — a record-link traversal (`memory_id.expires_at < ...`) silently matches zero rows in SurrealDB 2.6 (ERR_SURREAL_013).
 
@@ -154,7 +154,7 @@ Human-in-the-loop validation requests.
 |-------|------|---------|-------------|
 | id | string | | UUID |
 | workflow_id | string | | Parent workflow |
-| type | string ASSERT IN [tool, sub_agent, mcp, file_op, db_op] | | Operation type |
+| type | string ASSERT IN [tool, sub_agent, mcp, file_op, db_op, manager_write] | | Operation type (`manager_write` = a prompt/skill/workflow `*Manager` self-improvement write) |
 | operation | string | | Operation description |
 | details | string | '{}' | JSON string (dynamic params) |
 | risk_level | string ASSERT IN [low, medium, high, critical] | | Risk assessment |
@@ -174,8 +174,8 @@ Append-only audit log of validation decisions (user / auto / timeout). Write fai
 | id | string | | UUID |
 | validation_id | string | | Source `validation_request` id |
 | tool_name | string | | Tool / operation name |
-| decision | string ASSERT IN [approved, rejected, timeout] | | Final decision |
-| decided_by | string ASSERT IN [user, auto, timeout] | | Decision source |
+| decision | string ASSERT IN [approved, rejected, skipped, timeout, blocked] | | Final decision (`blocked` = a fail-closed policy refusal, e.g. an unarmed MCP tool in a detached run) |
+| decided_by | string ASSERT IN [user, auto, timeout, policy, pre_approved] | | Decision source (`policy` = the detached allowlist gate; `pre_approved` = a `*Manager` write executed under Auto without confirmation) |
 | decided_at | datetime | time::now() | Decision timestamp |
 | risk_level | string ASSERT IN [low, medium, high, critical] | | Risk at decision time |
 | workflow_id | option\<string\> | | Parent workflow |
@@ -230,6 +230,10 @@ User-created agent configurations.
 | kind | option\<string\> ASSERT IN [standard, kanban] | NONE | Agent kind. `kanban` agents only see the supervisor toolkit (PromptManagerTool, SkillManagerTool, WorkflowManagerTool, ListAgentsTool) and cannot be delegated to. `NONE` is treated as `standard` for backward compatibility. |
 | auto_analyze_reports | bool | false | When true, the `workflow_complete` listener auto-triggers `analyze_card_report` for any Kanban card linked to the completing workflow |
 | require_file_confirmation | bool | true | Confirm destructive file ops |
+| mcp_tool_allowlist | array\<object\> | [] | Per-agent MCP tool allowlist gating **unattended** (detached) runs. An MCP tool auto-called in a detached run executes only if armed here. Sub-fields declared explicitly. Backfilled to `[]` on legacy rows (`WHERE mcp_tool_allowlist IS NONE`) and read via a null-tolerant deserializer (`#[serde(default)]` does not intercept explicit `null`) |
+| mcp_tool_allowlist[*].server_id | string | | MCP server id the entry arms |
+| mcp_tool_allowlist[*].tools | array\<string\> | [] | Armed tool names on that server |
+| mcp_tool_allowlist[*].allow_in_delegated_runs | bool | false | When false (default = strict), the entry is honoured only in the agent's own detached runs, not when reached as a Delegate/Parallel callee (closes the cross-agent confused-deputy) |
 | system_prompt | string (1-10000 chars) | | |
 | max_tool_iterations | int (1-200) | 50 | Tool loop limit |
 | reasoning_effort | option\<string\> | NONE | Thinking model effort. No DB-level `ASSERT`; valid values `low \| medium \| high \| xhigh` are enforced by the `ReasoningEffort` enum (backend) and the provider-aware UI selector. `xhigh` ("Think Max") collapses to `high` on Mistral. |
@@ -489,7 +493,7 @@ Sidebar folder grouping for workflows.
 
 ### kanban_card
 
-Kanban board card. One row per work item. Lifecycle: `todo -> ready -> doing -> review -> done`.
+Kanban board card. One row per work item. Lifecycle: `todo -> ready -> doing -> review -> done` (async auto-composed cards enter as `proposed` and become `ready` only once the user validates them).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -502,7 +506,7 @@ Kanban board card. One row per work item. Lifecycle: `todo -> ready -> doing -> 
 | inline_prompt | option\<string\> | | Ad-hoc prompt body when `prompt_id` is not set (mutually exclusive) |
 | variables | string (JSON) | '{}' | Prompt variables as `HashMap<string,string>`, JSON-string-encoded (ERR_SURREAL_001) |
 | target_folder_id | option\<string\> | | Optional FileManager folder constraint for the run |
-| status | string ASSERT IN [todo, ready, doing, review, done, failed] | todo | Logical state |
+| status | string ASSERT IN [todo, ready, doing, review, done, failed, proposed] | todo | Logical state. `proposed` = a card generated by the async auto-compose flow, awaiting validation (approve → `ready`, or reject) before the scheduler runs it |
 | column | string ASSERT IN [todo, doing, review, done] | todo | Board column (mirror of status, drag-free) |
 | column_order | int | 0 | Sort index within the column |
 | workflow_id | option\<string\> | | Set when the scheduler transitions the card to `doing` |
@@ -628,6 +632,8 @@ Some settings live as a single JSON blob rather than as a structured table — u
 | Key | Source of truth | Description |
 |-----|-----------------|-------------|
 | `settings:stt` | `STTSettings` (`src-tauri/src/models/stt.rs`) | Push-to-talk voice dictation: enable toggle, Voxtral model id, context-bias hints, optional ISO 639-1 language override. Persisted as JSON to avoid a migration on every additive field; validation lives in `commands/settings_stt.rs::apply_update`. |
+| `settings:kanban` | `KanbanSettings` (`src-tauri/src/commands/settings_kanban.rs`) | Kanban tuning. Currently `compose_timeout_secs` (default 600, clamp 60-1800), the wall-clock ceiling for a detached card compose run. Clamped on both write and read. |
+| `settings:mcp_network` | `McpNetworkSettings` (`src-tauri/src/mcp/network_settings.rs`) | MCP HTTP connectivity. Currently `allow_private_network` (default `false`): opt-in to reach MCP HTTP servers on private / LAN ranges. Seeds a process-global fail-secure snapshot at boot; cloud-metadata / link-local / reserved targets stay blocked regardless. |
 
 ---
 
@@ -660,6 +666,17 @@ Supports KNN search returning top_k chunks with cosine similarity score. The sea
 - **Audit trail**: `validation_request` + `validation_audit` + `mcp_call_log` + `tool_execution`
 
 ---
+
+## Schema Initialization at Boot
+
+`initialize_schema` in `src-tauri/src/db/client.rs` applies `SCHEMA_SQL` (defined in `src-tauri/src/db/schema.rs`) with a fingerprint gate to avoid paying the full re-apply cost on every launch:
+
+1. A stable text fingerprint of `SCHEMA_SQL` is computed at boot and compared against a hash stored in a `schema_meta:current` record.
+2. If the fingerprint matches the stored value the schema is skipped entirely -- this is the normal path on a populated database.
+3. If the fingerprint differs (a schema edit was shipped) the full `SCHEMA_SQL` is applied statement by statement. Errors are surfaced per-statement; if any statement fails the fingerprint is not stored, so the schema re-applies on the next boot instead of being frozen in a half-applied state.
+4. After a clean apply the new fingerprint is written to `schema_meta:current`.
+
+The HNSW index on `memory_chunk` is declared `IF NOT EXISTS` (not `OVERWRITE`) because rebuilding the vector graph from stored embeddings takes roughly 10 seconds once the table is populated. B-tree indexes under `OVERWRITE` rebuild in a few seconds. Both costs were previously paid unconditionally on every startup. The fingerprint gate eliminates them entirely on unchanged schema runs.
 
 ## Source of Truth
 

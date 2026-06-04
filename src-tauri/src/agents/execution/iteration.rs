@@ -50,6 +50,14 @@ pub(crate) struct IterationMutState<'a> {
     pub tokens: &'a mut TokenTracker,
     pub tools_used: &'a mut Vec<String>,
     pub mcp_calls_made: &'a mut Vec<String>,
+    /// Cumulative sink byte size (serialized result + error) of MCP
+    /// results so far in this run — success AND error (a compromised server
+    /// controls error size too). Read before each call to gate the per-run byte
+    /// budget, then grown by each MCP result's post per-result-cap sink size.
+    pub mcp_result_bytes: &'a mut usize,
+    /// Run-scoped count of *Manager content/privilege writes executed,
+    /// consulted + incremented by the *Manager write gate for the per-run cap.
+    pub manager_writes_made: &'a mut usize,
     pub iteration_metrics_data: &'a mut Vec<IterationMetrics>,
     pub tool_executions_data: &'a mut Vec<ToolExecutionData>,
     pub reasoning_steps_data: &'a mut Vec<ReasoningStepData>,
@@ -363,11 +371,17 @@ pub(crate) async fn run_single_iteration(
             ),
         );
 
+        // Pass the cumulative MCP byte total so the per-run budget
+        // gate can refuse BEFORE this call is dispatched (read by value here;
+        // accumulated below after each MCP call — success or error).
+        let mcp_bytes_so_far = *mstate.mcp_result_bytes;
         let mut result = tools::execute_function_call(
             call,
             inputs.call_ctx,
             mstate.tools_used,
             mstate.mcp_calls_made,
+            mcp_bytes_so_far,
+            mstate.manager_writes_made,
         )
         .await;
 
@@ -379,7 +393,42 @@ pub(crate) async fn run_single_iteration(
         // a 1.3 M-token prompt and tripped Mistral's context cap. The bytes
         // ride on the synthetic multipart user turn appended at the end of
         // the loop instead.
-        let image_attachment = take_image_attachment(&mut result);
+        let mut image_attachment = take_image_attachment(&mut result);
+
+        // Per-result MCP size cap. The size that reaches the sinks is
+        // NOT just the serialized result: a failure carries its (possibly giant)
+        // payload in `result.error` while `result.result` is Null, and the LLM
+        // message for a failure is `{"error": ...}` (not the serialized result).
+        // So measure BOTH fields (`result_sink_byte_len`, post image-strip). If an
+        // MCP result exceeds MCP_MAX_SINGLE_RESULT_BYTES, REPLACE it with a clear
+        // error BEFORE any of the three sinks (persisted row, stream chunk, LLM
+        // message) sees it — closing the soft-ceiling where the first
+        // oversized result passed through whole (a compromised server's one-shot
+        // giant payload). SUCCESS-AGNOSTIC: a giant ERROR payload is just as
+        // dangerous and is capped identically. Never truncated (would corrupt the
+        // JSON and hide info). Local-tool results are user-trusted, out of scope.
+        // The replacement is a small failure, so the cumulative accumulator below
+        // charges only that small size, never the giant one.
+        let mut output_json =
+            serde_json::to_string(&result.result).unwrap_or_else(|_| "{}".to_string());
+        let mut result_byte_len =
+            tools::result_sink_byte_len(&output_json, result.error.as_deref());
+        if let Some(refusal) =
+            tools::mcp_oversized_result_refusal(call.is_mcp_tool(), result_byte_len)
+        {
+            warn!(
+                tool = %call.name,
+                bytes = result_byte_len,
+                "MCP result refused: exceeds the per-result size cap"
+            );
+            result = FunctionCallResult::failure(&call.id, &call.name, refusal);
+            output_json =
+                serde_json::to_string(&result.result).unwrap_or_else(|_| "{}".to_string());
+            result_byte_len = tools::result_sink_byte_len(&output_json, result.error.as_deref());
+            // The giant payload is gone; drop any sidecar image so it is not
+            // ferried into a synthetic turn that now references a replaced result.
+            image_attachment = None;
+        }
 
         let exec_duration = exec_start.elapsed().as_millis() as u64;
         let tool_type = if call.is_mcp_tool() { "mcp" } else { "local" };
@@ -406,8 +455,22 @@ pub(crate) async fn run_single_iteration(
 
         let input_json =
             serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string());
-        let output_json =
-            serde_json::to_string(&result.result).unwrap_or_else(|_| "{}".to_string());
+
+        // Grow the per-run MCP byte budget by this result's sink byte
+        // size (`result_byte_len` = serialized result + error, post image-strip).
+        // EVERY MCP result counts — success AND error (a compromised server
+        // controls error size too); `result_byte_len` is post per-result cap, so
+        // an oversized result charges only its small replacement. The NEXT MCP
+        // call is gated against the new total (CHECK-BEFORE-REFUSE — never
+        // truncates this one).
+        *mstate.mcp_result_bytes =
+            mstate
+                .mcp_result_bytes
+                .saturating_add(tools::mcp_result_budget_charge(
+                    call.is_mcp_tool(),
+                    result_byte_len,
+                ));
+
         emit_progress(
             ctx.agent_context,
             StreamChunk::tool_call_complete(

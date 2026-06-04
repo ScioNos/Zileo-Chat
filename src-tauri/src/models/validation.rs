@@ -34,6 +34,11 @@ pub enum ValidationType {
     Mcp,
     FileOp,
     DbOp,
+    /// A write through a *Manager tool (prompt / skill / workflow) issued by a
+    /// Kanban supervisor for self-improvement. Governed by the EXISTING
+    /// validation controls (mode + `always_confirm_high`) exactly like a
+    /// `Tool`; in `Selective` mode it reuses the `tools` checkbox.
+    ManagerWrite,
 }
 
 /// Risk level of the operation
@@ -133,6 +138,7 @@ impl std::fmt::Display for ValidationType {
             ValidationType::Mcp => write!(f, "mcp"),
             ValidationType::FileOp => write!(f, "file_op"),
             ValidationType::DbOp => write!(f, "db_op"),
+            ValidationType::ManagerWrite => write!(f, "manager_write"),
         }
     }
 }
@@ -334,7 +340,10 @@ pub struct PartialAuditConfig {
 /// Final decision recorded in `validation_audit`.
 ///
 /// `Skipped` is used when `TimeoutBehavior::Skip` is configured and the
-/// validation timed out without an explicit user decision.
+/// validation timed out without an explicit user decision. `Blocked` is a
+/// policy refusal with no human in the loop: the detached MCP gate
+/// refused a tool that was not armed in the agent's allowlist (paired with
+/// `DecidedBy::Policy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditDecision {
@@ -342,6 +351,7 @@ pub enum AuditDecision {
     Rejected,
     Skipped,
     Timeout,
+    Blocked,
 }
 
 impl std::fmt::Display for AuditDecision {
@@ -351,6 +361,7 @@ impl std::fmt::Display for AuditDecision {
             Self::Rejected => write!(f, "rejected"),
             Self::Skipped => write!(f, "skipped"),
             Self::Timeout => write!(f, "timeout"),
+            Self::Blocked => write!(f, "blocked"),
         }
     }
 }
@@ -365,6 +376,15 @@ pub enum DecidedBy {
     Auto,
     /// Decision came from a timeout (per timeout_behavior).
     Timeout,
+    /// Enforced by a security policy with no human in the loop (e.g. the
+    /// detached MCP allowlist gate refusing an unarmed tool).
+    Policy,
+    /// Executed without a human review because the active validation mode is
+    /// permissive for this risk (e.g. Auto + `always_confirm_high` OFF) — a
+    /// *Manager self-improvement write or an armed detached MCP call. Distinct
+    /// from `Auto` (auto-approved by a threshold such as `auto_approve_low`):
+    /// `PreApproved` records that the operation ran unreviewed by policy choice.
+    PreApproved,
 }
 
 impl std::fmt::Display for DecidedBy {
@@ -373,6 +393,8 @@ impl std::fmt::Display for DecidedBy {
             Self::User => write!(f, "user"),
             Self::Auto => write!(f, "auto"),
             Self::Timeout => write!(f, "timeout"),
+            Self::Policy => write!(f, "policy"),
+            Self::PreApproved => write!(f, "pre_approved"),
         }
     }
 }
@@ -469,6 +491,28 @@ mod tests {
 
         let deserialized: ValidationType = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, ValidationType::SubAgent);
+    }
+
+    #[test]
+    fn test_manager_write_type_serialization() {
+        // The wire string must match schema.rs ASSERT ('manager_write') and the
+        // TS union — drift here silently rejects the validation_request row.
+        let vtype = ValidationType::ManagerWrite;
+        assert_eq!(serde_json::to_string(&vtype).unwrap(), "\"manager_write\"");
+        assert_eq!(vtype.to_string(), "manager_write");
+        let back: ValidationType = serde_json::from_str("\"manager_write\"").unwrap();
+        assert_eq!(back, ValidationType::ManagerWrite);
+    }
+
+    #[test]
+    fn test_pre_approved_decided_by_serialization() {
+        // Wire string must match schema.rs ASSERT ('pre_approved') and the TS
+        // union. Distinct from `auto`.
+        let by = DecidedBy::PreApproved;
+        assert_eq!(serde_json::to_string(&by).unwrap(), "\"pre_approved\"");
+        assert_eq!(by.to_string(), "pre_approved");
+        let back: DecidedBy = serde_json::from_str("\"pre_approved\"").unwrap();
+        assert_eq!(back, DecidedBy::PreApproved);
     }
 
     #[test]

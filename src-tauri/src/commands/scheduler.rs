@@ -52,6 +52,32 @@ pub const MAX_CATCHUP_PER_SCHEDULE: usize = 7;
 /// being wired up by the frontend.
 pub const ORPHAN_DOING_GRACE_SECS: i64 = 2 * SCHEDULER_TICK_SECS as i64;
 
+/// Grace period (seconds) before a `doing` card whose linked workflow is no
+/// longer alive is recovered at boot.
+///
+/// Distinct from [`ORPHAN_DOING_GRACE_SECS`], which targets cards with NO
+/// `workflow_id`. This one targets cards that DID get a `workflow_id` stamped by
+/// the frontend (`set_kanban_card_workflow_id`, which refreshes `updated_at`).
+/// At boot no frontend run can be live yet, so any such card older than this
+/// window belonged to a previous session: its worker either finished (and the
+/// card missed its review transition) or died mid-run. The window's only job is
+/// to spare a card the CURRENT boot's frontend is wiring up right now — its
+/// `updated_at` stays fresh, so a real in-flight run is never touched. Sized at
+/// 2× the tick like the orphan grace.
+pub const STUCK_DOING_GRACE_SECS: i64 = 2 * SCHEDULER_TICK_SECS as i64;
+
+/// Tauri command exposing the backend's worker-promotion concurrency budget
+/// ([`DEFAULT_MAX_CONCURRENT_WORKFLOWS`]) to the frontend.
+///
+/// The Kanban board reads this so its "X / N actifs" badge — and any frontend
+/// slot accounting — reflects the SAME cap the scheduler uses to promote
+/// `todo→doing`, instead of duplicating the literal. Synchronous and
+/// dependency-free: it returns a compile-time constant, so it never fails.
+#[tauri::command]
+pub fn get_max_concurrent_workflows() -> usize {
+    DEFAULT_MAX_CONCURRENT_WORKFLOWS
+}
+
 /// Spawns the kanban scheduler task. The returned handle is parked in
 /// [`crate::state::AppState`] so the runtime owns it and shutdown can
 /// `abort()` it deterministically.
@@ -159,6 +185,121 @@ pub async fn reclaim_orphaned_doing_cards_core(
         .await
         .map_err(|e| format!("Failed to reclaim orphaned doing cards: {}", e))?;
     Ok(ids)
+}
+
+/// Outcome of [`recover_stuck_doing_cards_core`], split by the action taken.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StuckDoingRecovery {
+    /// Cards whose workflow had produced a final assistant message (the run
+    /// completed but the card missed its `review` transition) — moved to
+    /// `review` via [`mark_card_done_core`].
+    pub finalized: Vec<String>,
+    /// Cards whose workflow never produced a final message (never started, or
+    /// died mid-run) — reset to `ready`/`todo` for a fresh promotion.
+    pub requeued: Vec<String>,
+}
+
+impl StuckDoingRecovery {
+    /// True when nothing was recovered (both buckets empty).
+    pub fn is_empty(&self) -> bool {
+        self.finalized.is_empty() && self.requeued.is_empty()
+    }
+}
+
+/// Recovers `doing` cards whose linked workflow is no longer alive (K1-bis).
+///
+/// Intended for boot-time use: at boot no frontend run is live yet, so every
+/// `doing` card carrying a `workflow_id` older than `grace_secs` is a leftover
+/// from a previous session that neither orphan reconciler can reach
+/// (`runCardWorkflow` short-circuits once `workflow_id` is set; both reconcilers
+/// target only `workflow_id = NONE`). Left untouched, such a card holds a
+/// `doing` slot forever (slots are counted by `status='doing'`).
+///
+/// A persisted ASSISTANT message is the reliable run-completed signal:
+/// `WorkflowExecutorService` saves the assistant message only AFTER the
+/// streaming call returns. (The `workflow.status` field is unusable here — the
+/// streaming path never transitions it out of `idle`.) So per card:
+///   - **has** an assistant message → the run finished but the card missed its
+///     `review` transition (e.g. shutdown raced the `workflow_complete`
+///     listener) → replay [`mark_card_done_core`] to move it to `review`
+///     (the boot auto-analyze catch-up then picks it up). Re-running it would
+///     waste a completed (paid) LLM run.
+///   - **no** assistant message → the run never completed (never started, or
+///     crashed/was-killed mid-run) → reset to `ready`/`todo` so the scheduler
+///     re-runs it from scratch (a partial dead run leaves no usable result).
+///
+/// Safety (never touches a live run): a run started by the CURRENT boot has a
+/// fresh `updated_at` (stamped by `set_kanban_card_workflow_id`) and is excluded
+/// by `grace_secs`. The requeue UPDATE re-checks `column='doing'` for
+/// race-safety, mirroring [`reclaim_orphaned_doing_cards_core`].
+pub async fn recover_stuck_doing_cards_core(
+    db: &Arc<DBClient>,
+    grace_secs: i64,
+) -> Result<StuckDoingRecovery, String> {
+    // 1. Candidate `doing` cards that DO carry a workflow_id, past the grace
+    //    window. (Cards with NO workflow_id are the orphan reclaimer's job.)
+    let pick_q = format!(
+        "SELECT meta::id(id) AS id, workflow_id FROM kanban_card \
+         WHERE `column` = 'doing' AND workflow_id IS NOT NONE \
+           AND updated_at < time::now() - {}s",
+        grace_secs
+    );
+    let rows = db
+        .query_json(&pick_q)
+        .await
+        .map_err(|e| format!("Failed to pick stuck doing cards: {}", e))?;
+
+    // 2. Partition by the run-completed signal (a persisted assistant message).
+    let mut recovery = StuckDoingRecovery::default();
+    let mut requeue: Vec<String> = Vec::new();
+    for row in &rows {
+        let Some(card_id) = row["id"].as_str() else {
+            continue;
+        };
+        let Some(wf_id) = row["workflow_id"].as_str() else {
+            continue;
+        };
+        let count_rows: Vec<serde_json::Value> = db
+            .query_with_params(
+                "SELECT count() AS c FROM message \
+                 WHERE workflow_id = $wid AND role = 'assistant' GROUP ALL",
+                vec![("wid".to_string(), json!(wf_id))],
+            )
+            .await
+            .map_err(|e| format!("Failed to count assistant messages for workflow: {}", e))?;
+        let has_assistant = count_rows
+            .into_iter()
+            .next()
+            .and_then(|r| r["c"].as_u64())
+            .unwrap_or(0)
+            > 0;
+        if has_assistant {
+            // Finished run that missed its review transition → finalize it.
+            mark_card_done_core(db, wf_id, true, None).await?;
+            recovery.finalized.push(card_id.to_string());
+        } else {
+            requeue.push(card_id.to_string());
+        }
+    }
+
+    // 3. Reset the never-completed cards to their pre-promotion state. Re-check
+    //    `column='doing'` so a card that started executing between the SELECT
+    //    and now is spared.
+    if !requeue.is_empty() {
+        let ids_json = serde_json::to_string(&requeue)
+            .map_err(|e| format!("Failed to serialize requeue ids: {}", e))?;
+        let upd = format!(
+            "UPDATE kanban_card SET status = 'ready', `column` = 'todo', \
+             workflow_id = NONE, updated_at = time::now() \
+             WHERE meta::id(id) IN {} AND `column` = 'doing'",
+            ids_json
+        );
+        db.execute(&upd)
+            .await
+            .map_err(|e| format!("Failed to reset stuck doing cards: {}", e))?;
+        recovery.requeued = requeue;
+    }
+    Ok(recovery)
 }
 
 /// Deletes cards stuck in `done` for more than `DONE_CARD_TTL_DAYS` days,
@@ -461,8 +602,13 @@ async fn template_has_pending_instance(
     if title.is_empty() || ka.is_empty() || ta.is_empty() {
         return Ok(false);
     }
+    // Exclude `proposed` cards: a generated card awaiting validation is
+    // stored with `column='todo'` but is NOT a real pending instance — counting
+    // it would make `skip_if_pending` skip the recurrence spawn while the user
+    // has not yet validated anything, silently dropping the scheduled run.
     let count_q = "SELECT count() AS c FROM kanban_card \
         WHERE `column` IN ['todo', 'doing'] \
+          AND status != 'proposed' \
           AND meta::id(id) != $tid \
           AND title = $title \
           AND kanban_agent_id = $ka \
@@ -849,6 +995,38 @@ mod tests {
         );
     }
 
+    /// A `proposed` clone (generated, awaiting validation, stored
+    /// `column='todo'`) must NOT be counted as a pending instance, otherwise
+    /// `skip_if_pending` would skip the recurrence spawn while nothing real is in
+    /// flight. A genuine `ready` clone, by contrast, MUST still count.
+    #[tokio::test]
+    async fn pending_instance_ignores_proposed_clone() {
+        let (state, _g) = setup_test_state().await;
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let template_id = uuid::Uuid::new_v4().to_string();
+        seed_card(&state.db, &template_id, &agent_id, "daily", "todo", "ready").await;
+
+        // A proposed clone of the same triplet must be ignored.
+        let proposed = uuid::Uuid::new_v4().to_string();
+        seed_card(&state.db, &proposed, &agent_id, "daily", "todo", "proposed").await;
+        assert!(
+            !template_has_pending_instance(&state.db, &template_id)
+                .await
+                .unwrap(),
+            "a proposed clone must not be counted as a pending instance"
+        );
+
+        // A real ready clone DOES count (guards against over-filtering).
+        let ready = uuid::Uuid::new_v4().to_string();
+        seed_card(&state.db, &ready, &agent_id, "daily", "todo", "ready").await;
+        assert!(
+            template_has_pending_instance(&state.db, &template_id)
+                .await
+                .unwrap(),
+            "a real ready clone must be counted as a pending instance"
+        );
+    }
+
     /// A due schedule spawns at least one fresh todo/ready clone (bounded by the
     /// catch-up cap) and re-arms `next_run_at` into the future while staying
     /// enabled.
@@ -1159,6 +1337,154 @@ mod tests {
         assert_eq!(check(orphan).await, ("ready".into(), "todo".into()));
         assert_eq!(check(recent).await, ("doing".into(), "doing".into()));
         assert_eq!(check(linked).await, ("doing".into(), "doing".into()));
+    }
+
+    /// The cap exposed to the frontend MUST be the very constant the scheduler
+    /// uses for its promotion slot budget — that single-source coupling is the
+    /// whole point of the command (the board's "X / N actifs" badge and the
+    /// worker cap can never drift from the backend authority). Guards against a
+    /// literal being re-hardcoded on either side.
+    #[test]
+    fn get_max_concurrent_exposes_scheduler_budget() {
+        assert_eq!(
+            get_max_concurrent_workflows(),
+            DEFAULT_MAX_CONCURRENT_WORKFLOWS,
+            "the exposed cap must equal the scheduler's promotion budget"
+        );
+        assert!(
+            get_max_concurrent_workflows() > 0,
+            "a zero cap would deadlock promotion"
+        );
+    }
+
+    /// K1-bis boot recovery. Four `doing` cards carrying a `workflow_id`:
+    ///   - old + no message            -> requeued (never started)
+    ///   - old + only a USER message   -> requeued (died mid-run, no result)
+    ///   - old + an ASSISTANT message  -> finalized to `review` (run completed,
+    ///                                    missed its transition)
+    ///   - fresh updated_at            -> spared (the current boot is wiring it up)
+    #[tokio::test]
+    async fn test_recover_stuck_doing_cards() {
+        let (state, _g) = setup_test_state().await;
+        let agent_id = uuid::Uuid::new_v4().to_string();
+
+        let no_msg = uuid::Uuid::new_v4().to_string();
+        let no_msg_wf = uuid::Uuid::new_v4().to_string();
+        let user_only = uuid::Uuid::new_v4().to_string();
+        let user_only_wf = uuid::Uuid::new_v4().to_string();
+        let completed = uuid::Uuid::new_v4().to_string();
+        let completed_wf = uuid::Uuid::new_v4().to_string();
+        let recent = uuid::Uuid::new_v4().to_string();
+        let recent_wf = uuid::Uuid::new_v4().to_string();
+
+        let seed = |cid: &str, wf: &str, ts: &str| {
+            format!(
+                "CREATE kanban_card:`{cid}` CONTENT {{
+                    id: '{cid}', title: 't', description: '',
+                    kanban_agent_id: '{agent_id}', target_agent_id: '{agent_id}',
+                    prompt_id: NONE, inline_prompt: 'p', variables: '{{}}',
+                    target_folder_id: NONE, status: 'doing', `column`: 'doing',
+                    `column_order`: 0, workflow_id: '{wf}', error_summary: NONE,
+                    created_at: {ts}, updated_at: {ts}
+                }}"
+            )
+        };
+        let old = "time::now() - 200s";
+        state
+            .db
+            .execute(&seed(&no_msg, &no_msg_wf, old))
+            .await
+            .unwrap();
+        state
+            .db
+            .execute(&seed(&user_only, &user_only_wf, old))
+            .await
+            .unwrap();
+        state
+            .db
+            .execute(&seed(&completed, &completed_wf, old))
+            .await
+            .unwrap();
+        state
+            .db
+            .execute(&seed(&recent, &recent_wf, "time::now()"))
+            .await
+            .unwrap();
+
+        // A message of the given role for a workflow.
+        let seed_msg = |wf: &str, role: &str| {
+            let mid = uuid::Uuid::new_v4().to_string();
+            format!(
+                "CREATE message:`{mid}` SET id = '{mid}', workflow_id = '{wf}', \
+                 role = '{role}', content = 'x', tokens = 0, \
+                 created_at = time::now(), updated_at = time::now()"
+            )
+        };
+        // user_only: only a user message (worker started, never finished).
+        state
+            .db
+            .execute(&seed_msg(&user_only_wf, "user"))
+            .await
+            .unwrap();
+        // completed: a user AND an assistant message (run produced its result).
+        state
+            .db
+            .execute(&seed_msg(&completed_wf, "user"))
+            .await
+            .unwrap();
+        state
+            .db
+            .execute(&seed_msg(&completed_wf, "assistant"))
+            .await
+            .unwrap();
+
+        let recovery = recover_stuck_doing_cards_core(&state.db, STUCK_DOING_GRACE_SECS)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recovery.finalized,
+            vec![completed.clone()],
+            "only the card with an assistant message is finalized to review"
+        );
+        let mut requeued = recovery.requeued.clone();
+        requeued.sort();
+        let mut expected = vec![no_msg.clone(), user_only.clone()];
+        expected.sort();
+        assert_eq!(
+            requeued, expected,
+            "both message-less / user-only cards requeue"
+        );
+
+        let check = |cid: String| {
+            let db = state.db.clone();
+            async move {
+                let rows = db
+                    .query_json(&format!(
+                        "SELECT status, `column`, workflow_id FROM kanban_card:`{}`",
+                        cid
+                    ))
+                    .await
+                    .unwrap();
+                (
+                    rows[0]["status"].as_str().unwrap_or("").to_string(),
+                    rows[0]["column"].as_str().unwrap_or("").to_string(),
+                    rows[0]["workflow_id"].as_str().is_some(),
+                )
+            }
+        };
+        // Requeued cards: ready/todo, workflow_id cleared.
+        for cid in [no_msg, user_only] {
+            let (s, c, wf_present) = check(cid).await;
+            assert_eq!((s.as_str(), c.as_str()), ("ready", "todo"));
+            assert!(!wf_present, "workflow_id must be cleared on requeue");
+        }
+        // Finalized card: done/review, workflow_id preserved.
+        let (s, c, wf_present) = check(completed).await;
+        assert_eq!((s.as_str(), c.as_str()), ("done", "review"));
+        assert!(wf_present, "workflow_id stays on a finalized card");
+        // Fresh card: untouched.
+        assert_eq!(check(recent).await.0, "doing", "recent card spared");
     }
 
     /// K7: a legacy/forged enabled schedule with empty `days_of_week` must be

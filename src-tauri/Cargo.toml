@@ -1,6 +1,6 @@
 [package]
 name = "zileo-chat"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Assistance Micro Design <assistance-micro-design@pm.me>"]
@@ -39,19 +39,23 @@ anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-uuid = { version = "1.20", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 async-trait = "0.1"
 regex = "1.10"
 globset = "0.4"
 # Used to add jitter to retry backoff and avoid thundering-herd on transient LLM errors.
-rand = "0.9"
+rand = "0.10"
 
 # Async utilities for cancellation tokens
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # HTTP client for provider connectivity tests and MCP HTTP transport
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
+
+# URL parsing for the MCP HTTP SSRF guard (typed host extraction: Host::Ipv4/Ipv6).
+# Already in the tree transitively via reqwest; declared direct for `url::Host`.
+url = "2.5"
 
 # Async stream utilities for SSE (OPT-WF-4: Lock version)
 futures-util = "0.3.31"

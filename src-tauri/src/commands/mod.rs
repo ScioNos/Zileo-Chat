@@ -149,6 +149,7 @@
 //! to prevent injection attacks and ensure data integrity.
 
 pub mod agent;
+pub mod boot;
 pub mod compose_card;
 pub mod custom_provider;
 pub mod embedding;
@@ -168,6 +169,8 @@ pub mod prompt;
 pub mod prompt_version;
 pub mod scheduler;
 pub mod security;
+pub mod settings_kanban;
+pub mod settings_mcp_network;
 pub mod settings_stt;
 pub mod skill;
 pub mod skill_version;

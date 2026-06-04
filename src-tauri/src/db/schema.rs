@@ -133,14 +133,20 @@ DEFINE FIELD OVERWRITE content ON memory_chunk TYPE string;
 DEFINE FIELD OVERWRITE embedding ON memory_chunk TYPE option<array<float>>;
 DEFINE FIELD OVERWRITE created_at ON memory_chunk TYPE datetime DEFAULT time::now();
 
-DEFINE INDEX OVERWRITE memory_chunk_vec_idx ON memory_chunk FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
+-- IF NOT EXISTS (not OVERWRITE): rebuilding this HNSW vector index re-reads every
+-- stored chunk embedding and rebuilds the whole graph on each boot (~10s once the
+-- store is populated). The embeddings are already persisted, so the index is built
+-- once and kept across restarts. To change its definition (dimension / distance),
+-- ship a guarded `REMOVE INDEX IF EXISTS ...; DEFINE INDEX ...` migration instead of
+-- editing this line, because IF NOT EXISTS will not re-apply a changed body.
+DEFINE INDEX IF NOT EXISTS memory_chunk_vec_idx ON memory_chunk FIELDS embedding HNSW DIMENSION 1024 DIST COSINE;
 DEFINE INDEX OVERWRITE memory_chunk_parent_idx ON memory_chunk FIELDS memory_id;
 
 -- Table: validation_request
 DEFINE TABLE OVERWRITE validation_request SCHEMAFULL;
 DEFINE FIELD OVERWRITE id ON validation_request TYPE string;
 DEFINE FIELD OVERWRITE workflow_id ON validation_request TYPE string;
-DEFINE FIELD OVERWRITE type ON validation_request TYPE string ASSERT $value IN ['tool', 'sub_agent', 'mcp', 'file_op', 'db_op'];
+DEFINE FIELD OVERWRITE type ON validation_request TYPE string ASSERT $value IN ['tool', 'sub_agent', 'mcp', 'file_op', 'db_op', 'manager_write'];
 DEFINE FIELD OVERWRITE operation ON validation_request TYPE string;
 DEFINE FIELD OVERWRITE details ON validation_request TYPE string DEFAULT '{}'; -- JSON string (ERR_SURREAL_001: TYPE object drops dynamic keys)
 DEFINE FIELD OVERWRITE risk_level ON validation_request TYPE string ASSERT $value IN ['low', 'medium', 'high', 'critical'];
@@ -158,10 +164,10 @@ DEFINE FIELD OVERWRITE id ON validation_audit TYPE string;
 DEFINE FIELD OVERWRITE validation_id ON validation_audit TYPE string;
 DEFINE FIELD OVERWRITE tool_name ON validation_audit TYPE string;
 DEFINE FIELD OVERWRITE decision ON validation_audit TYPE string
-    ASSERT $value IN ['approved', 'rejected', 'skipped', 'timeout'];
+    ASSERT $value IN ['approved', 'rejected', 'skipped', 'timeout', 'blocked'];
 DEFINE FIELD OVERWRITE decided_at ON validation_audit TYPE datetime DEFAULT time::now();
 DEFINE FIELD OVERWRITE decided_by ON validation_audit TYPE string
-    ASSERT $value IN ['user', 'auto', 'timeout'];
+    ASSERT $value IN ['user', 'auto', 'timeout', 'policy', 'pre_approved'];
 DEFINE FIELD OVERWRITE risk_level ON validation_audit TYPE string
     ASSERT $value IN ['low', 'medium', 'high', 'critical'];
 DEFINE FIELD OVERWRITE workflow_id ON validation_audit TYPE option<string>;
@@ -569,6 +575,23 @@ DEFINE FIELD OVERWRITE kind ON agent TYPE option<string>
     ASSERT $value IS NONE OR $value IN ['kanban'];
 DEFINE FIELD OVERWRITE auto_analyze_reports ON agent TYPE bool DEFAULT false;
 
+-- Per-agent MCP tool allowlist for unattended (detached) runs.
+-- Nested object sub-keys are defined explicitly (SCHEMAFULL
+-- drops dynamic sub-keys otherwise), mirroring the multimodal attachments[*].* pattern.
+DEFINE FIELD OVERWRITE mcp_tool_allowlist ON agent TYPE array<object> DEFAULT [];
+DEFINE FIELD OVERWRITE mcp_tool_allowlist[*].server_id ON agent TYPE string;
+DEFINE FIELD OVERWRITE mcp_tool_allowlist[*].tools ON agent TYPE array<string> DEFAULT [];
+DEFINE FIELD OVERWRITE mcp_tool_allowlist[*].allow_in_delegated_runs ON agent TYPE bool DEFAULT false;
+
+-- Backfill mcp_tool_allowlist on existing agents (DEFAULT only applies to new
+-- records). Without this, agents created before this column
+-- existed keep it NONE: the SCHEMAFULL SELECT then returns `null` and the
+-- startup load (main.rs) fails to deserialize AgentConfig and DROPS the agent,
+-- so the whole agent list vanishes from the UI. Idempotent: re-running the DDL
+-- matches nothing once the column is set. (No backfill needed on the [*].*
+-- sub-fields — they live on array entries, materialised by the parent.)
+UPDATE agent SET mcp_tool_allowlist = [] WHERE mcp_tool_allowlist IS NONE;
+
 -- =============================================
 -- Table: kanban_card
 -- Cards representing a task to delegate to an agent workflow.
@@ -587,7 +610,7 @@ DEFINE FIELD OVERWRITE inline_prompt ON kanban_card TYPE option<string>;
 DEFINE FIELD OVERWRITE variables ON kanban_card TYPE string DEFAULT '{}';
 DEFINE FIELD OVERWRITE target_folder_id ON kanban_card TYPE option<string>;
 DEFINE FIELD OVERWRITE status ON kanban_card TYPE string
-    ASSERT $value IN ['todo', 'ready', 'doing', 'review', 'done', 'failed'];
+    ASSERT $value IN ['todo', 'ready', 'doing', 'review', 'done', 'failed', 'proposed'];
 DEFINE FIELD OVERWRITE column ON kanban_card TYPE string
     ASSERT $value IN ['todo', 'doing', 'review', 'done'];
 DEFINE FIELD OVERWRITE column_order ON kanban_card TYPE int DEFAULT 0;

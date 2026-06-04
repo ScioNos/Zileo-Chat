@@ -55,6 +55,24 @@ where
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
+/// Treats JSON `null` (and absent) as an empty `Vec` rather than rejecting it.
+///
+/// Legacy agent rows written before a `Vec` column existed return that column
+/// as explicit `null` on a SCHEMAFULL SELECT (the `DEFINE FIELD ... DEFAULT []`
+/// does NOT backfill existing rows). `#[serde(default)]`
+/// covers an ABSENT key but does NOT intercept an explicit `null`
+/// — without this helper `serde_json::from_value` fails with
+/// "invalid type: null, expected a sequence" and `main.rs` drops the agent on
+/// startup → the whole agent list vanishes from the UI. Mirrors
+/// [`deserialize_bool_default_false`] for the `Vec` case.
+pub(crate) fn deserialize_vec_default<'de, T, D>(d: D) -> Result<Vec<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
+}
+
 /// Reasoning effort level for thinking models.
 ///
 /// Controls how much reasoning/thinking the model performs.
@@ -121,6 +139,37 @@ pub enum AgentKind {
     Kanban,
 }
 
+/// One entry of an agent's MCP tool allowlist.
+///
+/// Lists, per **immutable** `server_id`, the exact MCP tool names this agent is
+/// pre-authorized to call in an **unattended (detached) run** (auto-analyze,
+/// compose, worker re-run). Keying on `server_id` (never the display name)
+/// makes the allowlist survive a server rename. An empty allowlist means
+/// nothing is armed, so every MCP tool is refused in a detached run
+/// (fail-closed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct McpToolAllowlistEntry {
+    /// Immutable MCP server id (not the display name).
+    pub server_id: String,
+    /// Exact tool names auto-approved for this server in detached runs.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Whether the armed tools are ALSO authorized when this agent runs as
+    /// a **delegated/parallel** sub-agent of a detached parent — not just in a
+    /// **direct** detached run (rerun-primary / analyze / compose).
+    ///
+    /// DEFAULT `false` (strict). Closes the UNION confused-deputy: a standard
+    /// agent delegated-to by a detached worker re-run can only trigger MCP
+    /// tools the human explicitly marked safe for delegation. Does NOT apply to
+    /// **spawned** sub-agents — they clone the parent's allowlist (same
+    /// privilege, no confused-deputy), so the direct-run path gates them.
+    /// `#[serde(default)]`: legacy entries without the field deserialize to
+    /// `false` (strict) — same treatment as `tools` (DEFAULT
+    /// does not backfill existing rows; the serde default is the safety net).
+    #[serde(default)]
+    pub allow_in_delegated_runs: bool,
+}
+
 /// Agent configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -184,6 +233,17 @@ pub struct AgentConfig {
         skip_serializing_if = "is_false"
     )]
     pub auto_analyze_reports: bool,
+    /// MCP tools this agent may call in an unattended (detached) run.
+    /// Empty = nothing armed = every MCP tool refused in detached (fail-closed).
+    /// Tolerates `null` from legacy DB rows (column added after they were
+    /// written) by falling back to an empty Vec — otherwise the agent would be
+    /// dropped on startup load.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vec_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub mcp_tool_allowlist: Vec<McpToolAllowlistEntry>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -297,6 +357,9 @@ pub struct AgentConfigCreate {
     /// Auto-analyze workflow reports on completion (only meaningful for Kanban agents).
     #[serde(default)]
     pub auto_analyze_reports: bool,
+    /// MCP tools auto-approved for this agent in unattended (detached) runs.
+    #[serde(default)]
+    pub mcp_tool_allowlist: Vec<McpToolAllowlistEntry>,
 }
 
 /// Agent configuration for updates (all fields optional except lifecycle which cannot change)
@@ -354,6 +417,9 @@ pub struct AgentConfigUpdate {
     /// Auto-analyze workflow reports flag (absent = keep, value = set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_analyze_reports: Option<bool>,
+    /// MCP tool allowlist (absent = keep existing, value = replace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tool_allowlist: Option<Vec<McpToolAllowlistEntry>>,
 }
 
 /// Agent summary for listing (lightweight representation)
@@ -382,6 +448,19 @@ pub struct AgentSummary {
     /// Specialization, if any (e.g. `Kanban`). `None` = plain agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<AgentKind>,
+    /// True when the agent has at least one MCP tool auto-approved for
+    /// unattended (detached) runs (an `mcp_tool_allowlist` entry with a
+    /// non-empty `tools` list). Surfaced so the per-agent authorizations UI can
+    /// flag agents whose MCP auto-approval has been configured, without loading
+    /// each full config. Preserved orphan-only entries (zero armed tools, e.g. a
+    /// stopped server) do NOT count — only a genuinely armed tool does.
+    ///
+    /// NOTE: `require_file_confirmation == false` is deliberately NOT folded in.
+    /// In practice it is disabled across (nearly) all agents, so including it
+    /// would mark everyone and destroy the per-agent differentiation this flag
+    /// exists for. The marker tracks the thing the user actively ticks here.
+    #[serde(default)]
+    pub has_mcp_auto_approval: bool,
 }
 
 impl From<&AgentConfig> for AgentSummary {
@@ -397,6 +476,10 @@ impl From<&AgentConfig> for AgentSummary {
             skills_count: config.skills.len(),
             folders_count: config.folders.len(),
             kind: config.kind.clone(),
+            has_mcp_auto_approval: config
+                .mcp_tool_allowlist
+                .iter()
+                .any(|e| !e.tools.is_empty()),
         }
     }
 }
@@ -498,6 +581,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Medium),
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -531,6 +615,7 @@ mod tests {
             reasoning_effort: None,
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -584,6 +669,7 @@ mod tests {
             reasoning_effort: None,
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -640,6 +726,7 @@ mod tests {
             reasoning_effort: None,
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         assert!(config.has_valid_tools());
@@ -674,6 +761,7 @@ mod tests {
             reasoning_effort: None,
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         assert!(!config.has_valid_tools());
@@ -715,9 +803,79 @@ mod tests {
             reasoning_effort: None,
             kind: None,
             auto_analyze_reports: false,
+            mcp_tool_allowlist: Vec::new(),
         };
 
         assert!(config.has_valid_tools());
         assert_eq!(config.tools.len(), 7);
+    }
+
+    /// Minimal valid config for summary tests (only the allowlist varies).
+    fn summary_test_config(allowlist: Vec<McpToolAllowlistEntry>) -> AgentConfig {
+        AgentConfig {
+            id: "test_agent".to_string(),
+            name: "Test Agent".to_string(),
+            lifecycle: Lifecycle::Permanent,
+            llm: LLMConfig {
+                provider: "Mistral".to_string(),
+                model: "mistral-large".to_string(),
+                temperature: 0.7,
+                max_tokens: 4096,
+                is_reasoning: false,
+                context_window: None,
+            },
+            tools: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            folders: vec![],
+            require_file_confirmation: true,
+            system_prompt: "Test".to_string(),
+            max_tool_iterations: 50,
+            reasoning_effort: None,
+            kind: None,
+            auto_analyze_reports: false,
+            mcp_tool_allowlist: allowlist,
+        }
+    }
+
+    #[test]
+    fn test_summary_has_mcp_auto_approval_false_when_empty() {
+        let summary = AgentSummary::from(&summary_test_config(Vec::new()));
+        assert!(!summary.has_mcp_auto_approval);
+    }
+
+    #[test]
+    fn test_summary_has_mcp_auto_approval_true_when_tool_armed() {
+        let summary = AgentSummary::from(&summary_test_config(vec![McpToolAllowlistEntry {
+            server_id: "srv-1".to_string(),
+            tools: vec!["read".to_string()],
+            allow_in_delegated_runs: false,
+        }]));
+        assert!(summary.has_mcp_auto_approval);
+    }
+
+    #[test]
+    fn test_summary_has_mcp_auto_approval_false_for_orphan_only_entry() {
+        // A preserved entry with zero armed tools (e.g. a stopped server) must
+        // NOT flag the agent: the marker tracks genuinely armed tools, never the
+        // mere presence of a bare allowlist entry (fail-safe, never over-signals).
+        let summary = AgentSummary::from(&summary_test_config(vec![McpToolAllowlistEntry {
+            server_id: "srv-stopped".to_string(),
+            tools: Vec::new(),
+            allow_in_delegated_runs: true,
+        }]));
+        assert!(!summary.has_mcp_auto_approval);
+    }
+
+    #[test]
+    fn test_summary_has_mcp_auto_approval_ignores_file_confirmation() {
+        // Disabling file-operation confirmation is deliberately NOT folded into
+        // this marker: it is near-universally off and would defeat the per-agent
+        // differentiation. An agent with no armed MCP tools stays unmarked even
+        // with confirmation disabled.
+        let mut config = summary_test_config(Vec::new());
+        config.require_file_confirmation = false;
+        let summary = AgentSummary::from(&config);
+        assert!(!summary.has_mcp_auto_approval);
     }
 }

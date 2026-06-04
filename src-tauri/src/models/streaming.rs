@@ -667,6 +667,23 @@ pub struct ValidationResolvedEvent {
     pub source: String,
 }
 
+/// Non-blocking notice emitted when a *Manager self-improvement write executed
+/// without a human review (Auto / permissive validation mode). The frontend
+/// turns this into a transient toast so the user sees the auto-write happen;
+/// the durable record is the `PreApproved` audit entry (the toast is lost if
+/// the app is closed, hence "opportunistic").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagerWriteNoticeEvent {
+    /// Workflow the write happened in (empty when none).
+    pub workflow_id: String,
+    /// The *Manager tool id (e.g. `PromptManagerTool`).
+    pub tool_name: String,
+    /// The write operation (e.g. `update_prompt`, `grant_skill_to_agent`).
+    pub operation: String,
+    /// Risk level of the write (`high` | `critical`).
+    pub risk_level: String,
+}
+
 /// Type of sub-agent operation requiring validation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -699,6 +716,14 @@ pub mod events {
     pub const VALIDATION_REQUIRED: &str = "validation_required";
     /// Validation resolved event name (server-side resolution, e.g. timeout)
     pub const VALIDATION_RESOLVED: &str = "validation_resolved";
+    /// Non-blocking notice that a *Manager self-improvement write was executed
+    /// without a human review (Auto/permissive mode). Opportunistic toast — the
+    /// authoritative trace is the persisted `PreApproved` audit entry.
+    pub const MANAGER_WRITE_NOTICE: &str = "manager_write_notice";
+    /// Startup reached the point where the UI-critical services (providers,
+    /// embedding) are ready and the splash screen can hand over to the app. MCP
+    /// may still be connecting in the background. Payload is empty.
+    pub const BOOT_READY: &str = "boot_ready";
 }
 
 #[cfg(test)]
