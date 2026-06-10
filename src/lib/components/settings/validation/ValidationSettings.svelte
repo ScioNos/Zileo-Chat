@@ -528,7 +528,7 @@
 	.slider-bounds {
 		display: flex;
 		justify-content: space-between;
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: var(--color-text-secondary);
 	}
 	.radio-group {
@@ -563,7 +563,7 @@
 	.audit-link {
 		color: var(--color-primary);
 		text-decoration: none;
-		font-size: 0.875rem;
+		font-size: var(--font-size-sm);
 	}
 	.audit-link:hover {
 		text-decoration: underline;
@@ -590,12 +590,6 @@
 		border-top-color: var(--color-primary);
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
-	}
-
-	@keyframes spin {
-		to {
-			transform: rotate(360deg);
-		}
 	}
 
 	.settings-section {

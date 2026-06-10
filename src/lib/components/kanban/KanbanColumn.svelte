@@ -8,6 +8,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { i18n } from '$lib/i18n';
+	import { pauseOnScroll } from '$lib/actions/pauseOnScroll';
 	import { ClipboardList } from '@lucide/svelte';
 	import type { KanbanCard, KanbanColumn as Col } from '$types/kanban';
 
@@ -31,7 +32,7 @@
 		<span class="kanban-column-count" aria-label={`${cards.length}`}>{cards.length}</span>
 	</header>
 
-	<div class="kanban-column-body" role="list">
+	<div class="kanban-column-body" role="list" {@attach pauseOnScroll()}>
 		{#if cards.length === 0}
 			<div class="kanban-column-empty" aria-hidden="true">
 				<ClipboardList size={28} strokeWidth={1.5} />
@@ -68,11 +69,11 @@
 	}
 	.kanban-column-title {
 		margin: 0;
-		font-size: 0.95rem;
+		font-size: var(--font-size-base);
 		font-weight: 600;
 	}
 	.kanban-column-count {
-		font-size: 0.8rem;
+		font-size: var(--font-size-xs);
 		color: var(--color-text-muted);
 		background: var(--color-bg-primary);
 		padding: 0.1rem 0.5rem;
@@ -94,7 +95,7 @@
 		justify-content: center;
 		gap: 0.5rem;
 		color: var(--color-text-muted);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 		opacity: 0.6;
 		user-select: none;
 	}

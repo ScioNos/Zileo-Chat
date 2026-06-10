@@ -114,12 +114,12 @@
 
 	let titleKey = $derived(
 		isRecording
-			? 'stt.fab_recording'
+			? 'stt_fab_recording'
 			: isTranscribing
-				? 'stt.fab_transcribing'
+				? 'stt_fab_transcribing'
 				: focusedEditable
-					? 'stt.fab_ready'
-					: 'stt.fab_focus_required'
+					? 'stt_fab_ready'
+					: 'stt_fab_focus_required'
 	);
 </script>
 
@@ -212,7 +212,7 @@
 		right: -10px;
 		background: #fff;
 		color: var(--color-error, #dc2626);
-		font-size: 10px;
+		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-bold, 700);
 		padding: 2px 5px;
 		border-radius: 4px;
@@ -235,12 +235,6 @@
 		}
 		50% {
 			box-shadow: 0 0 0 10px rgba(220, 38, 38, 0);
-		}
-	}
-
-	@keyframes spin {
-		to {
-			transform: rotate(360deg);
 		}
 	}
 </style>

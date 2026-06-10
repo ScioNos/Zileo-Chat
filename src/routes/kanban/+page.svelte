@@ -918,7 +918,7 @@
 	}
 	.page-head h1 {
 		margin: 0;
-		font-size: 1.4rem;
+		font-size: var(--font-size-2xl);
 	}
 	.head-right {
 		display: flex;
@@ -949,7 +949,7 @@
 	}
 	.proposed-zone-title {
 		margin: 0;
-		font-size: 0.95rem;
+		font-size: var(--font-size-base);
 		font-weight: 600;
 		color: var(--color-accent-text);
 	}
@@ -957,7 +957,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		font-size: 0.82rem;
+		font-size: var(--font-size-xs);
 		font-style: italic;
 		color: var(--color-accent-text);
 	}
@@ -986,17 +986,17 @@
 	}
 	.proposed-card-title {
 		margin: 0;
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 		font-weight: 600;
 	}
 	.proposed-card-meta {
 		margin: 0;
-		font-size: 0.75rem;
+		font-size: var(--font-size-xs);
 		color: var(--color-text-muted);
 	}
 	.proposed-card-desc {
 		margin: 0;
-		font-size: 0.82rem;
+		font-size: var(--font-size-xs);
 		color: var(--color-text);
 		display: -webkit-box;
 		-webkit-line-clamp: 3;

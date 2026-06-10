@@ -36,6 +36,7 @@ Main chat area with message display, execution blocks inline, and input controls
 	import ExecutionSpinner from '$lib/components/chat/ExecutionSpinner.svelte';
 	import TodoTasksBlock from '$lib/components/chat/TodoTasksBlock.svelte';
 	import { i18n } from '$lib/i18n';
+	import { pauseOnScroll } from '$lib/actions/pauseOnScroll';
 	import type { Message, MessageAttachment } from '$types/message';
 	import type {
 		ChatBlock,
@@ -174,7 +175,12 @@ Main chat area with message display, execution blocks inline, and input controls
 	</div>
 
 	<!-- Messages Area -->
-	<div class="messages-area" bind:this={messagesContainer} onscroll={handleScroll}>
+	<div
+		class="messages-area"
+		bind:this={messagesContainer}
+		onscroll={handleScroll}
+		{@attach pauseOnScroll()}
+	>
 		{#if messagesLoading}
 			<MessageListSkeleton count={3} />
 		{:else}
@@ -342,7 +348,7 @@ Main chat area with message display, execution blocks inline, and input controls
 	}
 
 	.message-wrapper {
-		animation: fadeIn 200ms ease-out;
+		animation: fadeIn var(--transition-base);
 	}
 
 	/* Performance mode: use content-visibility for off-screen messages */
@@ -370,17 +376,6 @@ Main chat area with message display, execution blocks inline, and input controls
 		padding: var(--spacing-sm) var(--spacing-lg);
 	}
 
-	@keyframes fadeIn {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
 	.scroll-to-bottom {
 		position: absolute;
 		bottom: calc(100% + var(--spacing-sm));
@@ -396,7 +391,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		justify-content: center;
 		cursor: pointer;
 		z-index: 5;
-		animation: fadeIn 200ms ease-out;
+		animation: fadeIn var(--transition-base);
 		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 	}
 

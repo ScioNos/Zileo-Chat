@@ -195,11 +195,11 @@
 	.modal-hint {
 		margin: 0 0 0.5rem;
 		color: var(--color-text-muted);
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 	.modal-card-title {
 		margin: 0 0 0.75rem;
-		font-size: 0.9rem;
+		font-size: var(--font-size-sm);
 	}
 	.skip-pending {
 		display: flex;
@@ -221,11 +221,11 @@
 	}
 	.skip-pending small {
 		color: var(--color-text-muted);
-		font-size: 0.8rem;
+		font-size: var(--font-size-xs);
 	}
 	.modal-error {
 		color: var(--color-error);
 		margin: 0.5rem 0 0;
-		font-size: 0.85rem;
+		font-size: var(--font-size-sm);
 	}
 </style>

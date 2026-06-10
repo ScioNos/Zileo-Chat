@@ -39,14 +39,16 @@
 		padding: var(--spacing-sm) var(--spacing-md);
 		color: var(--color-text-secondary);
 		font-size: var(--font-size-sm);
-		animation: fadeIn 0.2s ease-in;
+		animation: fadeInOpacity var(--transition-base);
 	}
 
 	.spinner-text {
 		font-style: italic;
 	}
 
-	@keyframes fadeIn {
+	/* Opacity-only fade: the global fadeIn also slides vertically, which is
+	   unwanted between execution blocks. Distinct name avoids shadowing. */
+	@keyframes fadeInOpacity {
 		from {
 			opacity: 0;
 		}

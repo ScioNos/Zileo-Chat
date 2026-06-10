@@ -38,6 +38,7 @@ Each section is now a separate route for better performance and UX.
 		KanbanSquare
 	} from '@lucide/svelte';
 	import { i18n } from '$lib/i18n';
+	import { pauseOnScroll } from '$lib/actions/pauseOnScroll';
 
 	/** Props from +layout.ts */
 	interface Props {
@@ -48,36 +49,6 @@ Each section is now a separate route for better performance and UX.
 
 	/** UI state */
 	let sidebarCollapsed = $state(false);
-	let contentAreaRef: HTMLElement | null = $state(null);
-	let isScrolling = $state(false);
-
-	/**
-	 * Disable pointer events during scroll to prevent
-	 * expensive hover state recalculations in WebKit2GTK
-	 */
-	let scrollTimeout: ReturnType<typeof setTimeout>;
-
-	function handleScroll(): void {
-		if (!isScrolling) {
-			isScrolling = true;
-		}
-		clearTimeout(scrollTimeout);
-		scrollTimeout = setTimeout(() => {
-			isScrolling = false;
-		}, 250); /* Extended for momentum scroll in WebKit2GTK */
-	}
-
-	$effect(() => {
-		const el = contentAreaRef;
-		if (!el) return;
-
-		el.addEventListener('scroll', handleScroll, { passive: true });
-
-		return () => {
-			el.removeEventListener('scroll', handleScroll);
-			clearTimeout(scrollTimeout);
-		};
-	});
 
 	/** Navigation sections with routes */
 	const sectionDefs = [
@@ -188,7 +159,7 @@ Each section is now a separate route for better performance and UX.
 	</Sidebar>
 
 	<!-- Settings Content -->
-	<main bind:this={contentAreaRef} class="content-area" class:is-scrolling={isScrolling}>
+	<main class="content-area" {@attach pauseOnScroll()}>
 		{@render children()}
 	</main>
 </div>
@@ -315,23 +286,6 @@ Each section is now a separate route for better performance and UX.
 		padding-bottom: var(--spacing-xl);
 	}
 
-	.content-area :global(.section-title) {
-		font-size: var(--font-size-2xl);
-		font-weight: var(--font-weight-semibold);
-		margin-bottom: var(--spacing-lg);
-	}
-
-	.content-area :global(.section-title-row) {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-sm);
-		margin-bottom: var(--spacing-lg);
-	}
-
-	.content-area :global(.section-title-row .section-title) {
-		margin-bottom: 0;
-	}
-
 	.content-area :global(.lazy-loading) {
 		display: flex;
 		align-items: center;
@@ -356,7 +310,11 @@ Each section is now a separate route for better performance and UX.
 	 * The technique is used by major apps like Twitter/X for smooth scrolling
 	 * Removed :global(*) selector - parent is sufficient
 	 */
-	.content-area.is-scrolling {
+	/* The is-scrolling class is toggled at runtime by the pauseOnScroll
+	   attachment, so it must be :global() or the compiler would prune the
+	   selector as unused. Disabling pointer events during scroll avoids
+	   expensive hover-state recalculations in WebKitGTK. */
+	.content-area:global(.is-scrolling) {
 		pointer-events: none;
 	}
 </style>
