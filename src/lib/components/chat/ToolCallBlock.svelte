@@ -8,6 +8,7 @@
 
 <script lang="ts">
 	import { Wrench, ChevronDown, CircleCheckBig, CircleX, Server } from '@lucide/svelte';
+	import { untrack } from 'svelte';
 	import { i18n } from '$lib/i18n';
 	import { formatDuration } from '$lib/utils/duration';
 
@@ -61,6 +62,24 @@
 	const formattedInput = $derived(formatJson(inputParams));
 	const formattedOutput = $derived(formatJson(outputResult));
 
+	// Failed calls open on the output tab so the error is visible immediately;
+	// successful calls open on the input tab (what the tool was asked to do).
+	let activeTab = $state<'input' | 'output'>(untrack(() => success) ? 'input' : 'output');
+	let inputTabRef = $state<HTMLButtonElement | null>(null);
+	let outputTabRef = $state<HTMLButtonElement | null>(null);
+
+	function selectTab(tab: 'input' | 'output'): void {
+		activeTab = tab;
+	}
+
+	function handleTabKeydown(event: KeyboardEvent): void {
+		if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+			event.preventDefault();
+			activeTab = activeTab === 'input' ? 'output' : 'input';
+			(activeTab === 'input' ? inputTabRef : outputTabRef)?.focus();
+		}
+	}
+
 	function formatJson(raw: string): string {
 		try {
 			const parsed = JSON.parse(raw);
@@ -86,7 +105,7 @@
 	class="tool-call-block"
 	class:success
 	class:error={!success}
-	class:sub-agent={isSubAgent}
+	class:mcp-tool={toolType === 'mcp'}
 	role="region"
 	aria-label={isSubAgent
 		? `${$i18n('block_tool_call_sub_agent_label')}: ${agentLabel} — ${toolName} — ${success ? $i18n('chat_tool_success') : $i18n('chat_tool_error')}`
@@ -100,7 +119,9 @@
 		aria-controls={blockId}
 		type="button"
 	>
-		<Wrench size={14} class="tool-icon" />
+		<span class="blk-icon" aria-hidden="true">
+			<Wrench size={13} />
+		</span>
 		{#if isSubAgent}
 			<span class="agent-tag" title={agentLabel}>{agentLabel}</span>
 		{/if}
@@ -128,14 +149,43 @@
 
 	{#if !collapsed}
 		<div class="tool-body" id={blockId}>
-			<div class="tool-section">
-				<span class="section-label">{$i18n('chat_tool_input')}</span>
-				<pre class="tool-json">{formattedInput}</pre>
+			<div class="io-tabs" role="tablist" aria-label={toolName}>
+				<button
+					bind:this={inputTabRef}
+					type="button"
+					class="io-tab"
+					class:active={activeTab === 'input'}
+					role="tab"
+					aria-selected={activeTab === 'input'}
+					aria-controls="{blockId}-panel"
+					tabindex={activeTab === 'input' ? 0 : -1}
+					onclick={() => selectTab('input')}
+					onkeydown={handleTabKeydown}
+				>
+					{$i18n('chat_tool_input')}
+				</button>
+				<button
+					bind:this={outputTabRef}
+					type="button"
+					class="io-tab"
+					class:active={activeTab === 'output'}
+					role="tab"
+					aria-selected={activeTab === 'output'}
+					aria-controls="{blockId}-panel"
+					tabindex={activeTab === 'output' ? 0 : -1}
+					onclick={() => selectTab('output')}
+					onkeydown={handleTabKeydown}
+				>
+					{$i18n('chat_tool_output')}
+				</button>
 			</div>
 
-			<div class="tool-section">
-				<span class="section-label">{$i18n('chat_tool_output')}</span>
-				<pre class="tool-json" class:error-text={!success}>{formattedOutput}</pre>
+			<div id="{blockId}-panel" role="tabpanel">
+				{#if activeTab === 'input'}
+					<pre class="tool-json">{formattedInput}</pre>
+				{:else}
+					<pre class="tool-json" class:error-text={!success}>{formattedOutput}</pre>
+				{/if}
 			</div>
 
 			{#if errorMessage}
@@ -148,26 +198,28 @@
 </div>
 
 <style>
+	/* The block publishes its channel (blue for local tools, magenta for MCP)
+	   so the execution-thread rail in ChatContainer can tint its node. */
 	.tool-call-block {
-		border-radius: var(--border-radius-md);
+		--blk-channel: var(--channel-tool);
+		--blk-channel-soft: var(--channel-tool-soft);
+		background: var(--surface-1);
+		border: 1px solid var(--color-border);
+		border-radius: var(--border-radius-lg);
+		box-shadow: var(--shadow-xs);
 		margin: var(--spacing-xs) 0;
-		background: var(--color-bg-secondary);
 		overflow: hidden;
 	}
 
-	.tool-call-block.success {
-		border-left: 3px solid var(--color-success);
+	.tool-call-block.mcp-tool {
+		--blk-channel: var(--channel-mcp);
+		--blk-channel-soft: var(--channel-mcp-soft);
 	}
 
+	/* Failures keep a loud red rib: the status icon alone is too quiet for
+	   an error that may need user action. Successes rely on the check icon. */
 	.tool-call-block.error {
-		border-left: 3px solid var(--color-danger);
-	}
-
-	/* Sub-agent visual treatment (spec 2026-05-12 section 'Décisions validées') */
-	.tool-call-block.sub-agent {
-		margin-left: 16px;
-		border-left-style: dashed;
-		border-left-color: var(--color-info);
+		border-left: 3px solid var(--color-error);
 	}
 
 	.agent-tag {
@@ -175,8 +227,8 @@
 		align-items: center;
 		padding: 2px 6px;
 		font-size: var(--font-size-xs);
-		color: var(--color-text-secondary);
-		background: color-mix(in srgb, var(--color-info) 10%, transparent);
+		color: var(--channel-agent);
+		background: var(--channel-agent-soft);
 		border-radius: 4px;
 		flex-shrink: 0;
 		max-width: 120px;
@@ -186,7 +238,7 @@
 	}
 
 	.tool-header:hover .agent-tag {
-		background: color-mix(in srgb, var(--color-info) 16%, transparent);
+		background: color-mix(in srgb, var(--channel-agent) 16%, transparent);
 	}
 
 	.tool-header {
@@ -208,12 +260,22 @@
 		background: var(--color-bg-hover);
 	}
 
-	.tool-header :global(.tool-icon) {
+	/* Tinted icon pill carrying the block's channel color */
+	.blk-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 26px;
+		height: 26px;
+		border-radius: 8px;
+		background: var(--blk-channel-soft);
+		color: var(--blk-channel);
 		flex-shrink: 0;
-		color: var(--color-text-secondary);
 	}
 
 	.tool-name {
+		font-family: var(--font-mono);
+		font-size: var(--font-size-xs);
 		font-weight: var(--font-weight-medium);
 		flex-shrink: 0;
 	}
@@ -223,10 +285,11 @@
 		align-items: center;
 		gap: 2px;
 		padding: 1px var(--spacing-xs);
-		background: var(--color-bg-tertiary);
-		border-radius: var(--border-radius-sm);
+		background: var(--blk-channel-soft);
+		border: 1px solid currentColor;
+		border-radius: var(--border-radius-full);
 		font-size: var(--font-size-xs);
-		color: var(--color-text-secondary);
+		color: var(--blk-channel);
 	}
 
 	.tool-status {
@@ -261,35 +324,43 @@
 
 	.tool-body {
 		padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-sm);
-		border-top: 1px solid var(--color-border);
+		border-top: 1px solid var(--color-border-light);
 	}
 
-	.tool-section {
-		margin-bottom: var(--spacing-sm);
-	}
-
-	.tool-section:last-child {
-		margin-bottom: 0;
-	}
-
-	.section-label {
-		display: block;
-		font-size: var(--font-size-xs);
-		font-weight: var(--font-weight-medium);
-		color: var(--color-text-secondary);
+	.io-tabs {
+		display: flex;
+		gap: 2px;
 		margin-bottom: var(--spacing-xs);
+	}
+
+	.io-tab {
+		padding: 0.2rem 0.7rem;
+		font-size: var(--font-size-2xs);
+		font-family: var(--font-family);
+		font-weight: var(--font-weight-semibold);
 		text-transform: uppercase;
-		letter-spacing: 0.5px;
+		letter-spacing: 0.07em;
+		color: var(--color-text-tertiary);
+		background: transparent;
+		border: none;
+		border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+		cursor: pointer;
+	}
+
+	.io-tab.active {
+		background: var(--surface-2);
+		color: var(--blk-channel, var(--color-text-primary));
 	}
 
 	.tool-json {
 		font-family: var(--font-family-mono, monospace);
 		font-size: var(--font-size-xs);
-		line-height: 1.5;
+		line-height: 1.6;
 		color: var(--color-text-primary);
-		background: var(--color-bg-tertiary);
-		border-radius: var(--border-radius-sm);
-		padding: var(--spacing-xs) var(--spacing-sm);
+		background: var(--surface-2);
+		border: 1px solid var(--color-border-light);
+		border-radius: var(--border-radius-md);
+		padding: 0.7rem 0.85rem;
 		white-space: pre-wrap;
 		word-break: break-word;
 		margin: 0;
@@ -298,7 +369,8 @@
 	}
 
 	.tool-json.error-text {
-		color: var(--color-danger);
+		color: var(--color-error);
+		border-color: var(--color-error-border);
 	}
 
 	.tool-error {

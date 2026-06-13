@@ -141,28 +141,33 @@
 	.message-metrics {
 		display: flex;
 		align-items: center;
-		gap: var(--spacing-md);
+		gap: var(--spacing-xs);
 		padding-top: var(--spacing-xs);
-		font-size: var(--font-size-xs);
 		flex-wrap: wrap;
 	}
 
+	/* Pill chips matching the execution-thread metric chips */
 	.metric {
-		display: flex;
+		display: inline-flex;
 		align-items: center;
-		gap: var(--spacing-xs);
-		color: var(--color-text-tertiary);
-		font-family: var(--font-mono);
+		gap: 4px;
+		padding: 0.14rem 0.5rem;
+		font-size: var(--font-size-2xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--color-text-secondary);
+		background: var(--surface-2);
+		border: 1px solid var(--color-border-light);
+		border-radius: var(--border-radius-full);
 	}
 
 	.metric.thinking {
-		color: var(--color-warning, #f59e0b);
+		color: var(--color-warning);
 	}
 
 	.sub-agents-bar {
 		display: flex;
 		align-items: center;
-		gap: var(--spacing-sm);
+		gap: var(--spacing-xs);
 		padding-top: var(--spacing-xs);
 		font-size: var(--font-size-xs);
 		color: var(--color-text-tertiary);
@@ -173,15 +178,17 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--spacing-xs);
-		padding: 2px var(--spacing-sm);
-		background: var(--color-bg-tertiary);
+		padding: 0.14rem 0.5rem;
+		font-size: var(--font-size-2xs);
+		background: var(--surface-2);
+		border: 1px solid var(--color-border-light);
 		border-radius: var(--border-radius-full);
-		font-family: var(--font-mono);
+		font-variant-numeric: tabular-nums;
 	}
 
 	.sub-agent-chip.error {
-		background: var(--color-danger-bg);
-		color: var(--color-danger);
+		color: var(--color-error);
+		border-color: var(--color-error-border);
 	}
 
 	.agent-name {
@@ -201,6 +208,6 @@
 	}
 
 	.agent-thinking {
-		color: var(--color-warning, #f59e0b);
+		color: var(--color-warning);
 	}
 </style>

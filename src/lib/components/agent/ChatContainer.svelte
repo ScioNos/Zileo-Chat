@@ -45,7 +45,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		SubAgentBlockData,
 		TodoTaskDisplay
 	} from '$types/chat-block';
-	import { countInternalBlocks } from './chat-container-helpers';
+	import { groupBlocksBySubAgent, type BlockGroup } from './chat-container-helpers';
 
 	interface Props {
 		messages: Message[];
@@ -184,7 +184,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		{#if messagesLoading}
 			<MessageListSkeleton count={3} />
 		{:else}
-			{#snippet renderBlock(block: ChatBlock, allBlocks: ChatBlock[])}
+			{#snippet renderLeafBlock(block: ChatBlock)}
 				{#if block.block_type === 'thinking'}
 					{@const data = block.data as ThinkingBlockData}
 					<ThinkingBlock
@@ -211,7 +211,14 @@ Main chat area with message display, execution blocks inline, and input controls
 						agentName={data.agent_name}
 						{primaryAgentId}
 					/>
-				{:else if block.block_type === 'sub_agent'}
+				{/if}
+			{/snippet}
+
+			{#snippet renderGroup(group: BlockGroup)}
+				{@const block = group.block}
+				{#if block.block_type !== 'sub_agent'}
+					{@render renderLeafBlock(block)}
+				{:else}
 					{@const data = block.data as SubAgentBlockData}
 					<SubAgentBlock
 						agentName={data.agent_name}
@@ -225,8 +232,12 @@ Main chat area with message display, execution blocks inline, and input controls
 						thinkingTokens={data.thinking_tokens}
 						reportSummary={data.report_summary}
 						sequence={block.sequence}
-						internalBlockCount={countInternalBlocks(allBlocks, data._sub_agent_id)}
-					/>
+						internalBlockCount={group.internals.length}
+					>
+						{#each group.internals as inner (`${inner.block_type}-${inner.sequence}`)}
+							{@render renderLeafBlock(inner)}
+						{/each}
+					</SubAgentBlock>
 				{/if}
 			{/snippet}
 
@@ -257,8 +268,8 @@ Main chat area with message display, execution blocks inline, and input controls
 						-->
 						{#if message.role === 'assistant' && getBlocksForMessage(message.id).length > 0}
 							<div class="persisted-blocks">
-								{#each getBlocksForMessage(message.id) as block (`${block.block_type}-${block.sequence}`)}
-									{@render renderBlock(block, getBlocksForMessage(message.id))}
+								{#each groupBlocksBySubAgent(getBlocksForMessage(message.id)) as group (`${group.block.block_type}-${group.block.sequence}`)}
+									{@render renderGroup(group)}
 								{/each}
 							</div>
 						{/if}
@@ -269,8 +280,8 @@ Main chat area with message display, execution blocks inline, and input controls
 			<!-- Real-time execution blocks (current execution) -->
 			{#if isExecuting || executionBlocks.length > 0}
 				<div class="execution-blocks">
-					{#each executionBlocks as block (`${block.block_type}-${block.sequence}`)}
-						{@render renderBlock(block, executionBlocks)}
+					{#each groupBlocksBySubAgent(executionBlocks) as group (`${group.block.block_type}-${group.block.sequence}`)}
+						{@render renderGroup(group)}
 					{/each}
 
 					{#if isExecuting}
@@ -362,13 +373,76 @@ Main chat area with message display, execution blocks inline, and input controls
 		flex-direction: column;
 	}
 
+	/*
+	  Execution thread rail: both block groups (persisted under a message,
+	  live during execution) draw a vertical gradient rail in a left gutter,
+	  with one glowing node per block. Each block component publishes its
+	  channel through --blk-channel/--blk-channel-soft on its root element;
+	  the node pseudo-element below reads them (custom properties set on an
+	  element apply to its own pseudo-elements), so this is the single place
+	  that renders nodes for every block type.
+	*/
 	.persisted-blocks {
-		padding: 0 var(--spacing-md);
+		position: relative;
+		padding: 0 var(--spacing-md) 0 calc(var(--spacing-md) + 26px);
+	}
+
+	.persisted-blocks::before {
+		content: '';
+		position: absolute;
+		left: calc(var(--spacing-md) + 9px);
+		top: 6px;
+		bottom: 6px;
+		width: 2px;
+		border-radius: 2px;
+		background: var(--gradient-rail);
 	}
 
 	/* Execution Blocks (real-time) */
 	.execution-blocks {
-		padding: var(--spacing-sm) var(--spacing-lg);
+		position: relative;
+		padding: var(--spacing-sm) var(--spacing-lg) var(--spacing-sm) calc(var(--spacing-lg) + 26px);
+	}
+
+	.execution-blocks::before {
+		content: '';
+		position: absolute;
+		left: calc(var(--spacing-lg) + 9px);
+		top: calc(var(--spacing-sm) + 6px);
+		bottom: calc(var(--spacing-sm) + 6px);
+		width: 2px;
+		border-radius: 2px;
+		background: var(--gradient-rail);
+	}
+
+	.persisted-blocks > :global(*),
+	.execution-blocks > :global(*) {
+		position: relative;
+	}
+
+	.persisted-blocks > :global(*)::before,
+	.execution-blocks > :global(*)::before {
+		content: '';
+		position: absolute;
+		left: -21px;
+		top: 14px;
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: var(--blk-channel, var(--color-text-tertiary));
+		box-shadow:
+			0 0 0 3px var(--blk-channel-soft, transparent),
+			0 0 10px var(--blk-channel, transparent);
+	}
+
+	/* The newest live node pulses while streaming; paused during scroll via
+	   the same is-scrolling mechanism the global stylesheet uses. */
+	.execution-blocks > :global(*:last-child)::before {
+		animation: pulse 1.2s ease-in-out infinite;
+	}
+
+	.messages-area:global(.is-scrolling) .execution-blocks > :global(*:last-child)::before {
+		animation-play-state: paused;
 	}
 
 	/* Tasks section (independent of execution blocks, persists after execution) */
@@ -384,7 +458,7 @@ Main chat area with message display, execution blocks inline, and input controls
 		height: 36px;
 		border-radius: 50%;
 		border: 1px solid var(--color-border);
-		background: var(--color-bg-secondary);
+		background: var(--surface-1);
 		color: var(--color-text-secondary);
 		display: flex;
 		align-items: center;
@@ -392,12 +466,12 @@ Main chat area with message display, execution blocks inline, and input controls
 		cursor: pointer;
 		z-index: 5;
 		animation: fadeIn var(--transition-base);
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+		box-shadow: var(--shadow-md);
 	}
 
 	.scroll-to-bottom:hover {
 		background: var(--color-accent);
-		color: var(--color-text-on-accent, #fff);
+		color: var(--color-text-on-accent);
 		border-color: var(--color-accent);
 	}
 
@@ -410,6 +484,10 @@ Main chat area with message display, execution blocks inline, and input controls
 	@media (prefers-reduced-motion: reduce) {
 		.message-wrapper,
 		.scroll-to-bottom {
+			animation: none;
+		}
+
+		.execution-blocks > :global(*:last-child)::before {
 			animation: none;
 		}
 	}

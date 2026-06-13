@@ -47,7 +47,7 @@
 		MCPAdditions
 	} from '$types/import-export';
 	import { MAX_IMPORT_FILE_SIZE } from '$types/import-export';
-	import { Upload, CircleCheckBig, TriangleAlert, CircleAlert } from '@lucide/svelte';
+	import { Upload, CircleCheckBig, TriangleAlert, CircleAlert, Info } from '@lucide/svelte';
 
 	interface Props {
 		onNext: () => void;
@@ -225,7 +225,10 @@
 								>
 							{/if}
 						</div>
-						<p class="result-secrets">{$i18n('onboarding_import_secrets_notice')}</p>
+						<div class="secrets-notice">
+							<Info size={16} aria-hidden="true" />
+							<span>{$i18n('onboarding_import_secrets_notice')}</span>
+						</div>
 					</div>
 				{/snippet}
 			</Card>
@@ -321,7 +324,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		color: var(--color-success, #059669);
+		color: var(--color-success);
 	}
 
 	.result-title {
@@ -338,12 +341,24 @@
 		gap: var(--spacing-xs);
 	}
 
-	.result-secrets {
-		font-size: var(--font-size-sm);
+	.secrets-notice {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--spacing-sm);
+		padding: var(--spacing-sm) var(--spacing-md);
+		border-radius: var(--border-radius-md);
+		background: var(--color-info-light);
 		color: var(--color-text-secondary);
-		margin: 0;
+		font-size: var(--font-size-sm);
+		text-align: left;
 		max-width: 460px;
 		line-height: 1.5;
+	}
+
+	.secrets-notice :global(svg) {
+		flex-shrink: 0;
+		margin-top: 2px;
+		color: var(--color-info);
 	}
 
 	.import-notice {
@@ -355,17 +370,17 @@
 	}
 
 	.import-notice-warning {
-		background: var(--color-warning-bg, #fef3c7);
-		color: var(--color-warning, #92400e);
+		background: var(--color-warning-bg);
+		color: var(--color-warning);
 	}
 
 	.import-notice-error {
-		background: var(--color-error-bg, #fee2e2);
-		color: var(--color-error, #dc2626);
+		background: var(--color-error-bg);
+		color: var(--color-error);
 	}
 
 	.result-icon-wrapper.partial {
-		color: var(--color-warning, #92400e);
+		color: var(--color-warning);
 	}
 
 	.import-messages {
@@ -377,13 +392,13 @@
 	}
 
 	.import-messages-warning {
-		background: var(--color-warning-bg, #fef3c7);
-		color: var(--color-warning, #92400e);
+		background: var(--color-warning-bg);
+		color: var(--color-warning);
 	}
 
 	.import-messages-error {
-		background: var(--color-error-bg, #fee2e2);
-		color: var(--color-error, #dc2626);
+		background: var(--color-error-bg);
+		color: var(--color-error);
 	}
 
 	.messages-title {

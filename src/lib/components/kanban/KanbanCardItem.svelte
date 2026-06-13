@@ -11,6 +11,7 @@
 	import { i18n } from '$lib/i18n';
 	import { Badge, Button, Spinner } from '$lib/components/ui';
 	import {
+		Bot,
 		Eye,
 		Trash2,
 		FileText,
@@ -186,7 +187,10 @@
 	</header>
 
 	{#if targetAgentName}
-		<p class="card-meta">{targetAgentName}</p>
+		<p class="card-meta">
+			<Bot size={13} aria-hidden="true" />
+			{targetAgentName}
+		</p>
 	{/if}
 
 	{#if card.description}
@@ -195,7 +199,8 @@
 
 	{#if isRunning && liveProgress}
 		<p class="card-progress" aria-live="polite">
-			{$i18n('kanban_card_running')}
+			<Spinner size="sm" />
+			<span>{$i18n('kanban_card_running')}</span>
 		</p>
 	{/if}
 
@@ -303,22 +308,38 @@
 </article>
 
 <style>
+	/* The status rib inherits --col-tint from the hosting column (custom
+	   properties cascade through the display:contents card slot). */
 	.kanban-card {
+		position: relative;
 		background: var(--color-surface);
 		border: 1px solid var(--color-border);
-		border-radius: 6px;
+		border-left: 3px solid var(--col-tint, var(--color-border));
+		border-radius: var(--border-radius-md);
 		padding: 0.6rem 0.7rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
-		transition: box-shadow var(--transition-fast);
+		box-shadow: var(--shadow-xs);
+		transition:
+			box-shadow var(--transition-base),
+			transform var(--transition-base);
 	}
 	.kanban-card:hover {
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+		box-shadow: var(--shadow-md);
+		transform: translateY(-1px);
 	}
 	.kanban-card.running {
-		opacity: 0.85;
-		border-style: dashed;
+		border-left-color: var(--color-status-running);
+	}
+	.kanban-card.running::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		pointer-events: none;
+		box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.25);
+		animation: pulse 2.4s ease-in-out infinite;
 	}
 	.card-head {
 		display: flex;
@@ -340,55 +361,73 @@
 		flex: 1;
 		min-width: 0;
 	}
+	/* Neutral pill (border + tertiary surface), matching the mock's
+	   auto-purge countdown badge. */
 	.card-purge-countdown {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.2rem;
-		font-size: var(--font-size-xs);
-		color: var(--color-text-muted);
-		padding: 0.1rem 0.35rem;
-		border-radius: 999px;
-		background: var(--color-surface-alt, rgba(0, 0, 0, 0.04));
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		color: var(--color-text-secondary);
+		padding: 0.1rem 0.45rem;
+		border-radius: var(--border-radius-full);
+		background: var(--color-bg-tertiary);
+		border: 1px solid var(--color-border);
 		white-space: nowrap;
 	}
 	.card-purge-countdown.imminent {
-		color: var(--color-warning, #b45309);
+		color: var(--color-warning);
 	}
 	.card-meta {
 		margin: 0;
-		font-size: var(--font-size-xs);
-		color: var(--color-text-muted);
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: var(--font-size-2xs);
+		color: var(--color-text-tertiary);
 	}
 	.card-description {
 		margin: 0;
 		font-size: var(--font-size-xs);
-		color: var(--color-text);
+		color: var(--color-text-secondary);
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
 		line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
+	/* Live activity lines read in the info channel, like the mock's
+	   in-progress card. */
 	.card-progress {
 		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 		font-size: var(--font-size-xs);
-		color: var(--color-accent);
+		color: var(--color-info);
 		font-style: italic;
 	}
 	.card-analyzing {
 		margin: 0;
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: 0.5rem;
 		font-size: var(--font-size-xs);
-		color: var(--color-accent);
+		color: var(--color-info);
 		font-style: italic;
 	}
 	.card-error {
 		margin: 0;
 		font-size: var(--font-size-xs);
 		color: var(--color-error);
+		white-space: pre-wrap;
+		background: var(--color-error-light);
+		border-radius: var(--border-radius-sm);
+		padding: 0.35rem 0.5rem;
 	}
+	/* Actions revealed on hover or keyboard focus (desktop-first choice:
+	   to revisit if touch usage ever appears). */
 	.card-actions {
 		display: flex;
 		flex-wrap: wrap;
@@ -396,6 +435,17 @@
 		gap: 0.25rem 0.35rem;
 		margin-top: 0.25rem;
 		min-width: 0;
+		opacity: 0.45;
+		transition: opacity var(--transition-fast);
+	}
+	.kanban-card:hover .card-actions,
+	.kanban-card:focus-within .card-actions {
+		opacity: 1;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.kanban-card.running::after {
+			animation: none;
+		}
 	}
 	.card-workflow-link {
 		color: var(--color-text-muted);

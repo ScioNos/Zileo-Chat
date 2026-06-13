@@ -12,6 +12,7 @@
 	import { i18n } from '$lib/i18n';
 	import { getErrorMessage } from '$lib/utils/error';
 	import { Modal, Button } from '$lib/components/ui';
+	import { Sparkles, Pencil } from '@lucide/svelte';
 	import type { SelectOption } from '$lib/components/ui';
 	import { canStartCompose } from '$lib/stores/kanban-compose';
 	import KanbanCardCreatorAuto from './KanbanCardCreatorAuto.svelte';
@@ -20,6 +21,7 @@
 	import type { PromptSummary } from '$types/prompt';
 	import type { WorkflowFolder } from '$types/workflow';
 	import type { KanbanCardCreate, KanbanScheduleCreate } from '$types/kanban';
+	import { supervisorRoleState } from '$lib/utils/kanban-supervisors';
 
 	interface Props {
 		open: boolean;
@@ -28,6 +30,10 @@
 		folders: WorkflowFolder[];
 		/** Pre-selected Kanban agent (current filter), or empty. */
 		defaultKanbanAgentId?: string;
+		/** Global compose supervisor id from settings (null/undefined = unset). */
+		composeAgentId?: string | null;
+		/** Global analyze supervisor id from settings (null/undefined = unset). */
+		analyzeAgentId?: string | null;
 		onclose: () => void;
 		oncreated: (
 			payload: KanbanCardCreate,
@@ -41,6 +47,8 @@
 		prompts,
 		folders,
 		defaultKanbanAgentId = '',
+		composeAgentId = null,
+		analyzeAgentId = null,
 		onclose,
 		oncreated
 	}: Props = $props();
@@ -73,6 +81,17 @@
 		{ value: '', label: $i18n('kanban_select_kanban_agent') },
 		...agents.filter((a) => a.kind === 'kanban').map((a) => ({ value: a.id, label: a.name }))
 	]);
+
+	// Cross the configured supervisor ids with the live Kanban-kind agents to
+	// classify each role: unset (info nudge), dangling (warning), or ok.
+	const kanbanAgentIds = $derived(
+		new Set(agents.filter((a) => a.kind === 'kanban').map((a) => a.id))
+	);
+	const composeState = $derived(supervisorRoleState(composeAgentId, kanbanAgentIds));
+	const analyzeState = $derived(supervisorRoleState(analyzeAgentId, kanbanAgentIds));
+	// D7: pre-select + lock the Auto compose select only when the global agent is
+	// actually valid; a dangling id must let the user pick one (with a warning).
+	const globalComposeAgentId = $derived(composeState === 'ok' ? (composeAgentId ?? '') : '');
 
 	const targetAgentOptions = $derived<SelectOption[]>([
 		{ value: '', label: $i18n('kanban_select_target_agent') },
@@ -137,6 +156,7 @@
 				aria-selected={mode === 'auto'}
 				onclick={() => (mode = 'auto')}
 			>
+				<Sparkles size={13} aria-hidden="true" />
 				{$i18n('kanban_mode_auto')}
 			</button>
 			<button
@@ -147,6 +167,7 @@
 				aria-selected={mode === 'manual'}
 				onclick={() => (mode = 'manual')}
 			>
+				<Pencil size={13} aria-hidden="true" />
 				{$i18n('kanban_mode_manual')}
 			</button>
 		</div>
@@ -161,6 +182,9 @@
 					bind:this={autoPane}
 					{kanbanAgentOptions}
 					{defaultKanbanAgentId}
+					{globalComposeAgentId}
+					{composeState}
+					{analyzeState}
 					onerror={(m) => (error = m)}
 				/>
 			{:else}
@@ -174,6 +198,7 @@
 					{promptOptions}
 					{folderOptions}
 					{defaultKanbanAgentId}
+					{analyzeState}
 					onerror={(m) => (error = m)}
 				/>
 			{/if}
@@ -185,6 +210,7 @@
 		</Button>
 		{#if mode === 'auto'}
 			<Button variant="primary" onclick={runAutoCompose} disabled={launching || !$canStartCompose}>
+				<Sparkles size={14} aria-hidden="true" />
 				{launching ? $i18n('kanban_composing_preview_btn') : $i18n('kanban_compose_preview')}
 			</Button>
 		{:else}
@@ -196,23 +222,46 @@
 </Modal>
 
 <style>
+	/* Segmented pill switcher, same recipe as the app's main nav: grouped
+	   track, active tab lifted on its own surface with a soft brand glow. */
 	.mode-tabs {
-		display: flex;
-		gap: 0.5rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		padding: 3px;
+		background: var(--color-bg-tertiary);
+		border: 1px solid var(--color-border-light);
+		border-radius: var(--border-radius-full);
 		margin-bottom: 0.75rem;
 	}
 	.tab {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
 		background: none;
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-		padding: 0.35rem 0.75rem;
+		border: none;
+		border-radius: var(--border-radius-full);
+		padding: 0.4rem 0.9rem;
 		cursor: pointer;
-		color: var(--color-text);
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-medium);
+		font-family: var(--font-family);
+		color: var(--color-text-secondary);
+		transition:
+			background-color var(--transition-fast),
+			color var(--transition-fast);
+	}
+	.tab:hover {
+		color: var(--color-text-primary);
+		background: var(--color-bg-hover);
 	}
 	.tab.active {
-		background: var(--color-accent);
-		color: var(--color-accent-text);
-		border-color: var(--color-accent);
+		background: var(--surface-1);
+		color: var(--color-text-primary);
+		box-shadow: var(--shadow-xs), var(--glow-accent-soft);
+	}
+	.tab.active :global(svg) {
+		color: var(--color-accent-deep);
 	}
 	.error {
 		color: var(--color-error);

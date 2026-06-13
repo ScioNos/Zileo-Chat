@@ -28,7 +28,7 @@
   <ChatInput value={inputValue} disabled={sending} onsend={handleSend} />
 -->
 <script lang="ts">
-	import { Send, BookOpen, CircleStop, Paperclip, X } from '@lucide/svelte';
+	import { Send, BookOpen, CircleStop, Paperclip, X, Clock } from '@lucide/svelte';
 	import { openDialog, tauriInvoke as invoke } from '$lib/tauri';
 	import Spinner from '$lib/components/ui/Spinner.svelte';
 	import PromptSelectorModal from './PromptSelectorModal.svelte';
@@ -491,6 +491,12 @@
 			<Paperclip size={18} />
 		</button>
 		<div class="textarea-wrapper">
+			{#if showPendingHint}
+				<span id="chat-input-pending-hint" class="pending-hint" role="status" aria-live="polite">
+					<Clock size={12} />
+					{$i18n('chat_input_workflow_in_progress_hint')}
+				</span>
+			{/if}
 			<textarea
 				bind:this={textareaRef}
 				bind:value
@@ -504,43 +510,36 @@
 				aria-label={$i18n('chat_input_arialabel')}
 				aria-describedby={showPendingHint ? 'chat-input-pending-hint' : undefined}
 			></textarea>
-			{#if showPendingHint}
-				<span id="chat-input-pending-hint" class="pending-hint" role="status" aria-live="polite">
-					{$i18n('chat_input_workflow_in_progress_hint')}
-				</span>
-			{/if}
 		</div>
 		{#if oncancel}
 			<button
 				type="button"
-				class="stop-button"
+				class="cancel-button"
 				onclick={oncancel}
+				title={$i18n('chat_cancel_arialabel')}
 				aria-label={$i18n('chat_cancel_arialabel')}
 			>
 				<CircleStop size={20} />
 			</button>
-		{:else}
-			<button
-				type="button"
-				class="send-button"
-				onclick={handleSend}
-				disabled={disabled || loading || (!value.trim() && !hasAttachments)}
-				aria-disabled={disabled || loading || (!value.trim() && !hasAttachments)}
-				title={loading ? $i18n('chat_input_send_disabled_tooltip') : undefined}
-				aria-label={$i18n('chat_send_arialabel')}
-			>
-				{#if loading}
-					<Spinner size="sm" />
-				{:else}
-					<Send size={20} />
-				{/if}
-			</button>
 		{/if}
+		<button
+			type="button"
+			class="send-button"
+			onclick={handleSend}
+			disabled={disabled || loading || (!value.trim() && !hasAttachments)}
+			aria-disabled={disabled || loading || (!value.trim() && !hasAttachments)}
+			title={loading ? $i18n('chat_input_send_disabled_tooltip') : undefined}
+			aria-label={$i18n('chat_send_arialabel')}
+		>
+			{#if loading && !oncancel}
+				<Spinner size="sm" />
+			{:else}
+				<Send size={20} />
+			{/if}
+		</button>
 	</div>
-	{#if (value.trim() || hasAttachments) && !loading}
-		<span class="keyboard-hint">{$i18n('chat_keyboard_hint')}</span>
-	{/if}
 </div>
+<span class="keyboard-hint">{$i18n('chat_keyboard_hint')}</span>
 
 <PromptSelectorModal
 	open={showPromptSelector}
@@ -549,10 +548,22 @@
 />
 
 <style>
+	/* Composer pill: the frame carries all the chrome (border, radius, glow)
+	   so the textarea inside can stay borderless. */
 	.chat-input-frame {
-		background: var(--color-bg-secondary);
-		border-top: 1px solid var(--color-border);
-		transition: background-color var(--transition-fast);
+		background: var(--surface-1);
+		border: 1px solid var(--color-border);
+		border-radius: var(--border-radius-xl);
+		box-shadow: var(--shadow-sm);
+		transition:
+			background-color var(--transition-fast),
+			border-color var(--transition-base),
+			box-shadow var(--transition-base);
+	}
+
+	.chat-input-frame:focus-within {
+		border-color: var(--color-accent-hover);
+		box-shadow: var(--shadow-sm), var(--glow-accent-soft);
 	}
 
 	.chat-input-frame.drag-over {
@@ -608,8 +619,8 @@
 		padding: var(--spacing-sm) var(--spacing-md);
 		margin: var(--spacing-sm) var(--spacing-md) 0;
 		background: var(--color-warning-light, rgba(255, 193, 7, 0.15));
-		color: var(--color-warning, #b07c00);
-		border: 1px solid var(--color-warning, #f0c040);
+		color: var(--color-warning);
+		border: 1px solid var(--color-warning);
 		border-radius: var(--border-radius-sm);
 		font-size: var(--font-size-xs);
 	}
@@ -618,21 +629,21 @@
 		padding: var(--spacing-sm) var(--spacing-md);
 		margin: var(--spacing-sm) var(--spacing-md) 0;
 		background: var(--color-danger-light, rgba(220, 53, 69, 0.1));
-		color: var(--color-danger, #b91c1c);
-		border: 1px solid var(--color-danger, #dc3545);
+		color: var(--color-danger);
+		border: 1px solid var(--color-danger);
 		border-radius: var(--border-radius-sm);
 		font-size: var(--font-size-xs);
 	}
 
 	.attach-button {
-		width: 40px;
-		height: 40px;
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: var(--color-bg-primary);
-		color: var(--color-accent);
-		border: 1px solid var(--color-border);
+		background: transparent;
+		color: var(--color-text-secondary);
+		border: none;
 		border-radius: var(--border-radius-md);
 		cursor: pointer;
 		transition: all var(--transition-fast);
@@ -640,8 +651,8 @@
 	}
 
 	.attach-button:hover:not(:disabled) {
-		background: var(--color-bg-secondary);
-		border-color: var(--color-accent);
+		background: var(--color-bg-hover);
+		color: var(--color-accent-deep);
 	}
 
 	.attach-button:disabled {
@@ -664,26 +675,25 @@
 		flex-direction: column;
 	}
 
+	/* Borderless inside the pill: the frame's focus-within glow is the
+	   focus affordance. */
 	.chat-input {
 		width: 100%;
 		min-height: 40px;
 		max-height: 200px;
-		padding: var(--spacing-sm) var(--spacing-md);
+		padding: var(--spacing-sm) var(--spacing-sm);
 		font-size: var(--font-size-sm);
 		font-family: inherit;
+		line-height: 1.55;
 		color: var(--color-text-primary);
-		background: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
-		border-radius: var(--border-radius-md);
+		background: transparent;
+		border: none;
 		resize: none;
 		overflow-y: auto;
-		transition: border-color var(--transition-fast);
 	}
 
 	.chat-input:focus {
 		outline: none;
-		border-color: var(--color-accent);
-		box-shadow: 0 0 0 3px var(--color-accent-light);
 	}
 
 	.chat-input:disabled {
@@ -691,22 +701,30 @@
 		cursor: not-allowed;
 	}
 
+	/* Queued-message pill: warning tint, sits above the textarea inside the
+	   composer so the user sees the deferred-send state before typing more. */
 	.pending-hint {
-		margin-top: 2px;
-		font-size: var(--font-size-xs);
-		color: var(--color-text-tertiary);
-		font-style: italic;
+		display: inline-flex;
+		align-items: center;
+		align-self: flex-start;
+		gap: var(--spacing-xs);
+		padding: 0.1rem 0.5rem;
+		margin-bottom: var(--spacing-xs);
+		font-size: var(--font-size-2xs);
+		color: var(--color-warning);
+		background: var(--color-warning-light);
+		border-radius: var(--border-radius-full);
 	}
 
 	.prompt-button {
-		width: 40px;
-		height: 40px;
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: var(--color-bg-primary);
-		color: var(--color-accent);
-		border: 1px solid var(--color-border);
+		background: transparent;
+		color: var(--color-text-secondary);
+		border: none;
 		border-radius: var(--border-radius-md);
 		cursor: pointer;
 		transition: all var(--transition-fast);
@@ -714,8 +732,8 @@
 	}
 
 	.prompt-button:hover:not(:disabled) {
-		background: var(--color-bg-secondary);
-		border-color: var(--color-accent);
+		background: var(--color-bg-hover);
+		color: var(--color-accent-deep);
 	}
 
 	.prompt-button:disabled {
@@ -723,23 +741,29 @@
 		cursor: not-allowed;
 	}
 
+	/* Square gradient send button with dark ink, glowing on hover (site CTA) */
 	.send-button {
-		width: 40px;
-		height: 40px;
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: var(--color-accent);
-		color: var(--color-text-inverse);
+		background: var(--gradient-brand);
+		color: var(--color-accent-text);
 		border: none;
-		border-radius: var(--border-radius-md);
+		border-radius: 10px;
+		box-shadow: var(--shadow-xs);
 		cursor: pointer;
-		transition: all var(--transition-fast);
+		transition:
+			box-shadow var(--transition-fast),
+			transform var(--transition-fast),
+			filter var(--transition-fast);
 		flex-shrink: 0;
 	}
 
 	.send-button:hover:not(:disabled) {
-		background: var(--color-accent-hover);
+		filter: brightness(1.04);
+		box-shadow: var(--glow-accent);
 	}
 
 	.send-button:disabled {
@@ -747,31 +771,33 @@
 		cursor: not-allowed;
 	}
 
-	.stop-button {
-		width: 40px;
-		height: 40px;
+	/* Ghost cancel button with red stop icon, next to the always-visible
+	   send button (which stays disabled while the workflow runs). */
+	.cancel-button {
+		width: 36px;
+		height: 36px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: var(--color-danger);
-		color: var(--color-text-inverse);
+		background: transparent;
+		color: var(--color-error);
 		border: none;
 		border-radius: var(--border-radius-md);
 		cursor: pointer;
-		transition: all var(--transition-fast);
+		transition: background-color var(--transition-fast);
 		flex-shrink: 0;
 	}
 
-	.stop-button:hover {
-		opacity: 0.85;
+	.cancel-button:hover {
+		background: var(--color-bg-hover);
 	}
 
 	.keyboard-hint {
 		display: block;
-		padding: 0 var(--spacing-md) var(--spacing-xs);
-		font-size: var(--font-size-xs);
+		margin-top: var(--spacing-xs);
+		font-size: var(--font-size-2xs);
 		color: var(--color-text-tertiary);
-		text-align: right;
+		text-align: center;
 		pointer-events: none;
 	}
 </style>

@@ -20,6 +20,7 @@ Each section is now a separate route for better performance and UX.
 -->
 
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { Sidebar } from '$lib/components/layout';
 
 	import {
@@ -39,6 +40,7 @@ Each section is now a separate route for better performance and UX.
 	} from '@lucide/svelte';
 	import { i18n } from '$lib/i18n';
 	import { pauseOnScroll } from '$lib/actions/pauseOnScroll';
+	import { loadAllLLMData, testConnection } from '$lib/stores/llm';
 
 	/** Props from +layout.ts */
 	interface Props {
@@ -94,6 +96,86 @@ Each section is now a separate route for better performance and UX.
 		const section = sectionDefs.find((s) => pathname.startsWith(s.route));
 		return section?.id ?? 'providers';
 	});
+
+	/** Connectivity state shown for each provider in the sidebar footer. */
+	type ProviderState = 'unconfigured' | 'checking' | 'functional' | 'offline';
+
+	interface ProviderStatus {
+		id: string;
+		displayName: string;
+		state: ProviderState;
+	}
+
+	let providerStatuses = $state<ProviderStatus[]>([]);
+	let providersLoading = $state(true);
+
+	/** Maps a connectivity state to its localized label. */
+	function providerStateLabel(state: ProviderState): string {
+		switch (state) {
+			case 'functional':
+				return $i18n('settings_provider_state_functional');
+			case 'offline':
+				return $i18n('settings_provider_state_offline');
+			case 'checking':
+				return $i18n('settings_provider_state_checking');
+			default:
+				return $i18n('llm_provider_not_configured');
+		}
+	}
+
+	/** Replaces one provider's state immutably so the list stays reactive. */
+	function setProviderState(id: string, state: ProviderState): void {
+		providerStatuses = providerStatuses.map((p) => (p.id === id ? { ...p, state } : p));
+	}
+
+	// Load the provider list once when entering Settings (the layout persists
+	// across sub-route navigations, so this runs a single time). Configured
+	// providers are then probed concurrently and their dot upgrades to
+	// functional/offline as each result lands.
+	onMount(() => {
+		let active = true;
+
+		void (async () => {
+			try {
+				const data = await loadAllLLMData();
+				if (!active) return;
+				providerStatuses = data.providerList
+					.filter((p) => p.enabled)
+					.map((p): ProviderStatus => {
+						const configured =
+							!p.requiresApiKey || data.settings[p.id]?.api_key_configured === true;
+						return {
+							id: p.id,
+							displayName: p.displayName,
+							state: configured ? 'checking' : 'unconfigured'
+						};
+					});
+
+				// Failures are swallowed into 'offline' so one unreachable provider
+				// never rejects the whole batch.
+				await Promise.all(
+					providerStatuses
+						.filter((p) => p.state === 'checking')
+						.map(async ({ id }) => {
+							try {
+								const result = await testConnection(id);
+								if (active) setProviderState(id, result.success ? 'functional' : 'offline');
+							} catch {
+								if (active) setProviderState(id, 'offline');
+							}
+						})
+				);
+			} catch {
+				// Leave the panel empty on a hard load failure.
+			} finally {
+				if (active) providersLoading = false;
+			}
+		})();
+
+		return () => {
+			active = false;
+		};
+	});
 </script>
 
 <div class="settings-page">
@@ -146,13 +228,35 @@ Each section is now a separate route for better performance and UX.
 
 		{#snippet footer()}
 			{#if sidebarCollapsed}
-				<div class="security-badge-collapsed" title={$i18n('settings_security_badge')}>
-					<ShieldCheck size={20} />
+				<div class="providers-status providers-status-collapsed">
+					{#each providerStatuses as provider (provider.id)}
+						<span
+							class="provider-dot"
+							data-state={provider.state}
+							title={`${provider.displayName} — ${providerStateLabel(provider.state)}`}
+						></span>
+					{/each}
 				</div>
 			{:else}
-				<div class="security-badge">
-					<ShieldCheck size={16} />
-					<span class="security-text">{$i18n('settings_security_badge')}</span>
+				<div class="providers-status">
+					<span class="providers-status-title">{$i18n('settings_providers')}</span>
+					{#if providersLoading && providerStatuses.length === 0}
+						<span class="providers-status-empty">{$i18n('providers_loading')}</span>
+					{:else if providerStatuses.length === 0}
+						<span class="providers-status-empty">{$i18n('settings_providers_none')}</span>
+					{:else}
+						<ul class="providers-status-list">
+							{#each providerStatuses as provider (provider.id)}
+								<li class="provider-status-item">
+									<span class="provider-dot" data-state={provider.state}></span>
+									<span class="provider-status-name">{provider.displayName}</span>
+									<span class="provider-status-state" data-state={provider.state}>
+										{providerStateLabel(provider.state)}
+									</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 				</div>
 			{/if}
 		{/snippet}
@@ -171,6 +275,10 @@ Each section is now a separate route for better performance and UX.
 		min-width: 0;
 		min-height: 0;
 		overflow: hidden;
+		/* Detach the sidebar card from the viewport edges with a gutter + gap,
+		   matching the floating sidebar of the agent page. */
+		gap: var(--spacing-md);
+		padding: 0 var(--spacing-md) var(--spacing-md);
 	}
 
 	/* Sidebar */
@@ -183,7 +291,7 @@ Each section is now a separate route for better performance and UX.
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: var(--color-accent);
+		color: var(--color-accent-deep);
 		padding: var(--spacing-xs);
 	}
 
@@ -201,6 +309,7 @@ Each section is now a separate route for better performance and UX.
 	}
 
 	.nav-button {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: var(--spacing-md);
@@ -226,8 +335,21 @@ Each section is now a separate route for better performance and UX.
 
 	.nav-button.active {
 		background: var(--color-accent-light);
-		color: var(--color-accent);
-		font-weight: var(--font-weight-medium);
+		color: var(--color-accent-deep);
+		font-weight: var(--font-weight-semibold);
+	}
+
+	/* Glowing gradient bar marking the active section */
+	.nav-button.active::before {
+		content: '';
+		position: absolute;
+		left: -8px;
+		top: 20%;
+		bottom: 20%;
+		width: 3px;
+		border-radius: var(--border-radius-full);
+		background: var(--gradient-brand);
+		box-shadow: var(--glow-accent-soft);
 	}
 
 	.nav-button-icon {
@@ -253,31 +375,117 @@ Each section is now a separate route for better performance and UX.
 
 	.nav-button-icon.active {
 		background: var(--color-accent-light);
-		color: var(--color-accent);
+		color: var(--color-accent-deep);
 	}
 
-	.security-badge {
+	/* Provider connectivity panel (sidebar footer) */
+	.providers-status {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-sm);
+		width: 100%;
+	}
+
+	.providers-status-collapsed {
+		align-items: center;
+		gap: var(--spacing-sm);
+	}
+
+	.providers-status-title {
+		font-size: var(--font-size-2xs);
+		font-weight: var(--font-weight-semibold);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--color-text-tertiary);
+	}
+
+	.providers-status-empty {
+		font-size: var(--font-size-xs);
+		font-style: italic;
+		color: var(--color-text-tertiary);
+	}
+
+	.providers-status-list {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-2xs);
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.provider-status-item {
 		display: flex;
 		align-items: center;
 		gap: var(--spacing-sm);
-		padding: var(--spacing-sm);
-		background: var(--color-success-light);
-		border-radius: var(--border-radius-md);
-		color: var(--color-success);
-	}
-
-	.security-badge-collapsed {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--spacing-sm);
-		background: var(--color-success-light);
-		border-radius: var(--border-radius-md);
-		color: var(--color-success);
-	}
-
-	.security-text {
 		font-size: var(--font-size-xs);
+	}
+
+	.provider-status-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--color-text-secondary);
+	}
+
+	.provider-status-state {
+		flex-shrink: 0;
+		font-size: var(--font-size-2xs);
+		color: var(--color-text-tertiary);
+	}
+
+	.provider-status-state[data-state='functional'] {
+		color: var(--color-success);
+	}
+
+	.provider-status-state[data-state='offline'] {
+		color: var(--color-danger);
+	}
+
+	/* Glowing connectivity dot */
+	.provider-dot {
+		width: 8px;
+		height: 8px;
+		flex-shrink: 0;
+		border-radius: var(--border-radius-full);
+		background: var(--color-text-tertiary);
+	}
+
+	.provider-dot[data-state='unconfigured'] {
+		background: var(--color-text-tertiary);
+		opacity: 0.55;
+	}
+
+	.provider-dot[data-state='checking'] {
+		background: var(--color-accent-deep);
+	}
+
+	.provider-dot[data-state='functional'] {
+		background: var(--color-success);
+		box-shadow: 0 0 6px color-mix(in srgb, var(--color-success) 55%, transparent);
+	}
+
+	.provider-dot[data-state='offline'] {
+		background: var(--color-danger);
+		box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 45%, transparent);
+	}
+
+	@media (prefers-reduced-motion: no-preference) {
+		.provider-dot[data-state='checking'] {
+			animation: provider-dot-pulse 1.3s ease-in-out infinite;
+		}
+	}
+
+	@keyframes provider-dot-pulse {
+		0%,
+		100% {
+			opacity: 0.35;
+		}
+		50% {
+			opacity: 1;
+		}
 	}
 
 	/* Shared settings page styles (scoped to content area) */
@@ -302,19 +510,35 @@ Each section is now a separate route for better performance and UX.
 		overflow-y: auto;
 		padding: var(--spacing-xl);
 		-webkit-overflow-scrolling: touch;
+		/* Opaque background: a transparent scroll container over the body
+		   gradient forces WebKitGTK to repaint the whole visible area on
+		   every scrolled frame (it cannot blit the moving pixels), which made
+		   the settings pages scroll visibly slower than the chat or kanban
+		   surfaces, whose scroll containers are opaque. */
+		background: var(--color-bg-primary);
+		/* Promote the scroller for accelerated scrolling. Unlike the chat
+		   (whose animated rail nodes force composited layers, pulling its
+		   scroller onto the async path), settings pages have no composited
+		   descendant, so WebKitGTK keeps them on main-thread scrolling where
+		   every frame repaints shadowed cards. scroll-position is the one
+		   will-change value that does NOT create a containing block, so the
+		   fixed-position modal backdrops rendered inside the pages are safe. */
+		will-change: scroll-position;
 	}
 
-	/**
-	 * Disable pointer events during scroll
-	 * This prevents expensive hover state recalculations in WebKit2GTK
-	 * The technique is used by major apps like Twitter/X for smooth scrolling
-	 * Removed :global(*) selector - parent is sufficient
-	 */
-	/* The is-scrolling class is toggled at runtime by the pauseOnScroll
+	/* Disable pointer events on the CHILDREN during scroll to avoid expensive
+	   hover-state recalculations in WebKitGTK (Twitter/X technique). The
+	   is-scrolling class is toggled at runtime by the pauseOnScroll
 	   attachment, so it must be :global() or the compiler would prune the
-	   selector as unused. Disabling pointer events during scroll avoids
-	   expensive hover-state recalculations in WebKitGTK. */
-	.content-area:global(.is-scrolling) {
+	   selector as unused.
+
+	   NEVER put pointer-events: none on the scroll container itself: it makes
+	   the whole subtree transparent to hit-testing, so the wheel events that
+	   follow the first scrolled notch target the overflow:hidden ancestors
+	   and nothing scrolls until the 250 ms idle timer clears the class --
+	   the page then only advances one notch per ~250 ms window ("stuck,
+	   point-by-point" mouse-wheel scrolling). */
+	.content-area:global(.is-scrolling) > :global(*) {
 		pointer-events: none;
 	}
 </style>

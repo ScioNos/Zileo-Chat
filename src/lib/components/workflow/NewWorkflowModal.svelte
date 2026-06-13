@@ -205,6 +205,7 @@
 									</button>
 								{/each}
 							</div>
+							<p class="form-hint">{$i18n('workflow_modal_agent_hint')}</p>
 						{/if}
 					</div>
 				</div>
@@ -290,7 +291,7 @@
 	}
 
 	.modal-title-wrapper :global(.modal-icon) {
-		color: var(--color-accent);
+		color: var(--color-accent-deep);
 	}
 
 	.modal-title {

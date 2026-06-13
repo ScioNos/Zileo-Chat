@@ -12,7 +12,7 @@
 	import { getErrorMessage } from '$lib/utils/error';
 	import { locale } from '$lib/stores/locale';
 	import { Badge, Button, DeleteConfirmModal, Spinner } from '$lib/components/ui';
-	import { Activity, Check, X, Pencil } from '@lucide/svelte';
+	import { Activity, Bot, Check, Sparkles, X, Pencil, TriangleAlert } from '@lucide/svelte';
 
 	import { kanbanStore, kanbanCardsByColumn, kanbanCards } from '$lib/stores/kanban';
 	import {
@@ -31,6 +31,8 @@
 	import { agents as agentsStore, agentStore } from '$lib/stores/agents';
 	import { prompts as promptsStore, promptStore } from '$lib/stores/prompts';
 	import { folders as foldersStore, folderStore } from '$lib/stores/folders';
+	import { kanbanSupervisorStore, analyzeSupervisorId } from '$lib/stores/kanban-settings';
+	import { supervisorRoleState } from '$lib/utils/kanban-supervisors';
 	import { LocalStorage, STORAGE_KEYS } from '$lib/services/localStorage.service';
 
 	import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
@@ -119,6 +121,21 @@
 	/** Card ids currently being finalized by the Kanban agent (root store). */
 	const analyzingSet = $derived(new Set($analyzingCardIdsStore));
 
+	/** Ids of the live Kanban-kind agents, for the supervisor integrity check. */
+	const kanbanAgentIdSet = $derived(
+		new Set($agentsStore.filter((a) => a.kind === 'kanban').map((a) => a.id))
+	);
+	/**
+	 * True when a global analyze supervisor IS configured but no longer matches a
+	 * live Kanban agent (deleted / demoted). This silently breaks re-analyze and
+	 * the boot catch-up for cards already in review, so it warrants a board-level
+	 * banner — not just a nudge in the creator modal (State B / D8). The banner
+	 * clears itself once the configuration is fixed (reactive on both stores).
+	 */
+	const analyzeSupervisorDangling = $derived(
+		supervisorRoleState($analyzeSupervisorId, kanbanAgentIdSet) === 'dangling'
+	);
+
 	$effect(() => {
 		void kanbanStore.loadCards(agentFilter || undefined);
 	});
@@ -183,7 +200,8 @@
 				agentStore.loadAgents(),
 				promptStore.loadPrompts(),
 				folderStore.loadFolders(),
-				kanbanScheduleStore.loadSchedules()
+				kanbanScheduleStore.loadSchedules(),
+				kanbanSupervisorStore.load()
 			]);
 		} catch (e) {
 			pageError = getErrorMessage(e);
@@ -714,21 +732,28 @@
 <section class="kanban-page" aria-labelledby="kanban-title">
 	<header class="page-head">
 		<h1 id="kanban-title">{$i18n('kanban_page_title')}</h1>
-		<div class="head-right">
-			<div class="slot-indicators" aria-live="polite">
-				<Badge variant={slotVariant}>
-					<Activity size={11} aria-hidden="true" />
-					{$i18n('kanban_slot_active', {
-						used: String(slotsUsed),
-						max: slotCapacity !== null ? String(slotCapacity) : '—'
-					})}
+		<div class="slot-indicators" aria-live="polite">
+			<Badge variant={slotVariant}>
+				<Activity size={11} aria-hidden="true" />
+				{$i18n('kanban_slot_active', {
+					used: String(slotsUsed),
+					max: slotCapacity !== null ? String(slotCapacity) : '—'
+				})}
+			</Badge>
+			{#if queuedReady > 0}
+				<Badge variant="primary">
+					{$i18n('kanban_slot_queued', { count: String(queuedReady) })}
 				</Badge>
-				{#if queuedReady > 0}
-					<Badge variant="primary">
-						{$i18n('kanban_slot_queued', { count: String(queuedReady) })}
-					</Badge>
-				{/if}
-			</div>
+			{/if}
+		</div>
+		<div class="head-right">
+			<KanbanFiltres
+				agents={$agentsStore}
+				folders={$foldersStore}
+				selectedAgentId={agentFilter}
+				selectedFolderId={folderFilter}
+				onchange={handleFilterChange}
+			/>
 		</div>
 	</header>
 
@@ -736,17 +761,22 @@
 		<p class="page-error" role="alert">{pageError}</p>
 	{/if}
 
-	<KanbanFiltres
-		agents={$agentsStore}
-		folders={$foldersStore}
-		selectedAgentId={agentFilter}
-		selectedFolderId={folderFilter}
-		onchange={handleFilterChange}
-	/>
+	{#if analyzeSupervisorDangling}
+		<p class="supervisor-banner" role="alert">
+			<TriangleAlert size={16} aria-hidden="true" />
+			<span class="supervisor-banner-text">
+				{$i18n('kanban_supervisor_analyze_dangling_board')}
+			</span>
+			<a class="supervisor-banner-link" href="/settings/kanban">
+				{$i18n('kanban_supervisor_configure_link')}
+			</a>
+		</p>
+	{/if}
 
 	{#if hasComposeActivity}
 		<section class="proposed-zone" aria-labelledby="proposed-zone-title">
 			<h2 id="proposed-zone-title" class="proposed-zone-title">
+				<Sparkles size={16} aria-hidden="true" />
 				{$i18n('kanban_proposed_zone_title')}
 			</h2>
 
@@ -762,36 +792,41 @@
 				</article>
 			{/each}
 
-			{#each proposedCards as card (card.id)}
-				<article class="proposed-card">
-					<div class="proposed-card-main">
-						<div class="proposed-card-head">
-							<h3 class="proposed-card-title">{card.title}</h3>
-							<Badge variant="warning">{$i18n('kanban_proposed_badge')}</Badge>
-						</div>
-						{#if agentName(card.target_agent_id)}
-							<p class="proposed-card-meta">{agentName(card.target_agent_id)}</p>
-						{/if}
-						{#if card.description}
-							<p class="proposed-card-desc">{card.description}</p>
-						{/if}
-					</div>
-					<div class="proposed-card-actions">
-						<Button variant="primary" size="sm" onclick={() => approveProposedCard(card)}>
-							<Check size={14} />
-							{$i18n('kanban_proposed_validate')}
-						</Button>
-						<Button variant="secondary" size="sm" onclick={() => openEdit(card)}>
-							<Pencil size={14} />
-							{$i18n('kanban_proposed_review')}
-						</Button>
-						<Button variant="ghost" size="sm" onclick={() => rejectProposedCard(card)}>
-							<X size={14} />
-							{$i18n('kanban_proposed_reject')}
-						</Button>
-					</div>
-				</article>
-			{/each}
+			{#if proposedCards.length > 0}
+				<div class="proposed-cards">
+					{#each proposedCards as card (card.id)}
+						<article class="proposed-card">
+							<div class="proposed-card-head">
+								<h3 class="proposed-card-title">{card.title}</h3>
+								<Badge variant="warning">{$i18n('kanban_proposed_badge')}</Badge>
+							</div>
+							{#if agentName(card.target_agent_id)}
+								<p class="proposed-card-meta">
+									<Bot size={13} aria-hidden="true" />
+									{agentName(card.target_agent_id)}
+								</p>
+							{/if}
+							{#if card.description}
+								<p class="proposed-card-desc">{card.description}</p>
+							{/if}
+							<div class="proposed-card-actions">
+								<Button variant="primary" size="sm" onclick={() => approveProposedCard(card)}>
+									<Check size={14} />
+									{$i18n('kanban_proposed_validate')}
+								</Button>
+								<Button variant="outline" size="sm" onclick={() => openEdit(card)}>
+									<Pencil size={14} />
+									{$i18n('kanban_proposed_review')}
+								</Button>
+								<Button variant="ghost" size="sm" onclick={() => rejectProposedCard(card)}>
+									<X size={14} />
+									{$i18n('kanban_proposed_reject')}
+								</Button>
+							</div>
+						</article>
+					{/each}
+				</div>
+			{/if}
 		</section>
 	{/if}
 
@@ -910,11 +945,13 @@
 		flex: 1;
 		min-width: 0;
 	}
+	/* Single header row, mock layout: title + live badges inline, filter
+	   selects pushed to the far right. */
 	.page-head {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
 		gap: 0.75rem;
+		flex-wrap: wrap;
 	}
 	.page-head h1 {
 		margin: 0;
@@ -923,8 +960,9 @@
 	.head-right {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
+		gap: 0.5rem;
 		flex-wrap: wrap;
+		margin-left: auto;
 	}
 	.slot-indicators {
 		display: flex;
@@ -935,23 +973,55 @@
 		color: var(--color-error);
 		margin: 0;
 	}
+	/* Integrity banner: the configured analyze supervisor no longer exists. Amber
+	   warning surface, non-dismissible (clears itself once reconfigured). */
+	.supervisor-banner {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+		margin: 0;
+		padding: var(--spacing-sm) var(--spacing-md);
+		font-size: var(--font-size-sm);
+		color: var(--color-warning);
+		background: var(--color-warning-bg);
+		border: 1px solid var(--color-warning);
+		border-radius: var(--border-radius-md);
+	}
+	.supervisor-banner :global(svg) {
+		flex-shrink: 0;
+	}
+	.supervisor-banner-text {
+		flex: 1;
+		min-width: 0;
+	}
+	.supervisor-banner-link {
+		flex-shrink: 0;
+		font-weight: var(--font-weight-medium);
+		color: inherit;
+		text-decoration: underline;
+	}
+	/* Review zone on the site's signature cream surface, with a dashed brand
+	   border and a soft halo so proposed cards read as "awaiting a decision". */
 	.proposed-zone {
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
-		padding: 0.75rem;
-		/* Blue like the "Tableau de tâches" button (project blue), dark text —
-		   reuses the existing accent tokens. */
-		border: 1px solid var(--color-accent-hover);
-		border-radius: 8px;
-		background: var(--color-accent-hover);
-		color: var(--color-accent-text);
+		padding: var(--spacing-md);
+		border: 1px dashed var(--color-accent-hover);
+		border-radius: var(--border-radius-lg);
+		background: var(--surface-cream);
+		box-shadow: var(--glow-accent-soft);
+		color: var(--color-text-primary);
 	}
 	.proposed-zone-title {
 		margin: 0;
-		font-size: var(--font-size-base);
-		font-weight: 600;
-		color: var(--color-accent-text);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: var(--font-size-sm);
+		font-weight: var(--font-weight-semibold);
+		color: var(--color-accent-deep);
 	}
 	.composing-row {
 		display: flex;
@@ -959,45 +1029,53 @@
 		gap: 0.5rem;
 		font-size: var(--font-size-xs);
 		font-style: italic;
-		color: var(--color-accent-text);
+		color: var(--color-accent-deep);
+	}
+	/* Proposed cards as board-style vignettes: grid of cards carrying the
+	   brand-accent side rib (mirrors the column cards' status rib). */
+	.proposed-cards {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+		gap: 0.5rem;
 	}
 	.proposed-card {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 0.75rem;
-		padding: 0.6rem 0.7rem;
-		background: var(--color-bg-primary);
-		color: var(--color-text-primary);
-		border: 1px solid var(--color-border);
-		border-radius: 6px;
-	}
-	.proposed-card-main {
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
 		min-width: 0;
+		padding: 0.6rem 0.75rem;
+		background: var(--surface-1);
+		color: var(--color-text-primary);
+		border: 1px solid var(--color-border);
+		border-left: 3px solid var(--color-accent-deep);
+		border-radius: var(--border-radius-md);
+		box-shadow: var(--shadow-xs);
 	}
 	.proposed-card-head {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 0.5rem;
-		flex-wrap: wrap;
 	}
 	.proposed-card-title {
 		margin: 0;
+		flex: 1;
+		min-width: 0;
 		font-size: var(--font-size-sm);
 		font-weight: 600;
+		line-height: 1.35;
 	}
 	.proposed-card-meta {
 		margin: 0;
-		font-size: var(--font-size-xs);
-		color: var(--color-text-muted);
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: var(--font-size-2xs);
+		color: var(--color-text-tertiary);
 	}
 	.proposed-card-desc {
 		margin: 0;
 		font-size: var(--font-size-xs);
-		color: var(--color-text);
+		color: var(--color-text-secondary);
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
 		line-clamp: 3;
@@ -1006,7 +1084,9 @@
 	}
 	.proposed-card-actions {
 		display: flex;
-		gap: 0.4rem;
-		flex-shrink: 0;
+		flex-wrap: wrap;
+		gap: 0.25rem;
+		justify-content: flex-end;
+		margin-top: 0.35rem;
 	}
 </style>

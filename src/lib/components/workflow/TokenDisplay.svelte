@@ -320,14 +320,18 @@
 </div>
 
 <style>
-	/* Main container - follows MetricsBar pattern */
+	/* Main container: translucent rounded bar, same family as the dock */
 	.token-display {
 		display: flex;
 		align-items: center;
 		gap: var(--spacing-md);
 		padding: var(--spacing-sm) var(--spacing-md);
-		background: var(--color-bg-secondary);
-		border-top: 1px solid var(--color-border);
+		background: var(--surface-overlay);
+		backdrop-filter: blur(10px);
+		-webkit-backdrop-filter: blur(10px);
+		border: 1px solid var(--color-border);
+		border-radius: var(--border-radius-lg);
+		box-shadow: var(--shadow-xs);
 		font-size: var(--font-size-xs);
 		flex-wrap: wrap;
 	}
@@ -387,7 +391,7 @@
 	}
 
 	.context-icon {
-		color: var(--color-accent);
+		color: var(--color-accent-deep);
 	}
 
 	.context-icon.warning {
@@ -400,7 +404,7 @@
 	}
 
 	.cost-icon {
-		color: var(--color-secondary);
+		color: var(--color-secondary-deep);
 	}
 
 	.speed-icon {
@@ -441,7 +445,7 @@
 
 	/* Context Progress Section */
 	.context-metric {
-		min-width: 140px;
+		min-width: 170px;
 	}
 
 	.compact .context-metric {
@@ -481,18 +485,15 @@
 		height: 6px;
 	}
 
+	/* Healthy context gauge: site green flowing into the brand turquoise */
 	.progress-fill {
 		height: 100%;
-		background: linear-gradient(
-			90deg,
-			var(--color-success),
-			color-mix(in srgb, var(--color-success) 80%, var(--color-accent))
-		);
+		background: linear-gradient(90deg, var(--color-online), var(--color-accent-hover));
 		border-radius: var(--border-radius-full);
 		transition:
 			width var(--transition-base),
 			background var(--transition-base);
-		box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 50%, transparent);
+		box-shadow: 0 0 4px rgba(74, 222, 128, 0.5);
 	}
 
 	.progress-fill.warning {
@@ -540,7 +541,7 @@
 	.cost-value {
 		font-family: var(--font-mono);
 		font-weight: var(--font-weight-semibold);
-		color: var(--color-secondary);
+		color: var(--color-secondary-deep);
 	}
 
 	/* Option A: a workflow that's still progressing reports a partial cost.
@@ -577,7 +578,7 @@
 	.speed-metric {
 		gap: 2px;
 		padding: var(--spacing-xs) var(--spacing-sm);
-		background: color-mix(in srgb, var(--color-status-running) 15%, transparent);
+		background: var(--color-info-light);
 		border-radius: var(--border-radius-md);
 	}
 
@@ -619,7 +620,7 @@
 	}
 
 	.details-toggle.open {
-		color: var(--color-accent);
+		color: var(--color-accent-deep);
 		transform: rotate(180deg);
 	}
 
@@ -635,8 +636,8 @@
 		gap: 2px;
 		margin-top: var(--spacing-xs);
 		padding: var(--spacing-xs) var(--spacing-sm);
-		background: var(--color-bg-primary);
-		border: 1px solid var(--color-border);
+		background: var(--surface-2);
+		border: 1px solid var(--color-border-light);
 		border-radius: var(--border-radius-md);
 		font-family: var(--font-mono);
 	}
@@ -670,29 +671,29 @@
 	}
 
 	.details-cost {
-		color: var(--color-secondary);
+		color: var(--color-secondary-deep);
 	}
 
 	.cache-rate {
 		font-size: var(--font-size-2xs);
 		font-weight: var(--font-weight-semibold);
-		padding: 1px 4px;
+		padding: 1px 6px;
 		border-radius: var(--border-radius-sm);
 	}
 
 	.cache-rate-high {
 		color: var(--color-success);
-		background: color-mix(in srgb, var(--color-success) 15%, transparent);
+		background: var(--color-success-light);
 	}
 
 	.cache-rate-medium {
 		color: var(--color-warning);
-		background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+		background: var(--color-warning-light);
 	}
 
 	.cache-rate-low {
 		color: var(--color-text-tertiary);
-		background: color-mix(in srgb, var(--color-text-tertiary) 10%, transparent);
+		background: var(--color-bg-tertiary);
 	}
 
 	/* Animations */

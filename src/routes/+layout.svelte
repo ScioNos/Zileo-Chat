@@ -26,6 +26,7 @@
 	} from '$lib/tauri';
 	import '../styles/global.css';
 	import { theme } from '$lib/stores/theme';
+	import { uiZoom, zoomActionForKey } from '$lib/stores/ui-zoom';
 	import { localeStore } from '$lib/stores/locale';
 	import { onboardingStore } from '$lib/stores/onboarding';
 	import { i18n } from '$lib/i18n';
@@ -43,6 +44,11 @@
 	import { kanbanEventsStore } from '$lib/stores/kanban-events';
 	import { composingStore } from '$lib/stores/kanban-compose';
 	import { cardCreatorStore, cardCreatorOpen } from '$lib/stores/card-creator';
+	import {
+		kanbanSupervisorStore,
+		composeSupervisorId,
+		analyzeSupervisorId
+	} from '$lib/stores/kanban-settings';
 	import { kanbanStore } from '$lib/stores/kanban';
 	import { kanbanScheduleStore } from '$lib/stores/kanban-schedule';
 	import { agents as agentsStore, agentStore } from '$lib/stores/agents';
@@ -62,6 +68,9 @@
 			void agentStore.loadAgents();
 			void promptStore.loadPrompts();
 			void folderStore.loadFolders();
+			// Global supervisor ids drive the creator's compose/analyze nudges + the
+			// D7 locked compose select; refresh them each time the modal opens.
+			void kanbanSupervisorStore.load();
 		}
 	});
 
@@ -186,6 +195,9 @@
 		}
 
 		theme.init();
+		// Re-apply the persisted UI zoom: the native webview zoom resets to 100%
+		// on every app launch, so the saved factor must be pushed back on startup.
+		uiZoom.init();
 		localeStore.init();
 
 		// Initialise the background workflows store at the app root so its
@@ -292,7 +304,22 @@
 	function handleOnboardingComplete(): void {
 		showOnboarding = false;
 	}
+
+	/**
+	 * Global zoom shortcuts (Ctrl/Cmd + + / - / 0). `preventDefault` is required
+	 * so WebKitGTK does not fire its own native zoom on top of ours, which would
+	 * double-apply and desync from the persisted factor.
+	 */
+	function handleZoomKeydown(event: KeyboardEvent): void {
+		const action = zoomActionForKey(event);
+		if (action) {
+			event.preventDefault();
+			uiZoom.step(action);
+		}
+	}
 </script>
+
+<svelte:window onkeydown={handleZoomKeydown} />
 
 <svelte:head>
 	<!-- Fonts self-hosted in /static/fonts/ (no external CDN dependency) -->
@@ -348,6 +375,8 @@
 	agents={$agentsStore}
 	prompts={$promptsStore}
 	folders={$foldersStore}
+	composeAgentId={$composeSupervisorId}
+	analyzeAgentId={$analyzeSupervisorId}
 	onclose={() => cardCreatorStore.close()}
 	oncreated={handleGlobalCardCreated}
 />
