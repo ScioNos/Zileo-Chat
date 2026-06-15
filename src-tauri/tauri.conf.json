@@ -1,4 +1,5 @@
 {
+	"$schema": "https://schema.tauri.app/config/2",
 	"productName": "Zileo-Chat",
 	"version": "0.28.0",
 	"identifier": "com.zileo.chat",
