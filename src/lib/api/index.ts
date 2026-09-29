@@ -15,16 +15,18 @@
  */
 
 /**
- * Store factory exports
- * @module stores/factory
+ * @fileoverview Typed Tauri API clients, by domain.
+ *
+ * UI code (components, routes, stores, services) must call these functions
+ * instead of invoking Tauri command names directly via `tauriInvoke`.
+ *
+ * @module lib/api
  */
 
-export {
-	createCRUDStore,
-	createDerivedStores,
-	type CRUDStoreState,
-	type CRUDEndpoints,
-	type CRUDStoreConfig,
-	type CRUDStore,
-	type CRUDDerivedStores
-} from './createCRUDStore';
+export * from './agents.api';
+export * from './workflows.api';
+export * from './kanban.api';
+export * from './scheduler.api';
+export * from './memory.api';
+export * from './mcp.api';
+export * from './settings.api';
