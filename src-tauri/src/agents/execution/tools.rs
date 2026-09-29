@@ -31,9 +31,9 @@ pub(crate) mod dispatcher;
 pub(crate) mod factory;
 pub(crate) mod governance;
 pub(crate) mod permissions;
-pub(crate) mod validation;
 #[cfg(test)]
 mod tests;
+pub(crate) mod validation;
 
 pub(crate) use collection::*;
 pub(crate) use definitions::*;

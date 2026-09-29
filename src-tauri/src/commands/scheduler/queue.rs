@@ -20,7 +20,6 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-
 /// Reads every enabled schedule whose `next_run_at` is in the past and
 /// materialises a new card per template. Returns the number of cards created.
 ///

@@ -12,12 +12,11 @@
 //!    them up and start the workflow.
 //!
 //! Orphan / stuck / stale card recovery and cleanup.
+use super::service::mark_card_done_core;
+use super::DONE_CARD_TTL_DAYS;
 use crate::db::DBClient;
 use serde_json::json;
 use std::sync::Arc;
-use super::service::mark_card_done_core;
-use super::DONE_CARD_TTL_DAYS;
-
 
 /// Safety net for orphaned `doing` cards (K1): a card promoted to `doing`
 /// whose `kanban:card_ready` event was lost (no /kanban page mounted to consume

@@ -16,7 +16,6 @@ use crate::db::DBClient;
 use serde_json::json;
 use std::sync::Arc;
 
-
 /// Convenience helper used by the workflow-complete listener: when a workflow
 /// finishes (success or failure), the card linked to it transitions to the
 /// `review` column with the matching status, so the user can verify the

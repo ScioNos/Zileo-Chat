@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //! Runners: `execute_simple` and the full `execute_with_tools` loop.
+use super::context::ToolLoopContext;
+use super::init::build_initial_messages;
+use super::metrics::{PricingCache, TokenTracker};
+use super::policy::{load_supports_forced_tool_choice, tool_choice_for_iteration};
 use crate::agents::core::agent::{
     ReasoningSource, ReasoningStepData, Report, ReportMetrics, ReportStatus, Task,
     ToolExecutionData,
@@ -35,16 +39,10 @@ use crate::models::function_calling::ToolChoiceMode;
 use crate::models::streaming::StreamChunk;
 use crate::models::workflow::IterationMetrics;
 use crate::models::AgentConfig;
-use crate::tools::{
-    context::AgentToolContext, validation_helper::ValidationHelper, Tool,
-};
+use crate::tools::{context::AgentToolContext, validation_helper::ValidationHelper, Tool};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use super::context::ToolLoopContext;
-use super::init::build_initial_messages;
-use super::metrics::{PricingCache, TokenTracker};
-use super::policy::{load_supports_forced_tool_choice, tool_choice_for_iteration};
 
 /// Executes a task without tools (simple LLM completion).
 ///

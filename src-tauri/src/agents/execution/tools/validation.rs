@@ -14,16 +14,14 @@
 //! *Manager ownership checks and the central write gate.
 use super::definitions::FunctionCallContext;
 use super::governance::{
-    classify_manager_op, manager_op_risk, ManagerWriteAction, ManagerWriteRefusal,
-    manager_write_action,
+    classify_manager_op, manager_op_risk, manager_write_action, ManagerWriteAction,
+    ManagerWriteRefusal,
 };
 use crate::constants::validation::MANAGER_MAX_WRITES_PER_RUN;
 use crate::db::DBClient;
 use crate::models::function_calling::{FunctionCall, FunctionCallResult};
 use crate::models::ValidationType;
-use crate::tools::{
-    validation_helper::should_require_validation, Tool,
-};
+use crate::tools::{validation_helper::should_require_validation, Tool};
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -76,7 +74,11 @@ pub(crate) async fn manager_owns_target(
 /// labeled untrusted on the frontend. The whole object is run through
 /// `sanitize_for_surrealdb` BEFORE `create_and_wait_validation` because
 /// `db.create` does NOT sanitize (a `\0` would panic).
-pub(crate) fn build_manager_validation_details(tool_id: &str, operation: &str, args: &Value) -> Value {
+pub(crate) fn build_manager_validation_details(
+    tool_id: &str,
+    operation: &str,
+    args: &Value,
+) -> Value {
     // Pick the most informative free-text arg for the preview, if present.
     let preview_src = ["content", "new_name", "name", "skill_name", "edit_summary"]
         .iter()
@@ -111,7 +113,11 @@ pub(crate) fn manager_target_discriminant(args: &Value) -> String {
 }
 
 /// Stable, secret-free refusal message for a `ManagerWriteRefusal`.
-pub(crate) fn manager_refusal_message(reason: ManagerWriteRefusal, tool_id: &str, op: &str) -> String {
+pub(crate) fn manager_refusal_message(
+    reason: ManagerWriteRefusal,
+    tool_id: &str,
+    op: &str,
+) -> String {
     match reason {
         ManagerWriteRefusal::Scope => format!(
             "Refused: this agent may only modify its OWN skills (operation '{}' on {} targets a \

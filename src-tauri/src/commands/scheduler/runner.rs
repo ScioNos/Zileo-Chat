@@ -12,6 +12,10 @@
 //!    them up and start the workflow.
 //!
 //! Background task spawner: the 60s tick loop.
+use super::concurrency::start_next_pending_card_core;
+use super::queue::process_due_schedules_core;
+use super::recovery::{purge_stale_done_cards_core, reclaim_orphaned_doing_cards_core};
+use super::{ORPHAN_DOING_GRACE_SECS, SCHEDULER_TICK_SECS};
 use crate::db::DBClient;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,11 +24,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
-use super::concurrency::start_next_pending_card_core;
-use super::queue::process_due_schedules_core;
-use super::recovery::{purge_stale_done_cards_core, reclaim_orphaned_doing_cards_core};
-use super::{ORPHAN_DOING_GRACE_SECS, SCHEDULER_TICK_SECS};
-
 
 /// Spawns the kanban scheduler task. The returned handle is parked in
 /// [`crate::state::AppState`] so the runtime owns it and shutdown can

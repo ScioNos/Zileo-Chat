@@ -37,7 +37,8 @@ use crate::models::RiskLevel;
 pub(crate) const PROMPT_MANAGER_WRITE_OPS: &[&str] = &["create_prompt", "update_prompt"];
 pub(crate) const SKILL_MANAGER_CONTENT_WRITE_OPS: &[&str] =
     &["create_skill", "update_skill", "restore_skill_version"];
-pub(crate) const SKILL_MANAGER_PRIVILEGE_OPS: &[&str] = &["grant_skill_to_agent", "revoke_skill_from_agent"];
+pub(crate) const SKILL_MANAGER_PRIVILEGE_OPS: &[&str] =
+    &["grant_skill_to_agent", "revoke_skill_from_agent"];
 pub(crate) const WORKFLOW_MANAGER_WRITE_OPS: &[&str] = &[
     "rename_workflow",
     "create_workflow_folder",

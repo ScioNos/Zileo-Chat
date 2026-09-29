@@ -56,7 +56,11 @@ pub(crate) fn tool_choice_for_iteration(
 /// `api_name` with different capabilities, so an unscoped lookup would trust
 /// the wrong row. Provider strings are compared lowercase to match how the
 /// front-end persists them.
-pub(crate) async fn load_supports_forced_tool_choice(db: &DBClient, api_name: &str, provider: &str) -> bool {
+pub(crate) async fn load_supports_forced_tool_choice(
+    db: &DBClient,
+    api_name: &str,
+    provider: &str,
+) -> bool {
     let query = "SELECT (supports_forced_tool_choice ?? true) AS supports_forced_tool_choice \
          FROM llm_model \
          WHERE api_name = $api_name \

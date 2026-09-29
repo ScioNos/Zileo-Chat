@@ -42,7 +42,10 @@ pub fn get_max_concurrent_workflows() -> usize {
 /// for one card. The `WHERE status='ready'` guard makes the flip the single
 /// atomic gate: only the first UPDATE matches; the rest return zero rows and
 /// MUST NOT emit `card_ready`.
-pub(crate) async fn try_claim_pending_card_core(db: &Arc<DBClient>, card_id: &str) -> Result<bool, String> {
+pub(crate) async fn try_claim_pending_card_core(
+    db: &Arc<DBClient>,
+    card_id: &str,
+) -> Result<bool, String> {
     // card_id comes from `meta::id(id)` of a prior SELECT (trusted clean UUID),
     // so format! is safe here (security rules: validated record ids).
     let q = format!(
